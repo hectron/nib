@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 
-use crate::backend::{Priority, Span};
+use crate::backend::{EventQuery, NewNote, NewReminder, NoteQuery, Priority, Span};
 
 /// Fast CLI for Apple Notes, Reminders, and Calendar
 #[derive(Debug, Parser)]
@@ -16,22 +16,11 @@ pub struct Cli {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    NewNote {
-        title: String,
-        folder: Option<String>,
-    },
-    ListNotes {
-        folder: Option<String>,
-    },
-    AddTask {
-        title: String,
-        due: Option<String>,
-        priority: Option<Priority>,
-    },
+    NewNote(NewNote),
+    ListNotes(NoteQuery),
+    AddTask(NewReminder),
     ListTasks,
-    ListEvents {
-        span: Span,
-    },
+    ListEvents(EventQuery),
 }
 
 #[derive(Debug, Subcommand)]
@@ -154,11 +143,11 @@ fn word(s: &str) -> Result<String, &'static str> {
 
 impl TaskOpts {
     fn add(self, title: String) -> Action {
-        Action::AddTask {
+        Action::AddTask(NewReminder {
             title,
             due: self.due,
             priority: self.priority,
-        }
+        })
     }
 }
 
@@ -169,23 +158,23 @@ impl Command {
                 action,
                 folder: Folder { folder },
             }) => match action {
-                Some(NoteAction::New(Title { words })) => Action::NewNote {
+                Some(NoteAction::New(Title { words })) => Action::NewNote(NewNote {
                     title: words.join(" "),
                     folder,
-                },
-                Some(NoteAction::List) | None => Action::ListNotes { folder },
+                }),
+                Some(NoteAction::List) | None => Action::ListNotes(NoteQuery { folder }),
             },
             Command::N(NoteCapture {
                 words,
                 folder: Folder { folder },
             }) => {
                 if words.is_empty() {
-                    Action::ListNotes { folder }
+                    Action::ListNotes(NoteQuery { folder })
                 } else {
-                    Action::NewNote {
+                    Action::NewNote(NewNote {
                         title: words.join(" "),
                         folder,
-                    }
+                    })
                 }
             }
             Command::Task(TaskArgs { action }) => match action {
@@ -203,9 +192,9 @@ impl Command {
                 }
             }
             Command::Cal(CalArgs { action, week }) => match action {
-                Some(CalAction::List) | None => Action::ListEvents {
+                Some(CalAction::List) | None => Action::ListEvents(EventQuery {
                     span: if week { Span::Week } else { Span::Day },
-                },
+                }),
             },
         }
     }
@@ -229,24 +218,24 @@ mod tests {
     }
 
     fn note(title: &str, folder: Option<&str>) -> Action {
-        Action::NewNote {
+        Action::NewNote(NewNote {
             title: title.into(),
             folder: folder.map(Into::into),
-        }
+        })
     }
 
     fn notes(folder: Option<&str>) -> Action {
-        Action::ListNotes {
+        Action::ListNotes(NoteQuery {
             folder: folder.map(Into::into),
-        }
+        })
     }
 
     fn task(title: &str, due: Option<&str>, priority: Option<Priority>) -> Action {
-        Action::AddTask {
+        Action::AddTask(NewReminder {
             title: title.into(),
             due: due.map(Into::into),
             priority,
-        }
+        })
     }
 
     #[test]
@@ -303,8 +292,8 @@ mod tests {
 
     #[test]
     fn cal_commands() {
-        let day = || Action::ListEvents { span: Span::Day };
-        let week = || Action::ListEvents { span: Span::Week };
+        let day = || Action::ListEvents(EventQuery { span: Span::Day });
+        let week = || Action::ListEvents(EventQuery { span: Span::Week });
         assert_parses(&[
             (&["c"], day()),
             (&["cal", "--json", "list"], day()),

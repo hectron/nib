@@ -7,22 +7,11 @@ use crate::output::{self, Style};
 pub fn run(cli: Cli, backends: &Backends, style: Style) -> Result<String> {
     let json = cli.json;
     match cli.command.into_action() {
-        Action::NewNote { title, folder } => {
-            output::single(&backends.notes.create(&title, folder.as_deref())?, json)
-        }
-        Action::ListNotes { folder } => {
-            output::list(&backends.notes.list(folder.as_deref())?, json, style)
-        }
-        Action::AddTask {
-            title,
-            due,
-            priority,
-        } => output::single(
-            &backends.reminders.add(&title, due.as_deref(), priority)?,
-            json,
-        ),
+        Action::NewNote(note) => output::single(&backends.notes.create(note)?, json),
+        Action::ListNotes(query) => output::list(&backends.notes.list(query)?, json, style),
+        Action::AddTask(reminder) => output::single(&backends.reminders.add(reminder)?, json),
         Action::ListTasks => output::list(&backends.reminders.list()?, json, style),
-        Action::ListEvents { span } => output::list(&backends.calendar.events(span)?, json, style),
+        Action::ListEvents(query) => output::list(&backends.calendar.events(query)?, json, style),
     }
 }
 
@@ -32,19 +21,22 @@ mod tests {
     use insta::assert_snapshot;
 
     use super::*;
-    use crate::backend::{Calendar, Event, Note, Notes, Priority, Reminder, Reminders, Span};
+    use crate::backend::{
+        Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes, Priority,
+        Reminder, Reminders, Span,
+    };
 
     struct Fake;
 
     impl Notes for Fake {
-        fn create(&self, title: &str, folder: Option<&str>) -> Result<Note> {
+        fn create(&self, note: NewNote) -> Result<Note> {
             Ok(Note {
-                title: title.into(),
-                folder: folder.map(Into::into),
+                title: note.title,
+                folder: note.folder,
             })
         }
 
-        fn list(&self, folder: Option<&str>) -> Result<Vec<Note>> {
+        fn list(&self, query: NoteQuery) -> Result<Vec<Note>> {
             let notes = [
                 ("Groceries", "Personal"),
                 ("Q4 planning", "Work"),
@@ -52,7 +44,7 @@ mod tests {
             ];
             Ok(notes
                 .into_iter()
-                .filter(|(_, f)| folder.is_none_or(|want| want == *f))
+                .filter(|(_, f)| query.folder.as_deref().is_none_or(|want| want == *f))
                 .map(|(title, f)| Note {
                     title: title.into(),
                     folder: Some(f.into()),
@@ -62,16 +54,11 @@ mod tests {
     }
 
     impl Reminders for Fake {
-        fn add(
-            &self,
-            title: &str,
-            due: Option<&str>,
-            priority: Option<Priority>,
-        ) -> Result<Reminder> {
+        fn add(&self, reminder: NewReminder) -> Result<Reminder> {
             Ok(Reminder {
-                title: title.into(),
-                due: due.map(Into::into),
-                priority,
+                title: reminder.title,
+                due: reminder.due,
+                priority: reminder.priority,
             })
         }
 
@@ -92,12 +79,12 @@ mod tests {
     }
 
     impl Calendar for Fake {
-        fn events(&self, span: Span) -> Result<Vec<Event>> {
+        fn events(&self, query: EventQuery) -> Result<Vec<Event>> {
             let mut events = vec![Event {
                 title: "Team sync".into(),
                 start: "2026-10-26 10:00".into(),
             }];
-            if span == Span::Week {
+            if query.span == Span::Week {
                 events.push(Event {
                     title: "Design review".into(),
                     start: "2026-10-29 14:30".into(),

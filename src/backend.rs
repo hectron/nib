@@ -44,18 +44,41 @@ pub enum Span {
     Week,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewNote {
+    pub title: String,
+    pub folder: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteQuery {
+    pub folder: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewReminder {
+    pub title: String,
+    pub due: Option<String>,
+    pub priority: Option<Priority>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventQuery {
+    pub span: Span,
+}
+
 pub trait Notes {
-    fn create(&self, title: &str, folder: Option<&str>) -> Result<Note>;
-    fn list(&self, folder: Option<&str>) -> Result<Vec<Note>>;
+    fn create(&self, note: NewNote) -> Result<Note>;
+    fn list(&self, query: NoteQuery) -> Result<Vec<Note>>;
 }
 
 pub trait Reminders {
-    fn add(&self, title: &str, due: Option<&str>, priority: Option<Priority>) -> Result<Reminder>;
+    fn add(&self, reminder: NewReminder) -> Result<Reminder>;
     fn list(&self) -> Result<Vec<Reminder>>;
 }
 
 pub trait Calendar {
-    fn events(&self, span: Span) -> Result<Vec<Event>>;
+    fn events(&self, query: EventQuery) -> Result<Vec<Event>>;
 }
 
 pub struct Backends {
@@ -87,17 +110,17 @@ impl Unimplemented {
 }
 
 impl Notes for Unimplemented {
-    fn create(&self, _: &str, _: Option<&str>) -> Result<Note> {
+    fn create(&self, _: NewNote) -> Result<Note> {
         self.fail()
     }
 
-    fn list(&self, _: Option<&str>) -> Result<Vec<Note>> {
+    fn list(&self, _: NoteQuery) -> Result<Vec<Note>> {
         self.fail()
     }
 }
 
 impl Reminders for Unimplemented {
-    fn add(&self, _: &str, _: Option<&str>, _: Option<Priority>) -> Result<Reminder> {
+    fn add(&self, _: NewReminder) -> Result<Reminder> {
         self.fail()
     }
 
@@ -107,7 +130,7 @@ impl Reminders for Unimplemented {
 }
 
 impl Calendar for Unimplemented {
-    fn events(&self, _: Span) -> Result<Vec<Event>> {
+    fn events(&self, _: EventQuery) -> Result<Vec<Event>> {
         self.fail()
     }
 }
