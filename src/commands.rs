@@ -95,11 +95,7 @@ mod tests {
     }
 
     fn jot(args: &[&str]) -> String {
-        let backends = Backends {
-            notes: Box::new(Fake),
-            reminders: Box::new(Fake),
-            calendar: Box::new(Fake),
-        };
+        let backends = Backends::new(|| Box::new(Fake), || Box::new(Fake), || Box::new(Fake));
         let cli = Cli::try_parse_from(["jot"].iter().chain(args)).unwrap();
         run(cli, &backends, Style::default()).unwrap()
     }

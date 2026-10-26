@@ -122,12 +122,24 @@ pub struct Backends {
 }
 
 impl Backends {
-    pub fn system() -> Self {
+    pub fn new(
+        notes: impl FnOnce() -> Box<dyn Notes> + 'static,
+        reminders: impl FnOnce() -> Box<dyn Reminders> + 'static,
+        calendar: impl FnOnce() -> Box<dyn Calendar> + 'static,
+    ) -> Self {
         Self {
-            notes: Box::new(Unimplemented("Apple Notes")),
-            reminders: Box::new(Unimplemented("Reminders")),
-            calendar: Box::new(Unimplemented("Calendar")),
+            notes: notes(),
+            reminders: reminders(),
+            calendar: calendar(),
         }
+    }
+
+    pub fn system() -> Self {
+        Self::new(
+            || Box::new(Unimplemented("Apple Notes")),
+            || Box::new(Unimplemented("Reminders")),
+            || Box::new(Unimplemented("Calendar")),
+        )
     }
 }
 
