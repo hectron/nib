@@ -1,3 +1,5 @@
+use std::cell::LazyCell;
+
 use miette::Diagnostic;
 use serde::Serialize;
 use thiserror::Error;
@@ -115,10 +117,12 @@ pub trait Calendar {
     fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError>;
 }
 
+pub type Lazy<T> = LazyCell<Box<T>, Box<dyn FnOnce() -> Box<T>>>;
+
 pub struct Backends {
-    pub notes: Box<dyn Notes>,
-    pub reminders: Box<dyn Reminders>,
-    pub calendar: Box<dyn Calendar>,
+    pub notes: Lazy<dyn Notes>,
+    pub reminders: Lazy<dyn Reminders>,
+    pub calendar: Lazy<dyn Calendar>,
 }
 
 impl Backends {
@@ -128,9 +132,9 @@ impl Backends {
         calendar: impl FnOnce() -> Box<dyn Calendar> + 'static,
     ) -> Self {
         Self {
-            notes: notes(),
-            reminders: reminders(),
-            calendar: calendar(),
+            notes: LazyCell::new(Box::new(notes)),
+            reminders: LazyCell::new(Box::new(reminders)),
+            calendar: LazyCell::new(Box::new(calendar)),
         }
     }
 
