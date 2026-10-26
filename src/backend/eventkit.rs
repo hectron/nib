@@ -6,7 +6,10 @@ use jiff::civil::Date;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::Bool;
 use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEventStore, EKReminder};
-use objc2_foundation::{NSArray, NSDateComponentUndefined, NSError, NSInteger};
+use objc2_foundation::{
+    NSArray, NSCalendar, NSCalendarIdentifierGregorian, NSDateComponentUndefined, NSDateComponents,
+    NSError, NSInteger, NSString,
+};
 
 use super::{BackendError, NewReminder, Priority, Reminder, Reminders, terminal_name};
 
@@ -16,8 +19,25 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct EventKitReminders;
 
 impl Reminders for EventKitReminders {
-    fn add(&self, _: NewReminder) -> Result<Reminder, BackendError> {
-        Err(BackendError::NotImplemented { app: REMINDERS })
+    fn add(&self, new: NewReminder) -> Result<Reminder, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
+            let list = unsafe { store.defaultCalendarForNewReminders() }
+                .ok_or_else(|| failed(REMINDERS, "there is no default list for new reminders"))?;
+            unsafe {
+                let reminder = EKReminder::reminderWithEventStore(&store);
+                reminder.setTitle(Some(&NSString::from_str(&new.title)));
+                reminder.setCalendar(Some(&list));
+                reminder.setPriority(priority_to_eventkit(new.priority));
+                if let Some(due) = new.due {
+                    reminder.setDueDateComponents(Some(&date_components(due)));
+                }
+                store
+                    .saveReminder_commit_error(&reminder, true)
+                    .map_err(|e| failed(REMINDERS, &e.localizedDescription().to_string()))?;
+                Ok(to_reminder(&reminder))
+            }
+        })
     }
 
     fn list(&self) -> Result<Vec<Reminder>, BackendError> {
@@ -98,6 +118,26 @@ fn priority_from_eventkit(value: usize) -> Option<Priority> {
     }
 }
 
+fn priority_to_eventkit(priority: Option<Priority>) -> usize {
+    match priority {
+        Some(Priority::High) => 1,
+        Some(Priority::Medium) => 5,
+        Some(Priority::Low) => 9,
+        None => 0,
+    }
+}
+
+fn date_components(date: Date) -> Retained<NSDateComponents> {
+    let parts = NSDateComponents::new();
+    parts.setCalendar(
+        NSCalendar::calendarWithIdentifier(unsafe { NSCalendarIdentifierGregorian }).as_deref(),
+    );
+    parts.setYear(date.year().into());
+    parts.setMonth(date.month().into());
+    parts.setDay(date.day().into());
+    parts
+}
+
 fn date_from_parts(year: NSInteger, month: NSInteger, day: NSInteger) -> Option<Date> {
     if [year, month, day].contains(&NSDateComponentUndefined) {
         return None;
@@ -140,6 +180,55 @@ mod tests {
         assert_eq!(date_from_parts(NSDateComponentUndefined, 10, 27), None);
         assert_eq!(date_from_parts(2026, NSDateComponentUndefined, 27), None);
         assert_eq!(date_from_parts(2026, 2, 30), None);
+    }
+
+    #[test]
+    fn priorities_round_trip() {
+        for priority in [Priority::High, Priority::Medium, Priority::Low] {
+            assert_eq!(
+                priority_from_eventkit(priority_to_eventkit(Some(priority))),
+                Some(priority)
+            );
+        }
+        assert_eq!(priority_to_eventkit(None), 0);
+    }
+
+    #[test]
+    fn due_dates_round_trip_through_gregorian_components() {
+        let parts = date_components(date(2026, 2, 28));
+        assert_eq!(
+            date_from_parts(parts.year(), parts.month(), parts.day()),
+            Some(date(2026, 2, 28))
+        );
+        let calendar = parts.calendar().unwrap();
+        assert_eq!(
+            calendar.calendarIdentifier().to_string(),
+            unsafe { NSCalendarIdentifierGregorian }.to_string()
+        );
+    }
+
+    #[test]
+    #[ignore = "writes to your real Reminders; set NIB_LIVE_WRITE=1 and run with --ignored"]
+    fn adds_and_removes_a_real_reminder() {
+        if std::env::var_os("NIB_LIVE_WRITE").is_none() {
+            eprintln!("skipped: set NIB_LIVE_WRITE=1 to write to your real Reminders");
+            return;
+        }
+        let added = EventKitReminders
+            .add(NewReminder {
+                title: "nib live test (safe to delete)".into(),
+                due: Some(date(2030, 1, 15)),
+                priority: Some(Priority::Low),
+            })
+            .unwrap();
+        assert_eq!(added.due, Some(date(2030, 1, 15)));
+        assert_eq!(added.priority, Some(Priority::Low));
+        let store = authorized_store(EKEntityType::Reminder, REMINDERS).unwrap();
+        let reminder = unsafe { store.calendarItemWithIdentifier(&NSString::from_str(&added.id)) }
+            .unwrap()
+            .downcast::<EKReminder>()
+            .unwrap();
+        unsafe { store.removeReminder_commit_error(&reminder, true) }.unwrap();
     }
 
     #[test]
