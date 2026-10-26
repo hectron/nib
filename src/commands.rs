@@ -168,10 +168,12 @@ mod tests {
         assert_snapshot!(jot(&["note", "ls", "-f", "Work", "--json"]), @r#"
         [
           {
+            "id": "note-2",
             "title": "Q4 planning",
             "folder": "Work"
           },
           {
+            "id": "note-3",
             "title": "Standup",
             "folder": "Work"
           }
@@ -194,6 +196,7 @@ mod tests {
             jot(&["--json", "t", "Review pull request", "-d", "2026-11-03", "-p", "high"]),
             @r#"
         {
+          "id": "reminder-3",
           "title": "Review pull request",
           "due": "2026-11-03",
           "priority": "high"
@@ -216,11 +219,13 @@ mod tests {
         assert_snapshot!(jot(&["todo", "list", "--json"]), @r#"
         [
           {
+            "id": "reminder-1",
             "title": "Review pull request",
             "due": "2026-10-27",
             "priority": "high"
           },
           {
+            "id": "reminder-2",
             "title": "Buy groceries",
             "due": null,
             "priority": null
@@ -233,6 +238,7 @@ mod tests {
     fn created_item_json_is_an_object() {
         assert_snapshot!(jot(&["--json", "n", "Idea", "-f", "Inbox"]), @r#"
         {
+          "id": "note-4",
           "title": "Idea",
           "folder": "Inbox"
         }
@@ -257,10 +263,12 @@ mod tests {
         assert_snapshot!(jot(&["cal", "--week", "--json"]), @r#"
         [
           {
+            "id": "event-1",
             "title": "Team sync",
             "start": "2026-10-26 10:00"
           },
           {
+            "id": "event-2",
             "title": "Design review",
             "start": "2026-10-29 14:30"
           }
