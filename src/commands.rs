@@ -286,12 +286,12 @@ mod tests {
           {
             "id": "event-1",
             "title": "Team sync",
-            "start": "2026-10-26 10:00"
+            "start": "2026-10-26T10:00:00-04:00"
           },
           {
             "id": "event-2",
             "title": "Design review",
-            "start": "2026-10-29 14:30"
+            "start": "2026-10-29T14:30:00-04:00"
           }
         ]
         "#);
