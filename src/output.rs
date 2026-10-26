@@ -234,4 +234,33 @@ mod tests {
                 .contains(r#""Hi\u001b]0;pwned\u0007\nthere""#)
         );
     }
+
+    #[test]
+    fn the_caller_chooses_the_verb() {
+        let note = Note {
+            title: "Q4 planning".into(),
+            folder: Some("Work".into()),
+        };
+        let reminder = Reminder {
+            title: "Review pull request".into(),
+            due: Some("today".into()),
+            priority: Some(Priority::High),
+        };
+        assert_snapshot!(
+            single(&note, "Created note", false).unwrap(),
+            @r#"Created note "Q4 planning" in Work"#
+        );
+        assert_snapshot!(
+            single(&note, "Updated note", false).unwrap(),
+            @r#"Updated note "Q4 planning" in Work"#
+        );
+        assert_snapshot!(
+            single(&reminder, "Added", false).unwrap(),
+            @r#"Added "Review pull request" (due today, high priority)"#
+        );
+        assert_snapshot!(
+            single(&reminder, "Completed", false).unwrap(),
+            @r#"Completed "Review pull request" (due today, high priority)"#
+        );
+    }
 }
