@@ -3,18 +3,46 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use jiff::civil::Date;
+use jiff::tz::TimeZone;
+use jiff::{Timestamp, Zoned};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::Bool;
-use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEventStore, EKReminder};
+use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEvent, EKEventStore, EKReminder};
 use objc2_foundation::{
-    NSArray, NSCalendar, NSCalendarIdentifierGregorian, NSDateComponentUndefined, NSDateComponents,
-    NSError, NSInteger, NSString,
+    NSArray, NSCalendar, NSCalendarIdentifierGregorian, NSDate, NSDateComponentUndefined,
+    NSDateComponents, NSError, NSInteger, NSString,
 };
 
-use super::{BackendError, NewReminder, Priority, Reminder, Reminders, terminal_name};
+use super::{
+    BackendError, Calendar, Event, EventQuery, NewReminder, Priority, Reminder, Reminders,
+    terminal_name,
+};
 
 const REMINDERS: &str = "Reminders";
+const CALENDARS: &str = "Calendars";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub struct EventKitCalendar;
+
+impl Calendar for EventKitCalendar {
+    fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Event, CALENDARS)?;
+            let zone = query.range.start.time_zone().clone();
+            let start = NSDate::dateWithTimeIntervalSince1970(epoch_seconds(&query.range.start));
+            let end = NSDate::dateWithTimeIntervalSince1970(epoch_seconds(&query.range.end));
+            let found = unsafe {
+                let predicate =
+                    store.predicateForEventsWithStartDate_endDate_calendars(&start, &end, None);
+                store.eventsMatchingPredicate(&predicate)
+            };
+            let mut events: Vec<Event> = found.iter().filter_map(|e| to_event(&e, &zone)).collect();
+            events.sort_by(|a, b| (a.start.timestamp(), &a.id).cmp(&(b.start.timestamp(), &b.id)));
+            Ok(events)
+        })
+    }
+}
 
 pub struct EventKitReminders;
 
@@ -74,7 +102,7 @@ fn authorized_store(
 ) -> Result<Retained<EKEventStore>, BackendError> {
     let status = unsafe { EKEventStore::authorizationStatusForEntityType(entity) };
     if status == EKAuthorizationStatus::FullAccess
-        || (status == EKAuthorizationStatus::NotDetermined && request_access(app)?)
+        || (status == EKAuthorizationStatus::NotDetermined && request_access(entity, app)?)
     {
         return Ok(unsafe { EKEventStore::new() });
     }
@@ -84,16 +112,50 @@ fn authorized_store(
     })
 }
 
-fn request_access(app: &'static str) -> Result<bool, BackendError> {
+fn request_access(entity: EKEntityType, app: &'static str) -> Result<bool, BackendError> {
     eprintln!("Waiting for macOS to grant access to {app}...");
     let store = unsafe { EKEventStore::new() };
     let (tx, rx) = mpsc::channel();
     let block = RcBlock::new(move |granted: Bool, _: *mut NSError| {
         let _ = tx.send(granted.as_bool());
     });
-    unsafe { store.requestFullAccessToRemindersWithCompletion(RcBlock::as_ptr(&block)) };
-    rx.recv()
-        .map_err(|_| failed(app, "the permission request never answered"))
+    unsafe {
+        if entity == EKEntityType::Event {
+            store.requestFullAccessToEventsWithCompletion(RcBlock::as_ptr(&block));
+        } else {
+            store.requestFullAccessToRemindersWithCompletion(RcBlock::as_ptr(&block));
+        }
+    }
+    rx.recv_timeout(PROMPT_TIMEOUT)
+        .map_err(|_| failed(app, "timed out waiting for the macOS permission prompt"))
+}
+
+fn to_event(event: &EKEvent, zone: &TimeZone) -> Option<Event> {
+    unsafe {
+        let start = zoned_from_epoch(event.startDate().timeIntervalSince1970(), zone)?;
+        let identifier = event
+            .eventIdentifier()
+            .unwrap_or_else(|| event.calendarItemIdentifier());
+        Some(Event {
+            id: event_id(&identifier.to_string(), start.timestamp()),
+            title: event.title().to_string(),
+            start,
+        })
+    }
+}
+
+fn event_id(identifier: &str, start: Timestamp) -> String {
+    format!("{identifier}@{start}")
+}
+
+fn epoch_seconds(time: &Zoned) -> f64 {
+    time.timestamp().as_duration().as_secs_f64()
+}
+
+fn zoned_from_epoch(seconds: f64, zone: &TimeZone) -> Option<Zoned> {
+    Timestamp::from_second(seconds.floor() as i64)
+        .ok()
+        .map(|t| t.to_zoned(zone.clone()))
 }
 
 fn to_reminder(reminder: &EKReminder) -> Reminder {
@@ -180,6 +242,46 @@ mod tests {
         assert_eq!(date_from_parts(NSDateComponentUndefined, 10, 27), None);
         assert_eq!(date_from_parts(2026, NSDateComponentUndefined, 27), None);
         assert_eq!(date_from_parts(2026, 2, 30), None);
+    }
+
+    #[test]
+    fn event_ids_pair_the_identifier_with_the_utc_start() {
+        let start = date(2026, 10, 27)
+            .at(10, 0, 0, 0)
+            .to_zoned(TimeZone::fixed(jiff::tz::offset(-4)))
+            .unwrap();
+        assert_eq!(
+            event_id("ABC123", start.timestamp()),
+            "ABC123@2026-10-27T14:00:00Z"
+        );
+    }
+
+    #[test]
+    fn event_times_round_trip_through_epoch_seconds() {
+        let zone = TimeZone::fixed(jiff::tz::offset(-4));
+        let start = date(2026, 10, 27)
+            .at(10, 30, 0, 0)
+            .to_zoned(zone.clone())
+            .unwrap();
+        assert_eq!(
+            zoned_from_epoch(epoch_seconds(&start), &zone),
+            Some(start.clone())
+        );
+        assert_eq!(
+            zoned_from_epoch(epoch_seconds(&start) + 0.75, &zone),
+            Some(start)
+        );
+    }
+
+    #[test]
+    #[ignore = "reads your real calendars; run with --ignored from a terminal that has access"]
+    fn lists_real_events() {
+        let now = Timestamp::now().to_zoned(TimeZone::system());
+        let start = now.start_of_day().unwrap();
+        let end = start.checked_add(jiff::Span::new().days(7)).unwrap();
+        EventKitCalendar
+            .events(EventQuery { range: start..end })
+            .unwrap();
     }
 
     #[test]

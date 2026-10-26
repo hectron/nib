@@ -156,9 +156,19 @@ impl Backends {
         Self::new(
             || Box::new(Unimplemented("Apple Notes")),
             system_reminders,
-            || Box::new(Unimplemented("Calendar")),
+            system_calendar,
         )
     }
+}
+
+#[cfg(target_os = "macos")]
+fn system_calendar() -> Box<dyn Calendar> {
+    Box::new(eventkit::EventKitCalendar)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_calendar() -> Box<dyn Calendar> {
+    Box::new(Unimplemented("Calendar"))
 }
 
 #[cfg(target_os = "macos")]

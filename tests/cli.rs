@@ -24,12 +24,12 @@ fn task_help() {
 
 #[test]
 fn stub_backend_fails_cleanly() {
-    let out = nib(&["cal"]);
+    let out = nib(&["n"]);
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("Calendar integration is not implemented yet"),
+        stderr.contains("Apple Notes integration is not implemented yet"),
         "{stderr}"
     );
 }
@@ -54,7 +54,7 @@ fn demo_backend_shows_sample_data() {
 
 #[test]
 fn stub_backend_error_has_a_code() {
-    let out = nib(&["cal"]);
+    let out = nib(&["n"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("nib::backend::not_implemented"), "{stderr}");
