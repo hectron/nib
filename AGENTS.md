@@ -41,7 +41,8 @@ nib t "Buy groceries"
 - `src/demo.rs` — sample notes, reminders, and events for `NIB_DEMO=1`, with dates relative to `now`. Nothing is saved.
 - `src/cli.rs` — `clap` definitions. Every command line resolves to one `Action`. `n` and `t` take the rest of the line as the title; `note`, `task`, and `cal` take only subcommands. `into_action` takes `now` and turns relative input such as `--due today` and `cal --week` into a concrete date or `Range<Zoned>`, so backends never read the clock.
 - `src/commands.rs` — dispatches on `Action` and returns the text to print, so tests run commands against fake backends.
-- `src/backend.rs` — domain types and one trait per app (`Notes`, `Reminders`, `Calendar`). `Backends::system()` picks the real implementations and builds each one on first use; all are stubs today. Due dates are `jiff::civil::Date`; event starts are `Zoned`.
+- `src/backend.rs` — domain types and one trait per app (`Notes`, `Reminders`, `Calendar`). `Backends::system()` picks the real implementations and builds each one on first use. Reminders is real; Notes and Calendar are stubs. Due dates are `jiff::civil::Date`; event starts are `Zoned`.
+- `src/backend/eventkit.rs` — Reminders on EventKit (macOS only). Checks access before any read, asks macOS only when the status is "not determined", and converts EventKit objects to plain values inside completion blocks.
 - `src/output.rs` — table and JSON rendering. `main` decides color and width once (`Style::detect`), and tests pass a fixed `Style`. Text output strips control characters. JSON goes through private output types (`NoteJson`, `ReminderJson`, `EventJson`), not the domain structs; due dates serialize as `2026-10-27` and event starts as `2026-10-26T10:00:00-04:00`.
 
 ## Rules for changes
@@ -55,4 +56,7 @@ nib t "Buy groceries"
 - Don't give one command both a positional argument and subcommands. `clap` can't tell a title from a subcommand name, which is why `n` and `t` are separate commands.
 - Never let table rendering detect the terminal on its own; take color and width from `Style`.
 - Add or update `insta` snapshots for any change to command output, and review them before accepting.
+- Never send an Objective-C object across threads. EventKit calls completion blocks on its own queue, so map results to Rust values inside the block and send those.
+- The default test suite must never touch real Apple data. Tests that read it are `#[ignore]`d; tests that write also require `NIB_LIVE_WRITE=1` and delete what they create.
+- macOS grants EventKit access to the terminal app, not to `nib`, so no embedded Info.plist is needed. Error help should name the terminal (`terminal_name`).
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` before committing.
