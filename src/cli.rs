@@ -204,6 +204,7 @@ impl Command {
 mod tests {
     use clap::CommandFactory;
     use clap::error::ErrorKind;
+    use insta::assert_snapshot;
 
     use super::*;
 
@@ -309,6 +310,25 @@ mod tests {
             let err = parse(args).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::ValueValidation, "{args:?}");
         }
+    }
+
+    #[test]
+    fn due_must_be_a_date() {
+        let errors: Vec<String> = ["banana", "", "2026-1-5", "2026-11-03T10:00", "2026-02-30"]
+            .into_iter()
+            .map(|due| {
+                let err = parse(&["t", "Pay", "rent", "--due", due]).unwrap_err();
+                assert_eq!(err.kind(), ErrorKind::ValueValidation, "--due {due:?}");
+                err.to_string().lines().next().unwrap().to_owned()
+            })
+            .collect();
+        assert_snapshot!(errors.join("\n"), @"
+        error: invalid value 'banana' for '--due <DATE>': expected today, tomorrow, or YYYY-MM-DD
+        error: invalid value '' for '--due <DATE>': expected today, tomorrow, or YYYY-MM-DD
+        error: invalid value '2026-1-5' for '--due <DATE>': expected today, tomorrow, or YYYY-MM-DD
+        error: invalid value '2026-11-03T10:00' for '--due <DATE>': expected today, tomorrow, or YYYY-MM-DD
+        error: invalid value '2026-02-30' for '--due <DATE>': that date doesn't exist
+        ");
     }
 
     #[test]
