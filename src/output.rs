@@ -206,4 +206,22 @@ mod tests {
         );
         assert!(!rows.contains('\u{1b}'));
     }
+
+    #[test]
+    fn control_characters_never_reach_the_terminal() {
+        let note = Note {
+            title: "Hi\u{1b}]0;pwned\u{7}\nthere".into(),
+            folder: None,
+        };
+        assert_snapshot!(single(&note, false).unwrap(), @r#"Created note "Hi�]0;pwned� there""#);
+        assert_snapshot!(list(&[note.clone()], false, Style::default()).unwrap(), @r"
+        TITLE                FOLDER
+        Hi�]0;pwned� there
+        ");
+        assert!(
+            single(&note, true)
+                .unwrap()
+                .contains(r#""Hi\u001b]0;pwned\u0007\nthere""#)
+        );
+    }
 }
