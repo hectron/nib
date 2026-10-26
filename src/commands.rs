@@ -33,7 +33,7 @@ mod tests {
     use super::*;
     use crate::backend::{
         BackendError, Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes,
-        Priority, Reminder, Reminders, Span,
+        Priority, Reminder, Reminders,
     };
 
     struct Fake;
@@ -95,19 +95,21 @@ mod tests {
 
     impl Calendar for Fake {
         fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
-            let mut events = vec![Event {
-                id: "event-1".into(),
-                title: "Team sync".into(),
-                start: at(date(2026, 10, 26), 10, 0),
-            }];
-            if query.span == Span::Week {
-                events.push(Event {
-                    id: "event-2".into(),
-                    title: "Design review".into(),
-                    start: at(date(2026, 10, 29), 14, 30),
-                });
-            }
-            Ok(events)
+            let events = [
+                ("event-1", "Book club", at(date(2026, 10, 25), 19, 0)),
+                ("event-2", "Team sync", at(date(2026, 10, 26), 10, 0)),
+                ("event-3", "Design review", at(date(2026, 10, 29), 14, 30)),
+                ("event-4", "Retro", at(date(2026, 11, 2), 9, 0)),
+            ];
+            Ok(events
+                .into_iter()
+                .filter(|(_, _, start)| query.range.contains(start))
+                .map(|(id, title, start)| Event {
+                    id: id.into(),
+                    title: title.into(),
+                    start,
+                })
+                .collect())
         }
     }
 
@@ -287,12 +289,12 @@ mod tests {
         assert_snapshot!(jot(&["cal", "--week", "--json"]), @r#"
         [
           {
-            "id": "event-1",
+            "id": "event-2",
             "title": "Team sync",
             "start": "2026-10-26T10:00:00-04:00"
           },
           {
-            "id": "event-2",
+            "id": "event-3",
             "title": "Design review",
             "start": "2026-10-29T14:30:00-04:00"
           }

@@ -1,4 +1,5 @@
 use std::cell::LazyCell;
+use std::ops::Range;
 
 use jiff::Zoned;
 use jiff::civil::Date;
@@ -44,12 +45,6 @@ impl Priority {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Span {
-    Day,
-    Week,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewNote {
     pub title: String,
@@ -68,9 +63,9 @@ pub struct NewReminder {
     pub priority: Option<Priority>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventQuery {
-    pub span: Span,
+    pub range: Range<Zoned>,
 }
 
 // The stubs only return NotImplemented; the other variants are for the Apple backends.

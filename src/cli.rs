@@ -1,8 +1,10 @@
-use clap::{Args, Parser, Subcommand};
-use jiff::Zoned;
-use jiff::civil::Date;
+use std::ops::Range;
 
-use crate::backend::{EventQuery, NewNote, NewReminder, NoteQuery, Priority, Span};
+use clap::{Args, Parser, Subcommand};
+use jiff::civil::Date;
+use jiff::{ToSpan, Zoned};
+
+use crate::backend::{EventQuery, NewNote, NewReminder, NoteQuery, Priority};
 
 /// Fast CLI for Apple Notes, Reminders, and Calendar
 #[derive(Debug, Parser)]
@@ -180,6 +182,11 @@ impl Due {
     }
 }
 
+fn days_from_today(now: &Zoned, count: i32) -> Result<Range<Zoned>, jiff::Error> {
+    let end = now.date().checked_add(count.days())?;
+    Ok(now.start_of_day()?..end.to_zoned(now.time_zone().clone())?)
+}
+
 impl TaskOpts {
     fn add(self, title: String, now: &Zoned) -> Result<Action, jiff::Error> {
         Ok(Action::AddTask(NewReminder {
@@ -232,7 +239,7 @@ impl Command {
             }
             Command::Cal(CalArgs { action, week }) => match action {
                 Some(CalAction::List) | None => Action::ListEvents(EventQuery {
-                    span: if week { Span::Week } else { Span::Day },
+                    range: days_from_today(now, if week { 7 } else { 1 })?,
                 }),
             },
         })
@@ -291,6 +298,12 @@ mod tests {
         })
     }
 
+    fn events(from: Date, until: Date) -> Action {
+        Action::ListEvents(EventQuery {
+            range: at(from, 0, 0)..at(until, 0, 0),
+        })
+    }
+
     #[test]
     fn definition_is_valid() {
         Cli::command().debug_assert();
@@ -345,15 +358,52 @@ mod tests {
 
     #[test]
     fn cal_commands() {
-        let day = || Action::ListEvents(EventQuery { span: Span::Day });
-        let week = || Action::ListEvents(EventQuery { span: Span::Week });
+        let day = events(date(2026, 10, 26), date(2026, 10, 27));
+        let week = events(date(2026, 10, 26), date(2026, 11, 2));
         assert_parses(&[
-            (&["c"], day()),
-            (&["cal", "--json", "list"], day()),
-            (&["cal", "--week"], week()),
-            (&["c", "-w", "ls"], week()),
-            (&["cal", "list", "-w"], week()),
+            (&["c"], day.clone()),
+            (&["cal", "--json", "list"], day),
+            (&["cal", "--week"], week.clone()),
+            (&["c", "-w", "ls"], week.clone()),
+            (&["cal", "list", "-w"], week),
         ]);
+    }
+
+    #[test]
+    fn cal_ranges_follow_local_calendar_days() {
+        let new_york = TimeZone::posix("EST5EDT,M3.2.0,M11.1.0").unwrap();
+        let cases = [
+            ("c", date(2026, 10, 26).at(23, 30, 0, 0)),
+            ("c", date(2026, 11, 1).at(12, 0, 0, 0)),
+            ("c", date(2027, 3, 14).at(12, 0, 0, 0)),
+            ("c -w", date(2026, 10, 30).at(12, 0, 0, 0)),
+        ];
+        let ranges: Vec<String> = cases
+            .into_iter()
+            .map(|(args, now)| {
+                let now = now.to_zoned(new_york.clone()).unwrap();
+                let args: Vec<&str> = args.split(' ').collect();
+                let Action::ListEvents(EventQuery { range }) = parse_at(&now, &args).unwrap()
+                else {
+                    panic!("jot {args:?} should list events");
+                };
+                let time = "%Y-%m-%d %H:%M %:z";
+                format!(
+                    "{} at {}: {} .. {} ({}h)",
+                    args.join(" "),
+                    now.strftime(time),
+                    range.start.strftime(time),
+                    range.end.strftime(time),
+                    range.start.duration_until(&range.end).as_hours(),
+                )
+            })
+            .collect();
+        assert_snapshot!(ranges.join("\n"), @"
+        c at 2026-10-26 23:30 -04:00: 2026-10-26 00:00 -04:00 .. 2026-10-27 00:00 -04:00 (24h)
+        c at 2026-11-01 12:00 -05:00: 2026-11-01 00:00 -04:00 .. 2026-11-02 00:00 -05:00 (25h)
+        c at 2027-03-14 12:00 -04:00: 2027-03-14 00:00 -05:00 .. 2027-03-15 00:00 -04:00 (23h)
+        c -w at 2026-10-30 12:00 -04:00: 2026-10-30 00:00 -04:00 .. 2026-11-06 00:00 -05:00 (169h)
+        ");
     }
 
     #[test]
