@@ -2,7 +2,7 @@
 
 ## Overview and vision
 
-`jot` is a high-performance, developer-centric command-line interface for Apple's ecosystem apps: **Apple Notes**, **Reminders**, **Calendar**, and eventually **Journal**.
+`nib` is a high-performance, developer-centric command-line interface for Apple's ecosystem apps: **Apple Notes**, **Reminders**, **Calendar**, and eventually **Journal**.
 
 It replaces clunky, slow legacy bridges with a clean, ergonomic, fast Rust binary for friction-free capture, querying, and task management from the terminal.
 
@@ -27,12 +27,12 @@ The interface, error handling, output formatting, and developer experience take 
 ## Command structure
 
 ```bash
-jot note new "Meeting with Team" --folder Work
-jot task add "Review pull request" --due today --priority high
-jot cal list --week
+nib note new "Meeting with Team" --folder Work
+nib task add "Review pull request" --due today --priority high
+nib cal list --week
 
-jot n "Quick thought capture"
-jot t "Buy groceries"
+nib n "Quick thought capture"
+nib t "Buy groceries"
 ```
 
 ## Code layout

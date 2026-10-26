@@ -143,16 +143,16 @@ mod tests {
         at(date(2026, 10, 26), 9, 30)
     }
 
-    fn jot(args: &[&str]) -> String {
+    fn nib(args: &[&str]) -> String {
         let backends = fake_backends(&Built::default());
-        let cli = Cli::try_parse_from(["jot"].iter().chain(args)).unwrap();
+        let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
         run(cli, &now(), &backends, Style::default()).unwrap()
     }
 
     fn built_by(args: &[&str]) -> Vec<&'static str> {
         let built = Built::default();
         let backends = fake_backends(&built);
-        let cli = Cli::try_parse_from(["jot"].iter().chain(args)).unwrap();
+        let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
         run(cli, &now(), &backends, Style::default()).unwrap();
         built.take()
     }
@@ -168,26 +168,26 @@ mod tests {
 
     #[test]
     fn quick_capture_note() {
-        assert_snapshot!(jot(&["n", "Quick thought"]), @r#"Created note "Quick thought""#);
+        assert_snapshot!(nib(&["n", "Quick thought"]), @r#"Created note "Quick thought""#);
         assert_snapshot!(
-            jot(&["note", "new", "Meeting with Team", "--folder", "Work"]),
+            nib(&["note", "new", "Meeting with Team", "--folder", "Work"]),
             @r#"Created note "Meeting with Team" in Work"#
         );
     }
 
     #[test]
     fn note_list_filters_by_folder() {
-        assert_snapshot!(jot(&["note", "ls", "-f", "Work"]), @r"
+        assert_snapshot!(nib(&["note", "ls", "-f", "Work"]), @r"
         TITLE        FOLDER
         Q4 planning  Work
         Standup      Work
         ");
-        assert_snapshot!(jot(&["note", "list", "-f", "Archive"]), @"");
+        assert_snapshot!(nib(&["note", "list", "-f", "Archive"]), @"");
     }
 
     #[test]
     fn note_list_json() {
-        assert_snapshot!(jot(&["note", "ls", "-f", "Work", "--json"]), @r#"
+        assert_snapshot!(nib(&["note", "ls", "-f", "Work", "--json"]), @r#"
         [
           {
             "id": "note-2",
@@ -205,13 +205,13 @@ mod tests {
 
     #[test]
     fn quick_capture_task() {
-        assert_snapshot!(jot(&["t", "Buy groceries"]), @r#"Added "Buy groceries""#);
+        assert_snapshot!(nib(&["t", "Buy groceries"]), @r#"Added "Buy groceries""#);
         assert_snapshot!(
-            jot(&["task", "add", "Review pull request", "--due", "today", "--priority", "high"]),
+            nib(&["task", "add", "Review pull request", "--due", "today", "--priority", "high"]),
             @r#"Added "Review pull request" (due 2026-10-26, high priority)"#
         );
         assert_snapshot!(
-            jot(&["t", "Pay", "rent", "-d", "tomorrow"]),
+            nib(&["t", "Pay", "rent", "-d", "tomorrow"]),
             @r#"Added "Pay rent" (due 2026-10-27)"#
         );
     }
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn added_task_json() {
         assert_snapshot!(
-            jot(&["--json", "t", "Review pull request", "-d", "2026-11-03", "-p", "high"]),
+            nib(&["--json", "t", "Review pull request", "-d", "2026-11-03", "-p", "high"]),
             @r#"
         {
           "id": "reminder-3",
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn task_list_table() {
-        assert_snapshot!(jot(&["task"]), @r"
+        assert_snapshot!(nib(&["task"]), @r"
         TITLE                DUE         PRIORITY
         Review pull request  2026-10-27  high
         Buy groceries
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn task_list_json() {
-        assert_snapshot!(jot(&["todo", "list", "--json"]), @r#"
+        assert_snapshot!(nib(&["todo", "list", "--json"]), @r#"
         [
           {
             "id": "reminder-1",
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn created_item_json_is_an_object() {
-        assert_snapshot!(jot(&["--json", "n", "Idea", "-f", "Inbox"]), @r#"
+        assert_snapshot!(nib(&["--json", "n", "Idea", "-f", "Inbox"]), @r#"
         {
           "id": "note-4",
           "title": "Idea",
@@ -273,11 +273,11 @@ mod tests {
 
     #[test]
     fn cal_spans() {
-        assert_snapshot!(jot(&["cal"]), @r"
+        assert_snapshot!(nib(&["cal"]), @r"
         START             TITLE
         2026-10-26 10:00  Team sync
         ");
-        assert_snapshot!(jot(&["c", "list", "--week"]), @r"
+        assert_snapshot!(nib(&["c", "list", "--week"]), @r"
         START             TITLE
         2026-10-26 10:00  Team sync
         2026-10-29 14:30  Design review
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn event_list_json() {
-        assert_snapshot!(jot(&["cal", "--week", "--json"]), @r#"
+        assert_snapshot!(nib(&["cal", "--week", "--json"]), @r#"
         [
           {
             "id": "event-2",
@@ -304,27 +304,27 @@ mod tests {
 
     #[test]
     fn options_before_subcommand() {
-        assert_snapshot!(jot(&["note", "-f", "Work", "list"]), @r"
+        assert_snapshot!(nib(&["note", "-f", "Work", "list"]), @r"
         TITLE        FOLDER
         Q4 planning  Work
         Standup      Work
         ");
         assert_eq!(
-            jot(&["task", "--json", "ls"]),
-            jot(&["task", "ls", "--json"])
+            nib(&["task", "--json", "ls"]),
+            nib(&["task", "ls", "--json"])
         );
         assert_eq!(
-            jot(&["cal", "--json", "list"]),
-            jot(&["cal", "list", "--json"])
+            nib(&["cal", "--json", "list"]),
+            nib(&["cal", "list", "--json"])
         );
-        assert_eq!(jot(&["c", "-w", "ls"]), jot(&["c", "ls", "-w"]));
+        assert_eq!(nib(&["c", "-w", "ls"]), nib(&["c", "ls", "-w"]));
     }
 
     #[test]
     fn capture_takes_the_rest_of_the_line() {
-        assert_snapshot!(jot(&["n", "Buy", "oat", "milk"]), @r#"Created note "Buy oat milk""#);
-        assert_snapshot!(jot(&["n", "list"]), @r#"Created note "list""#);
-        assert_snapshot!(jot(&["note", "new", "list"]), @r#"Created note "list""#);
-        assert_snapshot!(jot(&["t", "ls", "-p", "low"]), @r#"Added "ls" (low priority)"#);
+        assert_snapshot!(nib(&["n", "Buy", "oat", "milk"]), @r#"Created note "Buy oat milk""#);
+        assert_snapshot!(nib(&["n", "list"]), @r#"Created note "list""#);
+        assert_snapshot!(nib(&["note", "new", "list"]), @r#"Created note "list""#);
+        assert_snapshot!(nib(&["t", "ls", "-p", "low"]), @r#"Added "ls" (low priority)"#);
     }
 }

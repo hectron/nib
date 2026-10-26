@@ -501,21 +501,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jot"
-version = "0.1.0"
-dependencies = [
- "assert_cmd",
- "clap",
- "comfy-table",
- "insta",
- "jiff",
- "miette",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -597,6 +582,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+]
+
+[[package]]
+name = "nib"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "comfy-table",
+ "insta",
+ "jiff",
+ "miette",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

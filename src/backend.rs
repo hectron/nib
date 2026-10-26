@@ -74,28 +74,28 @@ pub struct EventQuery {
 pub enum BackendError {
     #[error("{app} permission denied")]
     #[diagnostic(
-        code(jot::backend::permission_denied),
-        help("allow jot in System Settings > Privacy & Security, then run the command again")
+        code(nib::backend::permission_denied),
+        help("allow nib in System Settings > Privacy & Security, then run the command again")
     )]
     PermissionDenied { app: &'static str },
 
     #[error("{kind} \"{name}\" not found")]
     #[diagnostic(
-        code(jot::backend::not_found),
+        code(nib::backend::not_found),
         help("check the spelling and try again")
     )]
     NotFound { kind: &'static str, name: String },
 
     #[error("{app} integration is not implemented yet")]
     #[diagnostic(
-        code(jot::backend::not_implemented),
+        code(nib::backend::not_implemented),
         help("only the command-line interface exists so far")
     )]
     NotImplemented { app: &'static str },
 
     #[error("{app} request failed: {message}")]
     #[diagnostic(
-        code(jot::backend::failed),
+        code(nib::backend::failed),
         help("try again; if it keeps failing, make sure {app} opens normally")
     )]
     Failed { app: &'static str, message: String },
@@ -210,13 +210,13 @@ mod tests {
             })
             .collect();
         assert_snapshot!(rendered.join("\n"), @r#"
-        jot::backend::permission_denied: Reminders permission denied
-          help: allow jot in System Settings > Privacy & Security, then run the command again
-        jot::backend::not_found: folder "Archive" not found
+        nib::backend::permission_denied: Reminders permission denied
+          help: allow nib in System Settings > Privacy & Security, then run the command again
+        nib::backend::not_found: folder "Archive" not found
           help: check the spelling and try again
-        jot::backend::not_implemented: Calendar integration is not implemented yet
+        nib::backend::not_implemented: Calendar integration is not implemented yet
           help: only the command-line interface exists so far
-        jot::backend::failed: Reminders request failed: timed out
+        nib::backend::failed: Reminders request failed: timed out
           help: try again; if it keeps failing, make sure Reminders opens normally
         "#);
     }

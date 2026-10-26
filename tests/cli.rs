@@ -1,7 +1,7 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 
-fn jot(args: &[&str]) -> std::process::Output {
-    cargo_bin_cmd!("jot")
+fn nib(args: &[&str]) -> std::process::Output {
+    cargo_bin_cmd!("nib")
         .args(args)
         .env("NO_COLOR", "1")
         .output()
@@ -10,21 +10,21 @@ fn jot(args: &[&str]) -> std::process::Output {
 
 #[test]
 fn help() {
-    let out = jot(&["--help"]);
+    let out = nib(&["--help"]);
     assert!(out.status.success());
     insta::assert_snapshot!(String::from_utf8(out.stdout).unwrap());
 }
 
 #[test]
 fn task_help() {
-    let out = jot(&["task", "--help"]);
+    let out = nib(&["task", "--help"]);
     assert!(out.status.success());
     insta::assert_snapshot!(String::from_utf8(out.stdout).unwrap());
 }
 
 #[test]
 fn stub_backend_fails_cleanly() {
-    let out = jot(&["cal"]);
+    let out = nib(&["cal"]);
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
     let stderr = String::from_utf8(out.stderr).unwrap();
@@ -36,8 +36,8 @@ fn stub_backend_fails_cleanly() {
 
 #[test]
 fn stub_backend_error_has_a_code() {
-    let out = jot(&["cal"]);
+    let out = nib(&["cal"]);
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("jot::backend::not_implemented"), "{stderr}");
+    assert!(stderr.contains("nib::backend::not_implemented"), "{stderr}");
 }

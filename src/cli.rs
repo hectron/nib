@@ -8,7 +8,7 @@ use crate::backend::{EventQuery, NewNote, NewReminder, NoteQuery, Priority};
 
 /// Fast CLI for Apple Notes, Reminders, and Calendar
 #[derive(Debug, Parser)]
-#[command(name = "jot", version)]
+#[command(name = "nib", version)]
 pub struct Cli {
     /// Print JSON instead of text
     #[arg(long, global = true)]
@@ -263,7 +263,7 @@ mod tests {
     }
 
     fn parse_at(now: &Zoned, args: &[&str]) -> Result<Action, clap::Error> {
-        Cli::try_parse_from(["jot"].iter().chain(args))
+        Cli::try_parse_from(["nib"].iter().chain(args))
             .map(|cli| cli.command.into_action(now).unwrap())
     }
 
@@ -273,7 +273,7 @@ mod tests {
 
     fn assert_parses(cases: &[(&[&str], Action)]) {
         for (args, expected) in cases {
-            assert_eq!(&parse(args).unwrap(), expected, "jot {}", args.join(" "));
+            assert_eq!(&parse(args).unwrap(), expected, "nib {}", args.join(" "));
         }
     }
 
@@ -385,7 +385,7 @@ mod tests {
                 let args: Vec<&str> = args.split(' ').collect();
                 let Action::ListEvents(EventQuery { range }) = parse_at(&now, &args).unwrap()
                 else {
-                    panic!("jot {args:?} should list events");
+                    panic!("nib {args:?} should list events");
                 };
                 let time = "%Y-%m-%d %H:%M %:z";
                 format!(
