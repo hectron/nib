@@ -6,6 +6,9 @@ use jiff::civil::Date;
 use miette::Diagnostic;
 use thiserror::Error;
 
+#[cfg(target_os = "macos")]
+mod eventkit;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Note {
     pub id: String,
@@ -72,12 +75,14 @@ pub struct EventQuery {
 #[derive(Debug, Error, Diagnostic)]
 #[allow(dead_code)]
 pub enum BackendError {
-    #[error("{app} permission denied")]
+    #[error("{terminal} doesn't have access to {app}")]
     #[diagnostic(
         code(nib::backend::permission_denied),
-        help("allow nib in System Settings > Privacy & Security, then run the command again")
+        help(
+            "turn on {terminal} under System Settings > Privacy & Security > {app}, then run the command again; the VS Code terminal, ssh sessions, and cron jobs can't show the permission prompt"
+        )
     )]
-    PermissionDenied { app: &'static str },
+    PermissionDenied { app: &'static str, terminal: String },
 
     #[error("{kind} \"{name}\" not found")]
     #[diagnostic(
@@ -99,6 +104,17 @@ pub enum BackendError {
         help("try again; if it keeps failing, make sure {app} opens normally")
     )]
     Failed { app: &'static str, message: String },
+}
+
+pub fn terminal_name(term_program: Option<&str>) -> String {
+    match term_program {
+        Some("Apple_Terminal") => "Terminal".into(),
+        Some("iTerm.app") => "iTerm".into(),
+        Some("vscode") => "Visual Studio Code".into(),
+        Some("ghostty") => "Ghostty".into(),
+        Some(name) if !name.is_empty() => name.into(),
+        _ => "Your terminal app".into(),
+    }
 }
 
 pub trait Notes {
@@ -139,10 +155,20 @@ impl Backends {
     pub fn system() -> Self {
         Self::new(
             || Box::new(Unimplemented("Apple Notes")),
-            || Box::new(Unimplemented("Reminders")),
+            system_reminders,
             || Box::new(Unimplemented("Calendar")),
         )
     }
+}
+
+#[cfg(target_os = "macos")]
+fn system_reminders() -> Box<dyn Reminders> {
+    Box::new(eventkit::EventKitReminders)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_reminders() -> Box<dyn Reminders> {
+    Box::new(Unimplemented("Reminders"))
 }
 
 struct Unimplemented(&'static str);
@@ -188,7 +214,10 @@ mod tests {
     #[test]
     fn errors_name_the_code_and_the_fix() {
         let errors = [
-            BackendError::PermissionDenied { app: "Reminders" },
+            BackendError::PermissionDenied {
+                app: "Reminders",
+                terminal: "WezTerm".into(),
+            },
             BackendError::NotFound {
                 kind: "folder",
                 name: "Archive".into(),
@@ -210,8 +239,8 @@ mod tests {
             })
             .collect();
         assert_snapshot!(rendered.join("\n"), @r#"
-        nib::backend::permission_denied: Reminders permission denied
-          help: allow nib in System Settings > Privacy & Security, then run the command again
+        nib::backend::permission_denied: WezTerm doesn't have access to Reminders
+          help: turn on WezTerm under System Settings > Privacy & Security > Reminders, then run the command again; the VS Code terminal, ssh sessions, and cron jobs can't show the permission prompt
         nib::backend::not_found: folder "Archive" not found
           help: check the spelling and try again
         nib::backend::not_implemented: Calendar integration is not implemented yet
@@ -219,5 +248,14 @@ mod tests {
         nib::backend::failed: Reminders request failed: timed out
           help: try again; if it keeps failing, make sure Reminders opens normally
         "#);
+    }
+
+    #[test]
+    fn terminal_names_are_readable() {
+        assert_eq!(terminal_name(Some("Apple_Terminal")), "Terminal");
+        assert_eq!(terminal_name(Some("iTerm.app")), "iTerm");
+        assert_eq!(terminal_name(Some("WezTerm")), "WezTerm");
+        assert_eq!(terminal_name(Some("")), "Your terminal app");
+        assert_eq!(terminal_name(None), "Your terminal app");
     }
 }
