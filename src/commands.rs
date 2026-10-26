@@ -164,11 +164,41 @@ mod tests {
     }
 
     #[test]
+    fn note_list_json() {
+        assert_snapshot!(jot(&["note", "ls", "-f", "Work", "--json"]), @r#"
+        [
+          {
+            "title": "Q4 planning",
+            "folder": "Work"
+          },
+          {
+            "title": "Standup",
+            "folder": "Work"
+          }
+        ]
+        "#);
+    }
+
+    #[test]
     fn quick_capture_task() {
         assert_snapshot!(jot(&["t", "Buy groceries"]), @r#"Added "Buy groceries""#);
         assert_snapshot!(
             jot(&["task", "add", "Review pull request", "--due", "today", "--priority", "high"]),
             @r#"Added "Review pull request" (due today, high priority)"#
+        );
+    }
+
+    #[test]
+    fn added_task_json() {
+        assert_snapshot!(
+            jot(&["--json", "t", "Review pull request", "-d", "2026-11-03", "-p", "high"]),
+            @r#"
+        {
+          "title": "Review pull request",
+          "due": "2026-11-03",
+          "priority": "high"
+        }
+        "#
         );
     }
 
@@ -220,6 +250,22 @@ mod tests {
         2026-10-26 10:00  Team sync
         2026-10-29 14:30  Design review
         ");
+    }
+
+    #[test]
+    fn event_list_json() {
+        assert_snapshot!(jot(&["cal", "--week", "--json"]), @r#"
+        [
+          {
+            "title": "Team sync",
+            "start": "2026-10-26 10:00"
+          },
+          {
+            "title": "Design review",
+            "start": "2026-10-29 14:30"
+          }
+        ]
+        "#);
     }
 
     #[test]
