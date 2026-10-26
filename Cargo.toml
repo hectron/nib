@@ -10,6 +10,7 @@ comfy-table = "8.0.1"
 miette = { version = "7.6.0", features = ["fancy"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+thiserror = "2.0.21"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

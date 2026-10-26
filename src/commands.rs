@@ -22,21 +22,21 @@ mod tests {
 
     use super::*;
     use crate::backend::{
-        Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes, Priority,
-        Reminder, Reminders, Span,
+        BackendError, Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes,
+        Priority, Reminder, Reminders, Span,
     };
 
     struct Fake;
 
     impl Notes for Fake {
-        fn create(&self, note: NewNote) -> Result<Note> {
+        fn create(&self, note: NewNote) -> Result<Note, BackendError> {
             Ok(Note {
                 title: note.title,
                 folder: note.folder,
             })
         }
 
-        fn list(&self, query: NoteQuery) -> Result<Vec<Note>> {
+        fn list(&self, query: NoteQuery) -> Result<Vec<Note>, BackendError> {
             let notes = [
                 ("Groceries", "Personal"),
                 ("Q4 planning", "Work"),
@@ -54,7 +54,7 @@ mod tests {
     }
 
     impl Reminders for Fake {
-        fn add(&self, reminder: NewReminder) -> Result<Reminder> {
+        fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError> {
             Ok(Reminder {
                 title: reminder.title,
                 due: reminder.due,
@@ -62,7 +62,7 @@ mod tests {
             })
         }
 
-        fn list(&self) -> Result<Vec<Reminder>> {
+        fn list(&self) -> Result<Vec<Reminder>, BackendError> {
             Ok(vec![
                 Reminder {
                     title: "Review pull request".into(),
@@ -79,7 +79,7 @@ mod tests {
     }
 
     impl Calendar for Fake {
-        fn events(&self, query: EventQuery) -> Result<Vec<Event>> {
+        fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
             let mut events = vec![Event {
                 title: "Team sync".into(),
                 start: "2026-10-26 10:00".into(),
