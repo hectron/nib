@@ -9,17 +9,21 @@ jot note new "Meeting with Team" --folder Work
 jot task add "Review pull request" --due today --priority high
 jot cal list --week
 
-# Shorthand: a bare title captures, no arguments lists
-jot n "Quick thought"
-jot t "Buy groceries"
-jot t
+# Quick capture: every word after n or t is the title
+jot n Quick thought
+jot t Buy groceries --due today
+jot t                # no title lists reminders
 ```
 
-| Command | Aliases | Bare form |
+| Command | Alias | With no subcommand or title |
 | --- | --- | --- |
-| `jot note` | `n` | `jot n "title"` creates, `jot n` lists |
-| `jot task` | `t`, `todo` | `jot t "title"` adds, `jot t` lists |
-| `jot cal` | `c` | `jot c` lists today, `jot c --week` lists seven days |
+| `jot note` | | lists notes; `-f Work` filters by folder |
+| `jot task` | `todo` | lists reminders |
+| `jot cal` | `c` | lists today's events; `-w` lists the next seven days |
+| `jot n [TITLE]...` | | lists notes |
+| `jot t [TITLE]...` | | lists reminders |
+
+`n` and `t` never read a word as a subcommand, so `jot n list` creates a note called "list". `note` and `task` take only subcommands, so use `jot note new "Title"` with the long form.
 
 Every command accepts `--json` for piping into other tools.
 
