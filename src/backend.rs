@@ -1,5 +1,6 @@
 use std::cell::LazyCell;
 
+use jiff::civil::Date;
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -14,7 +15,7 @@ pub struct Note {
 pub struct Reminder {
     pub id: String,
     pub title: String,
-    pub due: Option<String>,
+    pub due: Option<Date>,
     pub priority: Option<Priority>,
 }
 
@@ -62,7 +63,7 @@ pub struct NoteQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewReminder {
     pub title: String,
-    pub due: Option<String>,
+    pub due: Option<Date>,
     pub priority: Option<Priority>,
 }
 

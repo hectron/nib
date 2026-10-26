@@ -10,7 +10,13 @@ use miette::IntoDiagnostic;
 
 fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();
-    let out = commands::run(cli, &backend::Backends::system(), output::Style::detect())?;
+    let now = jiff::Zoned::now();
+    let out = commands::run(
+        cli,
+        &now,
+        &backend::Backends::system(),
+        output::Style::detect(),
+    )?;
     if out.is_empty() {
         return Ok(());
     }

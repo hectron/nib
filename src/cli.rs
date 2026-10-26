@@ -1,4 +1,6 @@
 use clap::{Args, Parser, Subcommand};
+use jiff::Zoned;
+use jiff::civil::Date;
 
 use crate::backend::{EventQuery, NewNote, NewReminder, NoteQuery, Priority, Span};
 
@@ -103,9 +105,9 @@ pub struct TaskCapture {
 
 #[derive(Debug, Args)]
 struct TaskOpts {
-    /// Due date, such as today or 2026-11-03
-    #[arg(short, long, requires = "words")]
-    due: Option<String>,
+    /// Due date: today, tomorrow, or YYYY-MM-DD
+    #[arg(short, long, value_name = "DATE", value_parser = due, requires = "words")]
+    due: Option<Due>,
     #[arg(short, long, value_enum, requires = "words")]
     priority: Option<Priority>,
 }
@@ -141,19 +143,56 @@ fn word(s: &str) -> Result<String, &'static str> {
     }
 }
 
-impl TaskOpts {
-    fn add(self, title: String) -> Action {
-        Action::AddTask(NewReminder {
-            title,
-            due: self.due,
-            priority: self.priority,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Due {
+    Today,
+    Tomorrow,
+    On(Date),
+}
+
+fn due(s: &str) -> Result<Due, &'static str> {
+    match s {
+        "today" => Ok(Due::Today),
+        "tomorrow" => Ok(Due::Tomorrow),
+        _ if is_iso_date(s) => s
+            .parse()
+            .map(Due::On)
+            .map_err(|_| "that date doesn't exist"),
+        _ => Err("expected today, tomorrow, or YYYY-MM-DD"),
+    }
+}
+
+fn is_iso_date(s: &str) -> bool {
+    s.len() == 10
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            _ => b.is_ascii_digit(),
         })
+}
+
+impl Due {
+    fn on(self, today: Date) -> Result<Date, jiff::Error> {
+        match self {
+            Self::Today => Ok(today),
+            Self::Tomorrow => today.tomorrow(),
+            Self::On(date) => Ok(date),
+        }
+    }
+}
+
+impl TaskOpts {
+    fn add(self, title: String, now: &Zoned) -> Result<Action, jiff::Error> {
+        Ok(Action::AddTask(NewReminder {
+            title,
+            due: self.due.map(|due| due.on(now.date())).transpose()?,
+            priority: self.priority,
+        }))
     }
 }
 
 impl Command {
-    pub fn into_action(self) -> Action {
-        match self {
+    pub fn into_action(self, now: &Zoned) -> Result<Action, jiff::Error> {
+        Ok(match self {
             Command::Note(NoteArgs {
                 action,
                 folder: Folder { folder },
@@ -181,14 +220,14 @@ impl Command {
                 Some(TaskAction::Add {
                     title: Title { words },
                     opts,
-                }) => opts.add(words.join(" ")),
+                }) => opts.add(words.join(" "), now)?,
                 Some(TaskAction::List) | None => Action::ListTasks,
             },
             Command::T(TaskCapture { words, opts }) => {
                 if words.is_empty() {
                     Action::ListTasks
                 } else {
-                    opts.add(words.join(" "))
+                    opts.add(words.join(" "), now)?
                 }
             }
             Command::Cal(CalArgs { action, week }) => match action {
@@ -196,7 +235,7 @@ impl Command {
                     span: if week { Span::Week } else { Span::Day },
                 }),
             },
-        }
+        })
     }
 }
 
@@ -205,11 +244,24 @@ mod tests {
     use clap::CommandFactory;
     use clap::error::ErrorKind;
     use insta::assert_snapshot;
+    use jiff::civil::date;
+    use jiff::tz::{TimeZone, offset};
 
     use super::*;
 
+    fn at(day: Date, hour: i8, minute: i8) -> Zoned {
+        day.at(hour, minute, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-4)))
+            .unwrap()
+    }
+
+    fn parse_at(now: &Zoned, args: &[&str]) -> Result<Action, clap::Error> {
+        Cli::try_parse_from(["jot"].iter().chain(args))
+            .map(|cli| cli.command.into_action(now).unwrap())
+    }
+
     fn parse(args: &[&str]) -> Result<Action, clap::Error> {
-        Cli::try_parse_from(["jot"].iter().chain(args)).map(|cli| cli.command.into_action())
+        parse_at(&at(date(2026, 10, 26), 9, 30), args)
     }
 
     fn assert_parses(cases: &[(&[&str], Action)]) {
@@ -231,10 +283,10 @@ mod tests {
         })
     }
 
-    fn task(title: &str, due: Option<&str>, priority: Option<Priority>) -> Action {
+    fn task(title: &str, due: Option<Date>, priority: Option<Priority>) -> Action {
         Action::AddTask(NewReminder {
             title: title.into(),
-            due: due.map(Into::into),
+            due,
             priority,
         })
     }
@@ -265,7 +317,7 @@ mod tests {
 
     #[test]
     fn task_commands() {
-        let review = task("Review PR", Some("today"), Some(Priority::High));
+        let review = task("Review PR", Some(date(2026, 10, 26)), Some(Priority::High));
         assert_parses(&[
             (
                 &["t", "Review", "PR", "--due", "today", "-p", "high"],
@@ -309,6 +361,28 @@ mod tests {
         for args in [&["n", ""][..], &["t", "  "], &["note", "new", ""]] {
             let err = parse(args).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::ValueValidation, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn due_resolves_against_now() {
+        let morning = at(date(2026, 10, 26), 9, 30);
+        let late = at(date(2026, 10, 26), 23, 30);
+        let new_years_eve = at(date(2026, 12, 31), 12, 0);
+        let cases = [
+            (&morning, "today", date(2026, 10, 26)),
+            (&late, "today", date(2026, 10, 26)),
+            (&late, "tomorrow", date(2026, 10, 27)),
+            (&new_years_eve, "tomorrow", date(2027, 1, 1)),
+            (&morning, "2026-11-03", date(2026, 11, 3)),
+            (&morning, "2025-01-31", date(2025, 1, 31)),
+        ];
+        for (now, due, expected) in cases {
+            assert_eq!(
+                parse_at(now, &["t", "Pay", "rent", "--due", due]).unwrap(),
+                task("Pay rent", Some(expected), None),
+                "--due {due} at {now}"
+            );
         }
     }
 

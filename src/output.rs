@@ -1,6 +1,7 @@
 use comfy_table::{
     Attribute, Cell, ColumnConstraint, ContentArrangement, Row, Table, presets::NOTHING,
 };
+use jiff::civil::Date;
 use miette::{IntoDiagnostic, Result};
 use serde::{Serialize, Serializer};
 
@@ -124,7 +125,7 @@ impl Tabular for Reminder {
     fn row(&self) -> Vec<String> {
         vec![
             self.title.clone(),
-            self.due.clone().unwrap_or_default(),
+            self.due.map(|d| d.to_string()).unwrap_or_default(),
             self.priority
                 .map(|p| p.as_str().to_owned())
                 .unwrap_or_default(),
@@ -139,7 +140,7 @@ impl Summary for Reminder {
 
     fn detail(&self) -> Option<String> {
         let details: Vec<String> = [
-            self.due.as_ref().map(|d| format!("due {d}")),
+            self.due.map(|d| format!("due {d}")),
             self.priority.map(|p| format!("{} priority", p.as_str())),
         ]
         .into_iter()
@@ -184,7 +185,7 @@ impl Serialize for Note {
 struct ReminderJson<'a> {
     id: &'a str,
     title: &'a str,
-    due: Option<&'a str>,
+    due: Option<Date>,
     priority: Option<&'static str>,
 }
 
@@ -193,7 +194,7 @@ impl Serialize for Reminder {
         ReminderJson {
             id: &self.id,
             title: &self.title,
-            due: self.due.as_deref(),
+            due: self.due,
             priority: self.priority.map(|p| p.as_str()),
         }
         .serialize(serializer)
@@ -221,6 +222,7 @@ impl Serialize for Event {
 #[cfg(test)]
 mod tests {
     use insta::assert_snapshot;
+    use jiff::civil::date;
 
     use super::*;
     use crate::backend::Priority;
@@ -230,7 +232,7 @@ mod tests {
             Reminder {
                 id: "reminder-1".into(),
                 title: "Book flights to Lisbon for the November offsite".into(),
-                due: Some("2026-10-27".into()),
+                due: Some(date(2026, 10, 27)),
                 priority: Some(Priority::High),
             },
             Reminder {
@@ -314,7 +316,7 @@ mod tests {
         let reminder = Reminder {
             id: "reminder-1".into(),
             title: "Review pull request".into(),
-            due: Some("today".into()),
+            due: Some(date(2026, 10, 27)),
             priority: Some(Priority::High),
         };
         assert_snapshot!(
@@ -327,11 +329,11 @@ mod tests {
         );
         assert_snapshot!(
             single(&reminder, "Added", false).unwrap(),
-            @r#"Added "Review pull request" (due today, high priority)"#
+            @r#"Added "Review pull request" (due 2026-10-27, high priority)"#
         );
         assert_snapshot!(
             single(&reminder, "Completed", false).unwrap(),
-            @r#"Completed "Review pull request" (due today, high priority)"#
+            @r#"Completed "Review pull request" (due 2026-10-27, high priority)"#
         );
     }
 }

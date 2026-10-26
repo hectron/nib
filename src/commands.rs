@@ -1,12 +1,13 @@
-use miette::Result;
+use jiff::Zoned;
+use miette::{IntoDiagnostic, Result};
 
 use crate::backend::Backends;
 use crate::cli::{Action, Cli};
 use crate::output::{self, Style};
 
-pub fn run(cli: Cli, backends: &Backends, style: Style) -> Result<String> {
+pub fn run(cli: Cli, now: &Zoned, backends: &Backends, style: Style) -> Result<String> {
     let json = cli.json;
-    match cli.command.into_action() {
+    match cli.command.into_action(now).into_diagnostic()? {
         Action::NewNote(note) => {
             output::single(&backends.notes.create(note)?, "Created note", json)
         }
@@ -26,6 +27,8 @@ mod tests {
 
     use clap::Parser;
     use insta::assert_snapshot;
+    use jiff::civil::date;
+    use jiff::tz::{TimeZone, offset};
 
     use super::*;
     use crate::backend::{
@@ -77,7 +80,7 @@ mod tests {
                 Reminder {
                     id: "reminder-1".into(),
                     title: "Review pull request".into(),
-                    due: Some("2026-10-27".into()),
+                    due: Some(date(2026, 10, 27)),
                     priority: Some(Priority::High),
                 },
                 Reminder {
@@ -128,17 +131,24 @@ mod tests {
         )
     }
 
+    fn now() -> Zoned {
+        date(2026, 10, 26)
+            .at(9, 30, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-4)))
+            .unwrap()
+    }
+
     fn jot(args: &[&str]) -> String {
         let backends = fake_backends(&Built::default());
         let cli = Cli::try_parse_from(["jot"].iter().chain(args)).unwrap();
-        run(cli, &backends, Style::default()).unwrap()
+        run(cli, &now(), &backends, Style::default()).unwrap()
     }
 
     fn built_by(args: &[&str]) -> Vec<&'static str> {
         let built = Built::default();
         let backends = fake_backends(&built);
         let cli = Cli::try_parse_from(["jot"].iter().chain(args)).unwrap();
-        run(cli, &backends, Style::default()).unwrap();
+        run(cli, &now(), &backends, Style::default()).unwrap();
         built.take()
     }
 
@@ -193,7 +203,11 @@ mod tests {
         assert_snapshot!(jot(&["t", "Buy groceries"]), @r#"Added "Buy groceries""#);
         assert_snapshot!(
             jot(&["task", "add", "Review pull request", "--due", "today", "--priority", "high"]),
-            @r#"Added "Review pull request" (due today, high priority)"#
+            @r#"Added "Review pull request" (due 2026-10-26, high priority)"#
+        );
+        assert_snapshot!(
+            jot(&["t", "Pay", "rent", "-d", "tomorrow"]),
+            @r#"Added "Pay rent" (due 2026-10-27)"#
         );
     }
 
