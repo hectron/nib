@@ -38,6 +38,7 @@ mod tests {
     impl Notes for Fake {
         fn create(&self, note: NewNote) -> Result<Note, BackendError> {
             Ok(Note {
+                id: "note-4".into(),
                 title: note.title,
                 folder: note.folder,
             })
@@ -45,14 +46,15 @@ mod tests {
 
         fn list(&self, query: NoteQuery) -> Result<Vec<Note>, BackendError> {
             let notes = [
-                ("Groceries", "Personal"),
-                ("Q4 planning", "Work"),
-                ("Standup", "Work"),
+                ("note-1", "Groceries", "Personal"),
+                ("note-2", "Q4 planning", "Work"),
+                ("note-3", "Standup", "Work"),
             ];
             Ok(notes
                 .into_iter()
-                .filter(|(_, f)| query.folder.as_deref().is_none_or(|want| want == *f))
-                .map(|(title, f)| Note {
+                .filter(|(_, _, f)| query.folder.as_deref().is_none_or(|want| want == *f))
+                .map(|(id, title, f)| Note {
+                    id: id.into(),
                     title: title.into(),
                     folder: Some(f.into()),
                 })
@@ -63,6 +65,7 @@ mod tests {
     impl Reminders for Fake {
         fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError> {
             Ok(Reminder {
+                id: "reminder-3".into(),
                 title: reminder.title,
                 due: reminder.due,
                 priority: reminder.priority,
@@ -72,11 +75,13 @@ mod tests {
         fn list(&self) -> Result<Vec<Reminder>, BackendError> {
             Ok(vec![
                 Reminder {
+                    id: "reminder-1".into(),
                     title: "Review pull request".into(),
                     due: Some("2026-10-27".into()),
                     priority: Some(Priority::High),
                 },
                 Reminder {
+                    id: "reminder-2".into(),
                     title: "Buy groceries".into(),
                     due: None,
                     priority: None,
@@ -88,11 +93,13 @@ mod tests {
     impl Calendar for Fake {
         fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
             let mut events = vec![Event {
+                id: "event-1".into(),
                 title: "Team sync".into(),
                 start: "2026-10-26 10:00".into(),
             }];
             if query.span == Span::Week {
                 events.push(Event {
+                    id: "event-2".into(),
                     title: "Design review".into(),
                     start: "2026-10-29 14:30".into(),
                 });

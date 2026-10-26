@@ -5,12 +5,14 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Note {
+    pub id: String,
     pub title: String,
     pub folder: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reminder {
+    pub id: String,
     pub title: String,
     pub due: Option<String>,
     pub priority: Option<Priority>,
@@ -18,6 +20,7 @@ pub struct Reminder {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
+    pub id: String,
     pub title: String,
     pub start: String,
 }

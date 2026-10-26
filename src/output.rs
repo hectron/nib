@@ -164,6 +164,7 @@ impl Tabular for Event {
 
 #[derive(Serialize)]
 struct NoteJson<'a> {
+    id: &'a str,
     title: &'a str,
     folder: Option<&'a str>,
 }
@@ -171,6 +172,7 @@ struct NoteJson<'a> {
 impl Serialize for Note {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         NoteJson {
+            id: &self.id,
             title: &self.title,
             folder: self.folder.as_deref(),
         }
@@ -180,6 +182,7 @@ impl Serialize for Note {
 
 #[derive(Serialize)]
 struct ReminderJson<'a> {
+    id: &'a str,
     title: &'a str,
     due: Option<&'a str>,
     priority: Option<&'static str>,
@@ -188,6 +191,7 @@ struct ReminderJson<'a> {
 impl Serialize for Reminder {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         ReminderJson {
+            id: &self.id,
             title: &self.title,
             due: self.due.as_deref(),
             priority: self.priority.map(|p| p.as_str()),
@@ -198,6 +202,7 @@ impl Serialize for Reminder {
 
 #[derive(Serialize)]
 struct EventJson<'a> {
+    id: &'a str,
     title: &'a str,
     start: &'a str,
 }
@@ -205,6 +210,7 @@ struct EventJson<'a> {
 impl Serialize for Event {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         EventJson {
+            id: &self.id,
             title: &self.title,
             start: &self.start,
         }
@@ -222,11 +228,13 @@ mod tests {
     fn reminders() -> Vec<Reminder> {
         vec![
             Reminder {
+                id: "reminder-1".into(),
                 title: "Book flights to Lisbon for the November offsite".into(),
                 due: Some("2026-10-27".into()),
                 priority: Some(Priority::High),
             },
             Reminder {
+                id: "reminder-2".into(),
                 title: "Buy groceries".into(),
                 due: None,
                 priority: None,
@@ -277,6 +285,7 @@ mod tests {
     #[test]
     fn control_characters_never_reach_the_terminal() {
         let note = Note {
+            id: "note-1".into(),
             title: "Hi\u{1b}]0;pwned\u{7}\nthere".into(),
             folder: None,
         };
@@ -298,10 +307,12 @@ mod tests {
     #[test]
     fn the_caller_chooses_the_verb() {
         let note = Note {
+            id: "note-1".into(),
             title: "Q4 planning".into(),
             folder: Some("Work".into()),
         };
         let reminder = Reminder {
+            id: "reminder-1".into(),
             title: "Review pull request".into(),
             due: Some("today".into()),
             priority: Some(Priority::High),

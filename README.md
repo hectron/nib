@@ -25,7 +25,7 @@ jot t                # no title lists reminders
 
 `n` and `t` never read a word as a subcommand, so `jot n list` creates a note called "list". `note` and `task` take only subcommands, so use `jot note new "Title"` with the long form.
 
-Every command accepts `--json` for piping into other tools.
+Every command accepts `--json` for piping into other tools. Each JSON object starts with an `id` that identifies the note, reminder, or event.
 
 ## Development
 

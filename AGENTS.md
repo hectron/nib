@@ -46,7 +46,7 @@ jot t "Buy groceries"
 - Keep modules separated by concern: Apple wrappers, formatting, parsing, and configuration.
 - Keep startup overhead under 50 ms. Initialize Apple frameworks lazily, on first use, never in `Backends::system()`.
 - Every command that prints data must support `--json`.
-- Treat `--json` output as an interface that scripts depend on. Define its fields only in the JSON output types in `src/output.rs`, never by deriving `Serialize` on a domain type. Adding a field is fine; renaming or removing one breaks scripts, so do it only on purpose and say so in the commit. Every JSON shape has a snapshot in `src/commands.rs`.
+- Treat `--json` output as an interface that scripts depend on. Define its fields only in the JSON output types in `src/output.rs`, never by deriving `Serialize` on a domain type. Every object starts with the item's `id`. Adding a field is fine; renaming or removing one breaks scripts, so do it only on purpose and say so in the commit. Every JSON shape has a snapshot in `src/commands.rs`.
 - Don't give one command both a positional argument and subcommands. `clap` can't tell a title from a subcommand name, which is why `n` and `t` are separate commands.
 - Never let table rendering detect the terminal on its own; take color and width from `Style`.
 - Add or update `insta` snapshots for any change to command output, and review them before accepting.
