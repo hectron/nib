@@ -61,7 +61,7 @@ pub fn list<T: Tabular>(items: &[T], json: bool, style: Style) -> Result<String>
     header.max_height(1);
     table.set_header(header);
     for item in items {
-        let mut row = Row::from(item.row());
+        let mut row = Row::from(item.row().iter().map(|cell| clean(cell)));
         row.max_height(1);
         table.add_row(row);
     }
@@ -78,12 +78,22 @@ pub fn single<T: Summary>(item: &T, json: bool) -> Result<String> {
     if json {
         to_json(item)
     } else {
-        Ok(item.summary())
+        Ok(clean(&item.summary()))
     }
 }
 
 fn to_json<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     serde_json::to_string_pretty(value).into_diagnostic()
+}
+
+fn clean(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            c if c.is_control() => '\u{fffd}',
+            c => c,
+        })
+        .collect()
 }
 
 impl Tabular for Note {
@@ -214,8 +224,8 @@ mod tests {
             folder: None,
         };
         assert_snapshot!(single(&note, false).unwrap(), @r#"Created note "Hi�]0;pwned� there""#);
-        assert_snapshot!(list(&[note.clone()], false, Style::default()).unwrap(), @r"
-        TITLE                FOLDER
+        assert_snapshot!(list(std::slice::from_ref(&note), false, Style::default()).unwrap(), @r"
+        TITLE               FOLDER
         Hi�]0;pwned� there
         ");
         assert!(
