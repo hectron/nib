@@ -38,7 +38,7 @@ jot t "Buy groceries"
 
 - `src/cli.rs` — `clap` definitions. Every command line resolves to one `Action`. `n` and `t` take the rest of the line as the title; `note`, `task`, and `cal` take only subcommands.
 - `src/commands.rs` — dispatches on `Action` and returns the text to print, so tests run commands against fake backends.
-- `src/backend.rs` — domain types and one trait per app (`Notes`, `Reminders`, `Calendar`). `Backends::system()` picks the real implementations; all are stubs today.
+- `src/backend.rs` — domain types and one trait per app (`Notes`, `Reminders`, `Calendar`). `Backends::system()` picks the real implementations and builds each one on first use; all are stubs today.
 - `src/output.rs` — table and JSON rendering. `main` decides color and width once (`Style::detect`), and tests pass a fixed `Style`. Text output strips control characters.
 
 ## Rules for changes
