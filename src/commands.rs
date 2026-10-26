@@ -7,9 +7,13 @@ use crate::output::{self, Style};
 pub fn run(cli: Cli, backends: &Backends, style: Style) -> Result<String> {
     let json = cli.json;
     match cli.command.into_action() {
-        Action::NewNote(note) => output::single(&backends.notes.create(note)?, json),
+        Action::NewNote(note) => {
+            output::single(&backends.notes.create(note)?, "Created note", json)
+        }
         Action::ListNotes(query) => output::list(&backends.notes.list(query)?, json, style),
-        Action::AddTask(reminder) => output::single(&backends.reminders.add(reminder)?, json),
+        Action::AddTask(reminder) => {
+            output::single(&backends.reminders.add(reminder)?, "Added", json)
+        }
         Action::ListTasks => output::list(&backends.reminders.list()?, json, style),
         Action::ListEvents(query) => output::list(&backends.calendar.events(query)?, json, style),
     }

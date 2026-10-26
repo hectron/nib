@@ -13,7 +13,8 @@ pub trait Tabular: Serialize {
 }
 
 pub trait Summary: Serialize {
-    fn summary(&self) -> String;
+    fn title(&self) -> &str;
+    fn detail(&self) -> Option<String>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -74,11 +75,12 @@ pub fn list<T: Tabular>(items: &[T], json: bool, style: Style) -> Result<String>
     Ok(table.trim_fmt())
 }
 
-pub fn single<T: Summary>(item: &T, json: bool) -> Result<String> {
+pub fn single<T: Summary>(item: &T, verb: &str, json: bool) -> Result<String> {
     if json {
         to_json(item)
     } else {
-        Ok(clean(&item.summary()))
+        let detail = item.detail().map(|d| format!(" {d}")).unwrap_or_default();
+        Ok(clean(&format!("{verb} \"{}\"{detail}", item.title())))
     }
 }
 
@@ -106,11 +108,12 @@ impl Tabular for Note {
 }
 
 impl Summary for Note {
-    fn summary(&self) -> String {
-        match &self.folder {
-            Some(folder) => format!("Created note \"{}\" in {folder}", self.title),
-            None => format!("Created note \"{}\"", self.title),
-        }
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn detail(&self) -> Option<String> {
+        self.folder.as_ref().map(|folder| format!("in {folder}"))
     }
 }
 
@@ -130,7 +133,11 @@ impl Tabular for Reminder {
 }
 
 impl Summary for Reminder {
-    fn summary(&self) -> String {
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn detail(&self) -> Option<String> {
         let details: Vec<String> = [
             self.due.as_ref().map(|d| format!("due {d}")),
             self.priority.map(|p| format!("{} priority", p.as_str())),
@@ -139,9 +146,9 @@ impl Summary for Reminder {
         .flatten()
         .collect();
         if details.is_empty() {
-            format!("Added \"{}\"", self.title)
+            None
         } else {
-            format!("Added \"{}\" ({})", self.title, details.join(", "))
+            Some(format!("({})", details.join(", ")))
         }
     }
 }
@@ -223,13 +230,16 @@ mod tests {
             title: "Hi\u{1b}]0;pwned\u{7}\nthere".into(),
             folder: None,
         };
-        assert_snapshot!(single(&note, false).unwrap(), @r#"Created note "Hi�]0;pwned� there""#);
+        assert_snapshot!(
+            single(&note, "Created note", false).unwrap(),
+            @r#"Created note "Hi�]0;pwned� there""#
+        );
         assert_snapshot!(list(std::slice::from_ref(&note), false, Style::default()).unwrap(), @r"
         TITLE               FOLDER
         Hi�]0;pwned� there
         ");
         assert!(
-            single(&note, true)
+            single(&note, "Created note", true)
                 .unwrap()
                 .contains(r#""Hi\u001b]0;pwned\u0007\nthere""#)
         );
