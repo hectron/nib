@@ -39,13 +39,14 @@ jot t "Buy groceries"
 - `src/cli.rs` — `clap` definitions. Every command line resolves to one `Action`. `n` and `t` take the rest of the line as the title; `note`, `task`, and `cal` take only subcommands.
 - `src/commands.rs` — dispatches on `Action` and returns the text to print, so tests run commands against fake backends.
 - `src/backend.rs` — domain types and one trait per app (`Notes`, `Reminders`, `Calendar`). `Backends::system()` picks the real implementations and builds each one on first use; all are stubs today.
-- `src/output.rs` — table and JSON rendering. `main` decides color and width once (`Style::detect`), and tests pass a fixed `Style`. Text output strips control characters.
+- `src/output.rs` — table and JSON rendering. `main` decides color and width once (`Style::detect`), and tests pass a fixed `Style`. Text output strips control characters. JSON goes through private output types (`NoteJson`, `ReminderJson`, `EventJson`), not the domain structs.
 
 ## Rules for changes
 
 - Keep modules separated by concern: Apple wrappers, formatting, parsing, and configuration.
 - Keep startup overhead under 50 ms. Initialize Apple frameworks lazily, on first use, never in `Backends::system()`.
 - Every command that prints data must support `--json`.
+- Treat `--json` output as an interface that scripts depend on. Define its fields only in the JSON output types in `src/output.rs`, never by deriving `Serialize` on a domain type. Adding a field is fine; renaming or removing one breaks scripts, so do it only on purpose and say so in the commit. Every JSON shape has a snapshot in `src/commands.rs`.
 - Don't give one command both a positional argument and subcommands. `clap` can't tell a title from a subcommand name, which is why `n` and `t` are separate commands.
 - Never let table rendering detect the terminal on its own; take color and width from `Style`.
 - Add or update `insta` snapshots for any change to command output, and review them before accepting.
