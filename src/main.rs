@@ -6,11 +6,13 @@ mod output;
 use std::io::{self, Write};
 
 use clap::Parser;
+use jiff::tz::TimeZone;
+use jiff::{Timestamp, Zoned};
 use miette::IntoDiagnostic;
 
 fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();
-    let now = jiff::Zoned::now();
+    let now = Zoned::new(Timestamp::now(), local_zone());
     let out = commands::run(
         cli,
         &now,
@@ -24,4 +26,20 @@ fn main() -> miette::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         result => result.into_diagnostic(),
     }
+}
+
+// TimeZone::system() scans every file in zoneinfo on first use (3-8 ms);
+// reading the /etc/localtime link directly takes about 0.1 ms.
+fn local_zone() -> TimeZone {
+    std::env::var_os("TZ")
+        .is_none()
+        .then(read_localtime)
+        .flatten()
+        .unwrap_or_else(TimeZone::system)
+}
+
+fn read_localtime() -> Option<TimeZone> {
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let (_, name) = target.to_str()?.rsplit_once("zoneinfo/")?;
+    TimeZone::tzif(name, &std::fs::read("/etc/localtime").ok()?).ok()
 }
