@@ -1,5 +1,6 @@
 use std::cell::LazyCell;
 
+use jiff::Zoned;
 use jiff::civil::Date;
 use miette::Diagnostic;
 use thiserror::Error;
@@ -23,7 +24,7 @@ pub struct Reminder {
 pub struct Event {
     pub id: String,
     pub title: String,
-    pub start: String,
+    pub start: Zoned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

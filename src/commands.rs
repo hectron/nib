@@ -27,7 +27,7 @@ mod tests {
 
     use clap::Parser;
     use insta::assert_snapshot;
-    use jiff::civil::date;
+    use jiff::civil::{Date, date};
     use jiff::tz::{TimeZone, offset};
 
     use super::*;
@@ -98,13 +98,13 @@ mod tests {
             let mut events = vec![Event {
                 id: "event-1".into(),
                 title: "Team sync".into(),
-                start: "2026-10-26 10:00".into(),
+                start: at(date(2026, 10, 26), 10, 0),
             }];
             if query.span == Span::Week {
                 events.push(Event {
                     id: "event-2".into(),
                     title: "Design review".into(),
-                    start: "2026-10-29 14:30".into(),
+                    start: at(date(2026, 10, 29), 14, 30),
                 });
             }
             Ok(events)
@@ -131,11 +131,14 @@ mod tests {
         )
     }
 
-    fn now() -> Zoned {
-        date(2026, 10, 26)
-            .at(9, 30, 0, 0)
+    fn at(day: Date, hour: i8, minute: i8) -> Zoned {
+        day.at(hour, minute, 0, 0)
             .to_zoned(TimeZone::fixed(offset(-4)))
             .unwrap()
+    }
+
+    fn now() -> Zoned {
+        at(date(2026, 10, 26), 9, 30)
     }
 
     fn jot(args: &[&str]) -> String {

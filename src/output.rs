@@ -1,6 +1,7 @@
 use comfy_table::{
     Attribute, Cell, ColumnConstraint, ContentArrangement, Row, Table, presets::NOTHING,
 };
+use jiff::Zoned;
 use jiff::civil::Date;
 use miette::{IntoDiagnostic, Result};
 use serde::{Serialize, Serializer};
@@ -159,7 +160,10 @@ impl Tabular for Event {
     const TITLE_COLUMN: usize = 1;
 
     fn row(&self) -> Vec<String> {
-        vec![self.start.clone(), self.title.clone()]
+        vec![
+            self.start.strftime("%Y-%m-%d %H:%M").to_string(),
+            self.title.clone(),
+        ]
     }
 }
 
@@ -205,7 +209,8 @@ impl Serialize for Reminder {
 struct EventJson<'a> {
     id: &'a str,
     title: &'a str,
-    start: &'a str,
+    #[serde(serialize_with = "rfc3339")]
+    start: &'a Zoned,
 }
 
 impl Serialize for Event {
@@ -217,6 +222,10 @@ impl Serialize for Event {
         }
         .serialize(serializer)
     }
+}
+
+fn rfc3339<S: Serializer>(time: &&Zoned, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(&time.timestamp().display_with_offset(time.offset()))
 }
 
 #[cfg(test)]
