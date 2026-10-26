@@ -17,6 +17,9 @@ pub fn run(cli: Cli, backends: &Backends, style: Style) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use clap::Parser;
     use insta::assert_snapshot;
 
@@ -94,10 +97,47 @@ mod tests {
         }
     }
 
+    type Built = Rc<RefCell<Vec<&'static str>>>;
+
+    fn fake_backends(built: &Built) -> Backends {
+        let (notes, reminders, calendar) = (built.clone(), built.clone(), built.clone());
+        Backends::new(
+            move || {
+                notes.borrow_mut().push("notes");
+                Box::new(Fake)
+            },
+            move || {
+                reminders.borrow_mut().push("reminders");
+                Box::new(Fake)
+            },
+            move || {
+                calendar.borrow_mut().push("calendar");
+                Box::new(Fake)
+            },
+        )
+    }
+
     fn jot(args: &[&str]) -> String {
-        let backends = Backends::new(|| Box::new(Fake), || Box::new(Fake), || Box::new(Fake));
+        let backends = fake_backends(&Built::default());
         let cli = Cli::try_parse_from(["jot"].iter().chain(args)).unwrap();
         run(cli, &backends, Style::default()).unwrap()
+    }
+
+    fn built_by(args: &[&str]) -> Vec<&'static str> {
+        let built = Built::default();
+        let backends = fake_backends(&built);
+        let cli = Cli::try_parse_from(["jot"].iter().chain(args)).unwrap();
+        run(cli, &backends, Style::default()).unwrap();
+        built.take()
+    }
+
+    #[test]
+    fn each_command_builds_only_its_backend() {
+        assert_eq!(built_by(&["n", "Quick thought"]), ["notes"]);
+        assert_eq!(built_by(&["note", "ls", "-f", "Work"]), ["notes"]);
+        assert_eq!(built_by(&["t", "Buy groceries"]), ["reminders"]);
+        assert_eq!(built_by(&["task"]), ["reminders"]);
+        assert_eq!(built_by(&["cal", "--week"]), ["calendar"]);
     }
 
     #[test]
