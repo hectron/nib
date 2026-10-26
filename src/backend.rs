@@ -1,30 +1,28 @@
 use std::cell::LazyCell;
 
 use miette::Diagnostic;
-use serde::Serialize;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Note {
     pub title: String,
     pub folder: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Reminder {
     pub title: String,
     pub due: Option<String>,
     pub priority: Option<Priority>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub title: String,
     pub start: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, clap::ValueEnum)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Priority {
     Low,
     Medium,

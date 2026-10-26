@@ -2,7 +2,7 @@ use comfy_table::{
     Attribute, Cell, ColumnConstraint, ContentArrangement, Row, Table, presets::NOTHING,
 };
 use miette::{IntoDiagnostic, Result};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::backend::{Event, Note, Reminder};
 
@@ -159,6 +159,56 @@ impl Tabular for Event {
 
     fn row(&self) -> Vec<String> {
         vec![self.start.clone(), self.title.clone()]
+    }
+}
+
+#[derive(Serialize)]
+struct NoteJson<'a> {
+    title: &'a str,
+    folder: Option<&'a str>,
+}
+
+impl Serialize for Note {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        NoteJson {
+            title: &self.title,
+            folder: self.folder.as_deref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Serialize)]
+struct ReminderJson<'a> {
+    title: &'a str,
+    due: Option<&'a str>,
+    priority: Option<&'static str>,
+}
+
+impl Serialize for Reminder {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ReminderJson {
+            title: &self.title,
+            due: self.due.as_deref(),
+            priority: self.priority.map(|p| p.as_str()),
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Serialize)]
+struct EventJson<'a> {
+    title: &'a str,
+    start: &'a str,
+}
+
+impl Serialize for Event {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        EventJson {
+            title: &self.title,
+            start: &self.start,
+        }
+        .serialize(serializer)
     }
 }
 
