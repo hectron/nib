@@ -111,20 +111,22 @@ impl Reminders for Demo {
 impl Calendar for Demo {
     fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
         let events = [
-            ("event-1", "Book club", self.at(-1, 18, 0)?),
-            ("event-2", "Standup", self.at(0, 9, 30)?),
-            ("event-3", "Design review", self.at(0, 14, 0)?),
-            ("event-4", "Lunch with Sam", self.at(2, 12, 0)?),
-            ("event-5", "Sprint planning", self.at(5, 10, 0)?),
-            ("event-6", "Retro", self.at(9, 16, 0)?),
+            ("event-1", "Book club", self.at(-1, 18, 0)?, false),
+            ("event-2", "Standup", self.at(0, 9, 30)?, false),
+            ("event-3", "Design review", self.at(0, 14, 0)?, false),
+            ("event-4", "Lunch with Sam", self.at(2, 12, 0)?, false),
+            ("event-5", "Team offsite", self.at(3, 0, 0)?, true),
+            ("event-6", "Sprint planning", self.at(5, 10, 0)?, false),
+            ("event-7", "Retro", self.at(9, 16, 0)?, false),
         ];
         Ok(events
             .into_iter()
-            .filter(|(_, _, start)| query.range.contains(start))
-            .map(|(id, title, start)| Event {
+            .filter(|(_, _, start, _)| query.range.contains(start))
+            .map(|(id, title, start, all_day)| Event {
                 id: id.into(),
                 title: title.into(),
                 start,
+                all_day,
             })
             .collect())
     }
@@ -159,11 +161,12 @@ mod tests {
         2026-10-26 14:00  Design review
         ");
         assert_snapshot!(nib(&["cal", "--week"]), @r"
-        START             TITLE
-        2026-10-26 09:30  Standup
-        2026-10-26 14:00  Design review
-        2026-10-28 12:00  Lunch with Sam
-        2026-10-31 10:00  Sprint planning
+        START               TITLE
+        2026-10-26 09:30    Standup
+        2026-10-26 14:00    Design review
+        2026-10-28 12:00    Lunch with Sam
+        2026-10-29 all day  Team offsite
+        2026-10-31 10:00    Sprint planning
         ");
     }
 

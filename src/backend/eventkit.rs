@@ -140,6 +140,7 @@ fn to_event(event: &EKEvent, zone: &TimeZone) -> Option<Event> {
             id: event_id(&identifier.to_string(), start.timestamp()),
             title: event.title().to_string(),
             start,
+            all_day: event.isAllDay(),
         })
     }
 }

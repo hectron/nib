@@ -160,10 +160,12 @@ impl Tabular for Event {
     const TITLE_COLUMN: usize = 1;
 
     fn row(&self) -> Vec<String> {
-        vec![
-            self.start.strftime("%Y-%m-%d %H:%M").to_string(),
-            self.title.clone(),
-        ]
+        let start = if self.all_day {
+            self.start.strftime("%Y-%m-%d all day")
+        } else {
+            self.start.strftime("%Y-%m-%d %H:%M")
+        };
+        vec![start.to_string(), self.title.clone()]
     }
 }
 
@@ -211,6 +213,7 @@ struct EventJson<'a> {
     title: &'a str,
     #[serde(serialize_with = "rfc3339")]
     start: &'a Zoned,
+    all_day: bool,
 }
 
 impl Serialize for Event {
@@ -219,6 +222,7 @@ impl Serialize for Event {
             id: &self.id,
             title: &self.title,
             start: &self.start,
+            all_day: self.all_day,
         }
         .serialize(serializer)
     }

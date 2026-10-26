@@ -96,18 +96,25 @@ mod tests {
     impl Calendar for Fake {
         fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
             let events = [
-                ("event-1", "Book club", at(date(2026, 10, 25), 19, 0)),
-                ("event-2", "Team sync", at(date(2026, 10, 26), 10, 0)),
-                ("event-3", "Design review", at(date(2026, 10, 29), 14, 30)),
-                ("event-4", "Retro", at(date(2026, 11, 2), 9, 0)),
+                ("event-1", "Book club", at(date(2026, 10, 25), 19, 0), false),
+                ("event-2", "Team sync", at(date(2026, 10, 26), 10, 0), false),
+                ("event-5", "Offsite", at(date(2026, 10, 28), 0, 0), true),
+                (
+                    "event-3",
+                    "Design review",
+                    at(date(2026, 10, 29), 14, 30),
+                    false,
+                ),
+                ("event-4", "Retro", at(date(2026, 11, 2), 9, 0), false),
             ];
             Ok(events
                 .into_iter()
-                .filter(|(_, _, start)| query.range.contains(start))
-                .map(|(id, title, start)| Event {
+                .filter(|(_, _, start, _)| query.range.contains(start))
+                .map(|(id, title, start, all_day)| Event {
                     id: id.into(),
                     title: title.into(),
                     start,
+                    all_day,
                 })
                 .collect())
         }
@@ -278,9 +285,10 @@ mod tests {
         2026-10-26 10:00  Team sync
         ");
         assert_snapshot!(nib(&["c", "list", "--week"]), @r"
-        START             TITLE
-        2026-10-26 10:00  Team sync
-        2026-10-29 14:30  Design review
+        START               TITLE
+        2026-10-26 10:00    Team sync
+        2026-10-28 all day  Offsite
+        2026-10-29 14:30    Design review
         ");
     }
 
@@ -291,12 +299,20 @@ mod tests {
           {
             "id": "event-2",
             "title": "Team sync",
-            "start": "2026-10-26T10:00:00-04:00"
+            "start": "2026-10-26T10:00:00-04:00",
+            "all_day": false
+          },
+          {
+            "id": "event-5",
+            "title": "Offsite",
+            "start": "2026-10-28T00:00:00-04:00",
+            "all_day": true
           },
           {
             "id": "event-3",
             "title": "Design review",
-            "start": "2026-10-29T14:30:00-04:00"
+            "start": "2026-10-29T14:30:00-04:00",
+            "all_day": false
           }
         ]
         "#);

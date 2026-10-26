@@ -29,6 +29,7 @@ pub struct Event {
     pub id: String,
     pub title: String,
     pub start: Zoned,
+    pub all_day: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
