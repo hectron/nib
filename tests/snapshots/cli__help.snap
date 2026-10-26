@@ -7,9 +7,11 @@ Fast CLI for Apple Notes, Reminders, and Calendar
 Usage: jot [OPTIONS] <COMMAND>
 
 Commands:
-  note  Capture and list notes [alias: n]
-  task  Add and list reminders [aliases: t, todo]
+  note  Create and list notes
+  task  Add and list reminders [alias: todo]
   cal   Show calendar events [alias: c]
+  n     Create a note from the rest of the line, or list notes
+  t     Add a reminder from the rest of the line, or list reminders
   help  Print this message or the help of the given subcommand(s)
 
 Options:

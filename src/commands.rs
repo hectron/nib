@@ -1,33 +1,28 @@
 use miette::Result;
 
 use crate::backend::Backends;
-use crate::cli::{CalAction, Cli, Command, NoteAction, TaskAction};
+use crate::cli::{Action, Cli};
 use crate::output;
 
 pub fn run(cli: Cli, backends: &Backends) -> Result<String> {
     let json = cli.json;
-    match cli.command {
-        Command::Note(args) => match args.into_action() {
-            NoteAction::New { title, opts } => output::single(
-                &backends.notes.create(&title, opts.folder.as_deref())?,
-                json,
-            ),
-            NoteAction::List { opts } => {
-                output::list(&backends.notes.list(opts.folder.as_deref())?, json)
-            }
-        },
-        Command::Task(args) => match args.into_action() {
-            TaskAction::Add { title, opts } => output::single(
-                &backends
-                    .reminders
-                    .add(&title, opts.due.as_deref(), opts.priority)?,
-                json,
-            ),
-            TaskAction::List => output::list(&backends.reminders.list()?, json),
-        },
-        Command::Cal(args) => match args.into_action() {
-            CalAction::List { opts } => output::list(&backends.calendar.events(opts.span())?, json),
-        },
+    match cli.command.into_action() {
+        Action::NewNote { title, folder } => {
+            output::single(&backends.notes.create(&title, folder.as_deref())?, json)
+        }
+        Action::ListNotes { folder } => {
+            output::list(&backends.notes.list(folder.as_deref())?, json)
+        }
+        Action::AddTask {
+            title,
+            due,
+            priority,
+        } => output::single(
+            &backends.reminders.add(&title, due.as_deref(), priority)?,
+            json,
+        ),
+        Action::ListTasks => output::list(&backends.reminders.list()?, json),
+        Action::ListEvents { span } => output::list(&backends.calendar.events(span)?, json),
     }
 }
 
