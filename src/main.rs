@@ -1,6 +1,7 @@
 mod backend;
 mod cli;
 mod commands;
+mod demo;
 mod output;
 
 use std::io::{self, Write};
@@ -13,12 +14,12 @@ use miette::IntoDiagnostic;
 fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();
     let now = Zoned::new(Timestamp::now(), local_zone());
-    let out = commands::run(
-        cli,
-        &now,
-        &backend::Backends::system(),
-        output::Style::detect(),
-    )?;
+    let backends = if std::env::var_os("NIB_DEMO").is_some_and(|v| !v.is_empty()) {
+        demo::backends(&now)
+    } else {
+        backend::Backends::system()
+    };
+    let out = commands::run(cli, &now, &backends, output::Style::detect())?;
     if out.is_empty() {
         return Ok(());
     }

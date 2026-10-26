@@ -37,7 +37,8 @@ nib t "Buy groceries"
 
 ## Code layout
 
-- `src/main.rs` — reads the clock and the local time zone once, then hands `now` to `commands::run`.
+- `src/main.rs` — reads the clock and the local time zone once, then hands `now` to `commands::run`. Uses the demo backends when `NIB_DEMO` is set.
+- `src/demo.rs` — sample notes, reminders, and events for `NIB_DEMO=1`, with dates relative to `now`. Nothing is saved.
 - `src/cli.rs` — `clap` definitions. Every command line resolves to one `Action`. `n` and `t` take the rest of the line as the title; `note`, `task`, and `cal` take only subcommands. `into_action` takes `now` and turns relative input such as `--due today` and `cal --week` into a concrete date or `Range<Zoned>`, so backends never read the clock.
 - `src/commands.rs` — dispatches on `Action` and returns the text to print, so tests run commands against fake backends.
 - `src/backend.rs` — domain types and one trait per app (`Notes`, `Reminders`, `Calendar`). `Backends::system()` picks the real implementations and builds each one on first use; all are stubs today. Due dates are `jiff::civil::Date`; event starts are `Zoned`.

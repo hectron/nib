@@ -3,6 +3,13 @@
 Fast command-line interface for Apple Notes, Reminders, and Calendar.
 
 > **Status:** the command-line interface, output formatting, and tests are in place. No Apple app integration is wired up yet, so every command currently exits with a "not implemented" error.
+>
+> To try it anyway, set `NIB_DEMO=1` and every command runs against built-in sample data, with dates relative to today. Nothing is saved.
+>
+> ```bash
+> NIB_DEMO=1 nib cal --week
+> NIB_DEMO=1 nib t --json
+> ```
 
 ```bash
 nib note new "Meeting with Team" --folder Work
