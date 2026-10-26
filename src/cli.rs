@@ -240,6 +240,18 @@ mod tests {
     }
 
     #[test]
+    fn blank_titles_are_rejected() {
+        for args in [&["n", ""][..], &["t", "  "], &["note", "new", ""]] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn task_options_need_a_title() {
         let err = parse(&["task", "--due", "today"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);

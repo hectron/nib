@@ -199,4 +199,30 @@ mod tests {
         2026-10-29 14:30  Design review
         ");
     }
+
+    #[test]
+    fn options_before_subcommand() {
+        assert_snapshot!(jot(&["note", "-f", "Work", "list"]), @r"
+        TITLE        FOLDER
+        Q4 planning  Work
+        Standup      Work
+        ");
+        assert_eq!(
+            jot(&["task", "--json", "ls"]),
+            jot(&["task", "ls", "--json"])
+        );
+        assert_eq!(
+            jot(&["cal", "--json", "list"]),
+            jot(&["cal", "list", "--json"])
+        );
+        assert_eq!(jot(&["c", "-w", "ls"]), jot(&["c", "ls", "-w"]));
+    }
+
+    #[test]
+    fn capture_takes_the_rest_of_the_line() {
+        assert_snapshot!(jot(&["n", "Buy", "oat", "milk"]), @r#"Created note "Buy oat milk""#);
+        assert_snapshot!(jot(&["n", "list"]), @r#"Created note "list""#);
+        assert_snapshot!(jot(&["note", "new", "list"]), @r#"Created note "list""#);
+        assert_snapshot!(jot(&["t", "ls", "-p", "low"]), @r#"Added "ls" (low priority)"#);
+    }
 }
