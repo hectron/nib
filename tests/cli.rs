@@ -33,3 +33,11 @@ fn stub_backend_fails_cleanly() {
         "{stderr}"
     );
 }
+
+#[test]
+fn stub_backend_error_has_a_code() {
+    let out = jot(&["cal"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("jot::backend::not_implemented"), "{stderr}");
+}
