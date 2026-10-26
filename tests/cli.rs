@@ -35,6 +35,24 @@ fn stub_backend_fails_cleanly() {
 }
 
 #[test]
+fn demo_backend_shows_sample_data() {
+    let out = cargo_bin_cmd!("nib")
+        .arg("t")
+        .env("NO_COLOR", "1")
+        .env("NIB_DEMO", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.starts_with("TITLE"), "{stdout}");
+    assert!(stdout.contains("Review pull request"), "{stdout}");
+}
+
+#[test]
 fn stub_backend_error_has_a_code() {
     let out = nib(&["cal"]);
     assert_eq!(out.status.code(), Some(1));
