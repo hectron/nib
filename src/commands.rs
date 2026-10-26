@@ -2,16 +2,16 @@ use miette::Result;
 
 use crate::backend::Backends;
 use crate::cli::{Action, Cli};
-use crate::output;
+use crate::output::{self, Style};
 
-pub fn run(cli: Cli, backends: &Backends) -> Result<String> {
+pub fn run(cli: Cli, backends: &Backends, style: Style) -> Result<String> {
     let json = cli.json;
     match cli.command.into_action() {
         Action::NewNote { title, folder } => {
             output::single(&backends.notes.create(&title, folder.as_deref())?, json)
         }
         Action::ListNotes { folder } => {
-            output::list(&backends.notes.list(folder.as_deref())?, json)
+            output::list(&backends.notes.list(folder.as_deref())?, json, style)
         }
         Action::AddTask {
             title,
@@ -21,8 +21,8 @@ pub fn run(cli: Cli, backends: &Backends) -> Result<String> {
             &backends.reminders.add(&title, due.as_deref(), priority)?,
             json,
         ),
-        Action::ListTasks => output::list(&backends.reminders.list()?, json),
-        Action::ListEvents { span } => output::list(&backends.calendar.events(span)?, json),
+        Action::ListTasks => output::list(&backends.reminders.list()?, json, style),
+        Action::ListEvents { span } => output::list(&backends.calendar.events(span)?, json, style),
     }
 }
 
@@ -114,7 +114,7 @@ mod tests {
             calendar: Box::new(Fake),
         };
         let cli = Cli::try_parse_from(["jot"].iter().chain(args)).unwrap();
-        run(cli, &backends).unwrap()
+        run(cli, &backends, Style::default()).unwrap()
     }
 
     #[test]
