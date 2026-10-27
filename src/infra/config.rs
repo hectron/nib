@@ -6,30 +6,7 @@ use miette::Diagnostic;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::backend::Priority;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Config {
-    pub task: Task,
-    pub cal: Cal,
-    pub note: Note,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Task {
-    pub list: Option<String>,
-    pub priority: Option<Priority>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Cal {
-    pub calendars: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Note {
-    pub folder: Option<String>,
-}
+use crate::domain::{Config, Priority};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -148,30 +125,28 @@ fn apply_file(config: &mut Config, path: &Path) -> Result<(), ConfigError> {
         path: path.to_owned(),
         source,
     })?;
-    config.apply(parsed);
+    apply(config, parsed);
     Ok(())
 }
 
-impl Config {
-    fn apply(&mut self, other: FileConfig) {
-        if let Some(task) = other.task {
-            if task.list.is_some() {
-                self.task.list = task.list;
-            }
-            if task.priority.is_some() {
-                self.task.priority = task.priority;
-            }
+fn apply(config: &mut Config, other: FileConfig) {
+    if let Some(task) = other.task {
+        if task.list.is_some() {
+            config.task.list = task.list;
         }
-        if let Some(cal) = other.cal
-            && let Some(calendars) = cal.calendars
-        {
-            self.cal.calendars = calendars;
+        if task.priority.is_some() {
+            config.task.priority = task.priority;
         }
-        if let Some(note) = other.note
-            && note.folder.is_some()
-        {
-            self.note.folder = note.folder;
-        }
+    }
+    if let Some(cal) = other.cal
+        && let Some(calendars) = cal.calendars
+    {
+        config.cal.calendars = calendars;
+    }
+    if let Some(note) = other.note
+        && note.folder.is_some()
+    {
+        config.note.folder = note.folder;
     }
 }
 
@@ -235,8 +210,8 @@ mod tests {
     use jiff::tz::{TimeZone, offset};
 
     use super::*;
-    use crate::backend::{EventQuery, NewReminder};
     use crate::cli::{Action, Cli};
+    use crate::domain::{EventQuery, NewReminder};
 
     struct TempDir(PathBuf);
 

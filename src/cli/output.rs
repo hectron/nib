@@ -6,7 +6,7 @@ use jiff::civil::Date;
 use miette::{IntoDiagnostic, Result};
 use serde::{Serialize, Serializer};
 
-use crate::backend::{Event, Note, Reminder};
+use crate::domain::{Event, Note, Priority, Reminder};
 
 pub trait Tabular: Serialize {
     const HEADER: &'static [&'static str];
@@ -201,7 +201,7 @@ impl Serialize for Reminder {
             id: &self.id,
             title: &self.title,
             due: self.due,
-            priority: self.priority.map(|p| p.as_str()),
+            priority: self.priority.map(Priority::as_str),
         }
         .serialize(serializer)
     }
@@ -228,7 +228,7 @@ impl Serialize for Event {
     }
 }
 
-fn rfc3339<S: Serializer>(time: &&Zoned, serializer: S) -> Result<S::Ok, S::Error> {
+fn rfc3339<S: Serializer>(time: &Zoned, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.collect_str(&time.timestamp().display_with_offset(time.offset()))
 }
 
@@ -238,7 +238,6 @@ mod tests {
     use jiff::civil::date;
 
     use super::*;
-    use crate::backend::Priority;
 
     fn reminders() -> Vec<Reminder> {
         vec![

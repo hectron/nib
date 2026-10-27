@@ -4,8 +4,9 @@ use clap::{Args, Parser, Subcommand};
 use jiff::civil::Date;
 use jiff::{ToSpan, Zoned};
 
-use crate::backend::{EventQuery, NewNote, NewReminder, NoteQuery, Priority};
-use crate::config::Config;
+use crate::domain::{Config, EventQuery, NewNote, NewReminder, NoteQuery, Priority};
+
+pub mod output;
 
 /// Fast CLI for Apple Notes, Reminders, and Calendar
 #[derive(Debug, Parser)]
@@ -500,14 +501,14 @@ mod tests {
     #[test]
     fn configuration_defaults_apply_only_where_intended() {
         let config = Config {
-            task: crate::config::Task {
+            task: crate::domain::TaskConfig {
                 list: Some("Snowglobe".into()),
                 priority: Some(Priority::Medium),
             },
-            cal: crate::config::Cal {
+            cal: crate::domain::CalendarConfig {
                 calendars: vec!["Work".into()],
             },
-            note: crate::config::Note {
+            note: crate::domain::NoteConfig {
                 folder: Some("Inbox".into()),
             },
         };

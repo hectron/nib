@@ -1,7 +1,7 @@
 use jiff::civil::Date;
 use jiff::{ToSpan, Zoned};
 
-use crate::backend::{
+use crate::domain::{
     BackendError, Backends, Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery,
     Notes, Priority, Reminder, ReminderChange, ReminderList, ReminderSnapshot, Reminders,
     StoredReminder,
@@ -25,18 +25,18 @@ impl Demo {
         self.0
             .date()
             .checked_add(offset.days())
-            .map_err(|e| failed(app, e))
+            .map_err(|error| failed(app, &error))
     }
 
     fn at(&self, offset: i32, hour: i8, minute: i8) -> Result<Zoned, BackendError> {
         self.day(offset, "Calendar")?
             .at(hour, minute, 0, 0)
             .to_zoned(self.0.time_zone().clone())
-            .map_err(|e| failed("Calendar", e))
+            .map_err(|error| failed("Calendar", &error))
     }
 }
 
-fn failed(app: &'static str, error: jiff::Error) -> BackendError {
+fn failed(app: &'static str, error: &jiff::Error) -> BackendError {
     BackendError::Failed {
         app,
         message: error.to_string(),
@@ -131,11 +131,13 @@ impl Reminders for Demo {
                 title: r.title,
                 notes: None,
                 due: r.due,
+                due_components: None,
                 priority: r.priority,
                 modified: None,
-                has_alarms: false,
-                has_recurrence: false,
-                has_url: false,
+                alarms_present: false,
+                recurrence_present: false,
+                url: None,
+                backup_partial: false,
             })
             .collect();
         Ok(ReminderSnapshot {
@@ -220,10 +222,10 @@ mod tests {
     use jiff::tz::{TimeZone, offset};
 
     use super::*;
+    use crate::app::commands::run;
     use crate::cli::Cli;
-    use crate::commands::run;
-    use crate::host::Scripted;
-    use crate::output::Style;
+    use crate::cli::output::Style;
+    use crate::infra::host::Scripted;
 
     fn nib(args: &[&str]) -> String {
         let now = date(2026, 10, 26)
@@ -233,7 +235,7 @@ mod tests {
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
         run(
             cli,
-            &crate::config::Config::default(),
+            &crate::domain::Config::default(),
             &now,
             &backends(&now),
             Style::default(),

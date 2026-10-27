@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use jiff::civil::Date;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::backend::{Priority, ReminderChange, ReminderEdit, ReminderSnapshot, StoredReminder};
+use crate::domain::{
+    FieldEdit, Priority, ReminderChange, ReminderEdit, ReminderSnapshot, StoredReminder,
+};
 
 const HELP: &str = "<!-- nib task edit
 Edit titles, due dates (📅 YYYY-MM-DD), and priority (⏫ high, 🔼 medium, 🔽 low).
@@ -144,10 +147,10 @@ fn render_item(item: &Item) -> String {
         line.push_str(priority_marker(priority));
     }
     if let Some(due) = item.due {
-        line.push_str(&format!(" {DUE} {due}"));
+        write!(&mut line, " {DUE} {due}").expect("writing to a String cannot fail");
     }
     if let Some(id) = &item.id {
-        line.push_str(&format!(" {ID} {id}"));
+        write!(&mut line, " {ID} {id}").expect("writing to a String cannot fail");
     }
     for note in item.notes.iter().flat_map(|n| n.split('\n')) {
         line.push('\n');
@@ -486,8 +489,9 @@ fn representable(reminder: &StoredReminder) -> bool {
 fn representable_text(text: &str) -> bool {
     text.chars().all(|c| match c {
         '\t' | '\n' | '\r' => true,
-        '\u{85}' | '\u{2028}' | '\u{2029}' => false,
-        '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => false,
+        '\u{85}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {
+            false
+        }
         c => !c.is_control(),
     })
 }
@@ -515,33 +519,115 @@ impl Plan {
     }
 }
 
-pub fn plan(
+fn validate_document(
     snapshot: &ReminderSnapshot,
     session: &Session,
     edited: &Document,
-) -> Result<Plan, ParseError> {
-    let mut plan = Plan::default();
-    let mut seen_lists: HashMap<&str, usize> = HashMap::new();
-    let mut seen_items: HashMap<String, usize> = HashMap::new();
-    let mut adds: Vec<(usize, String)> = Vec::new();
-    let item_count: usize = edited.sections.iter().map(|s| s.items.len()).sum();
+) -> Result<(), ParseError> {
+    let item_count: usize = edited
+        .sections
+        .iter()
+        .map(|section| section.items.len())
+        .sum();
     if item_count == 0 && !session.reminders.is_empty() {
         return Err(error(
             1,
             "the file has no reminders left, so nothing was changed; delete reminders a few at a time",
         ));
     }
+    let mut seen_lists = HashMap::new();
     for section in &edited.sections {
-        let list_index = *session
-            .lists
-            .get(&section.id)
-            .ok_or_else(|| error(section.line, format!("no list has the 🆔 {}", section.id)))?;
+        if !session.lists.contains_key(&section.id) {
+            return Err(error(
+                section.line,
+                format!("no list has the 🆔 {}", section.id),
+            ));
+        }
         if let Some(other) = seen_lists.insert(&section.id, section.line) {
             return Err(error(
                 section.line,
                 format!("this list already has a heading on line {other}"),
             ));
         }
+    }
+    let mut missing: Vec<_> = session
+        .lists
+        .iter()
+        .filter(|(id, _)| !seen_lists.contains_key(id))
+        .map(|(id, index)| (&snapshot.lists[*index].name, id))
+        .collect();
+    missing.sort_unstable();
+    if let Some((name, id)) = missing.first() {
+        return Err(error(
+            1,
+            format!(
+                "the original list heading \"{name}\" 🆔 {id} is missing; restore it before changing reminders"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn plan_deletions(
+    snapshot: &ReminderSnapshot,
+    session: &Session,
+    seen_items: &HashMap<String, usize>,
+    adds: &[(usize, String)],
+    plan: &mut Plan,
+) -> Result<(), ParseError> {
+    let mut missing: Vec<&usize> = session
+        .reminders
+        .iter()
+        .filter(|(short, _)| !seen_items.contains_key(*short))
+        .map(|(_, index)| index)
+        .collect();
+    missing.sort_unstable();
+    for &index in missing {
+        let before = &snapshot.reminders[index];
+        if snapshot
+            .lists
+            .iter()
+            .find(|list| list.id == before.list_id)
+            .is_some_and(|list| !list.writable)
+        {
+            return Err(error(
+                1,
+                format!(
+                    "\"{}\" is in a read-only list and can't be deleted",
+                    before.title
+                ),
+            ));
+        }
+        let title = normalize_title(&before.title);
+        if let Some((line, _)) = adds
+            .iter()
+            .find(|(_, added)| same(&added.to_lowercase(), &title.to_lowercase()))
+        {
+            plan.warnings.push(format!(
+                "line {line}: \"{title}\" lost its 🆔, so nib will delete it and add a new one, dropping alarms, repeats, and links"
+            ));
+        }
+        plan.changes.push(ReminderChange::Delete {
+            before: before.clone(),
+        });
+    }
+    Ok(())
+}
+
+pub fn plan(
+    snapshot: &ReminderSnapshot,
+    session: &Session,
+    edited: &Document,
+) -> Result<Plan, ParseError> {
+    validate_document(snapshot, session, edited)?;
+    let mut plan = Plan::default();
+    let mut seen_items: HashMap<String, usize> = HashMap::new();
+    let mut adds: Vec<(usize, String)> = Vec::new();
+    for section in &edited.sections {
+        let list_index = *session
+            .lists
+            .get(&section.id)
+            .ok_or_else(|| error(section.line, format!("no list has the 🆔 {}", section.id)))?;
         let list = &snapshot.lists[list_index];
         if !same(&section.name, &single_line(&list.name)) {
             plan.warnings.push(format!(
@@ -588,10 +674,13 @@ pub fn plan(
             let edit = ReminderEdit {
                 title: (!same(&item.title, &normalize_title(&before.title)))
                     .then(|| item.title.clone()),
-                notes: (!same_notes(item.notes.as_deref(), before.notes.as_deref()))
-                    .then(|| item.notes.clone()),
-                due: (item.due != before.due).then_some(item.due),
-                priority: (item.priority != before.priority).then_some(item.priority),
+                notes: if same_notes(item.notes.as_deref(), before.notes.as_deref()) {
+                    FieldEdit::Unchanged
+                } else {
+                    item.notes.clone().map_or(FieldEdit::Remove, FieldEdit::Set)
+                },
+                due: field_edit(item.due, before.due),
+                priority: field_edit(item.priority, before.priority),
                 list_id: (list.id != before.list_id).then(|| list.id.clone()),
                 complete: item.done,
             };
@@ -602,7 +691,7 @@ pub fn plan(
             if source.is_some_and(|l| !l.writable) || (edit.list_id.is_some() && !list.writable) {
                 return Err(error(item.line, "that change touches a read-only list"));
             }
-            if edit.due.is_some() && before.has_alarms {
+            if edit.due.is_changed() && before.alarms_present {
                 plan.warnings.push(format!(
                     "line {}: \"{}\" has an alarm set for a specific time, which stays where it is",
                     item.line, item.title
@@ -614,42 +703,7 @@ pub fn plan(
             });
         }
     }
-    let mut missing: Vec<&usize> = session
-        .reminders
-        .iter()
-        .filter(|(short, _)| !seen_items.contains_key(*short))
-        .map(|(_, index)| index)
-        .collect();
-    missing.sort();
-    for &index in missing {
-        let before = &snapshot.reminders[index];
-        if snapshot
-            .lists
-            .iter()
-            .find(|l| l.id == before.list_id)
-            .is_some_and(|l| !l.writable)
-        {
-            return Err(error(
-                1,
-                format!(
-                    "\"{}\" is in a read-only list and can't be deleted",
-                    before.title
-                ),
-            ));
-        }
-        let title = normalize_title(&before.title);
-        if let Some((line, _)) = adds
-            .iter()
-            .find(|(_, t)| same(&t.to_lowercase(), &title.to_lowercase()))
-        {
-            plan.warnings.push(format!(
-                "line {line}: \"{title}\" lost its 🆔, so nib will delete it and add a new one, dropping alarms, repeats, and links"
-            ));
-        }
-        plan.changes.push(ReminderChange::Delete {
-            before: before.clone(),
-        });
-    }
+    plan_deletions(snapshot, session, &seen_items, &adds, &mut plan)?;
     Ok(plan)
 }
 
@@ -669,16 +723,17 @@ pub fn describe(plan: &Plan, snapshot: &ReminderSnapshot) -> String {
             }
             ReminderChange::Delete { before } => {
                 let losses: Vec<&str> = [
-                    (before.has_alarms, "alarms"),
-                    (before.has_recurrence, "repeats"),
-                    (before.has_url, "a link"),
+                    (before.alarms_present, "alarms"),
+                    (before.recurrence_present, "repeats"),
+                    (before.url.is_some(), "a link"),
                 ]
                 .into_iter()
                 .filter_map(|(has, what)| has.then_some(what))
                 .collect();
                 let mut line = format!("  - delete    \"{}\"", normalize_title(&before.title));
                 if !losses.is_empty() {
-                    line.push_str(&format!(" (loses {})", losses.join(", ")));
+                    write!(&mut line, " (loses {})", losses.join(", "))
+                        .expect("writing to a String cannot fail");
                 }
                 line
             }
@@ -688,18 +743,20 @@ pub fn describe(plan: &Plan, snapshot: &ReminderSnapshot) -> String {
                 if let Some(new) = &edit.title {
                     parts.push(format!("title → \"{new}\""));
                 }
-                match (edit.due, before.due) {
-                    (Some(Some(new)), Some(old)) => parts.push(format!("due {old} → {new}")),
-                    (Some(Some(new)), None) => parts.push(format!("due {new}")),
-                    (Some(None), _) => parts.push("due date removed".into()),
-                    (None, _) => {}
+                match (&edit.due, before.due) {
+                    (FieldEdit::Set(new), Some(old)) => parts.push(format!("due {old} → {new}")),
+                    (FieldEdit::Set(new), None) => parts.push(format!("due {new}")),
+                    (FieldEdit::Remove, _) => parts.push("due date removed".into()),
+                    (FieldEdit::Unchanged, _) => {}
                 }
                 match edit.priority {
-                    Some(Some(p)) => parts.push(format!("priority {}", p.as_str())),
-                    Some(None) => parts.push("priority removed".into()),
-                    None => {}
+                    FieldEdit::Set(priority) => {
+                        parts.push(format!("priority {}", priority.as_str()));
+                    }
+                    FieldEdit::Remove => parts.push("priority removed".into()),
+                    FieldEdit::Unchanged => {}
                 }
-                if edit.notes.is_some() {
+                if edit.notes.is_changed() {
                     parts.push("notes".into());
                 }
                 if let Some(list) = &edit.list_id {
@@ -722,6 +779,14 @@ pub fn describe(plan: &Plan, snapshot: &ReminderSnapshot) -> String {
     lines.join("\n")
 }
 
+fn field_edit<T: Copy + Eq>(after: Option<T>, before: Option<T>) -> FieldEdit<T> {
+    if after == before {
+        FieldEdit::Unchanged
+    } else {
+        after.map_or(FieldEdit::Remove, FieldEdit::Set)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use insta::assert_snapshot;
@@ -729,7 +794,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::backend::ReminderList;
+    use crate::domain::ReminderList;
 
     const REMINDERS: &str = "AAAA1111-0000-0000-0000-000000000001";
     const GROCERIES: &str = "BBBB2222-0000-0000-0000-000000000002";
@@ -750,11 +815,13 @@ mod tests {
             title: title.into(),
             notes: None,
             due: None,
+            due_components: None,
             priority: None,
             modified: None,
-            has_alarms: false,
-            has_recurrence: false,
-            has_url: false,
+            alarms_present: false,
+            recurrence_present: false,
+            url: None,
+            backup_partial: false,
         }
     }
 
@@ -811,7 +878,8 @@ mod tests {
         plan(&snapshot, &session, &parse(&edited)?)
     }
 
-    fn replace(text: String, from: &str, to: &str) -> String {
+    fn replace(text: impl AsRef<str>, from: &str, to: &str) -> String {
+        let text = text.as_ref();
         assert!(text.contains(from), "{from:?} not in:\n{text}");
         text.replacen(from, to, 1)
     }
@@ -1026,16 +1094,16 @@ mod tests {
         );
 
         let edit = only_update(plan_after(|t| replace(t, "2026-10-29", "2026-10-30")).unwrap());
-        assert_eq!(edit.due, Some(Some(date(2026, 10, 30))));
+        assert_eq!(edit.due, FieldEdit::Set(date(2026, 10, 30)));
 
         let edit = only_update(plan_after(|t| replace(t, " 🔼 📅", " 📅")).unwrap());
-        assert_eq!(edit.priority, Some(None));
+        assert_eq!(edit.priority, FieldEdit::Remove);
 
         let edit =
             only_update(plan_after(|t| replace(t, "Second paragraph", "Second para")).unwrap());
         assert_eq!(
             edit.notes,
-            Some(Some("Bring the checkbook\n\nSecond para".into()))
+            FieldEdit::Set("Bring the checkbook\n\nSecond para".into())
         );
 
         let edit = only_update(
@@ -1131,6 +1199,18 @@ mod tests {
     }
 
     #[test]
+    fn every_original_list_heading_must_remain() {
+        let snapshot = snapshot();
+        let session = Session::new(&snapshot);
+        let mut edited = session.document.clone();
+        edited.sections.remove(1);
+        let error = plan(&snapshot, &session, &edited).unwrap_err();
+        assert!(error.message.contains("original list heading"));
+        assert!(error.message.contains("Groceries"));
+        assert!(error.message.contains("bbbb2222"));
+    }
+
+    #[test]
     fn read_only_lists_cannot_change() {
         let mut snapshot = snapshot();
         snapshot.lists[1].writable = false;
@@ -1150,8 +1230,8 @@ mod tests {
     #[test]
     fn describes_the_plan_before_applying() {
         let mut snapshot = snapshot();
-        snapshot.reminders[2].has_alarms = true;
-        snapshot.reminders[2].has_recurrence = true;
+        snapshot.reminders[2].alarms_present = true;
+        snapshot.reminders[2].recurrence_present = true;
         let session = Session::new(&snapshot);
         let edited = render(&session.document)
             .replace("Review pull request ⏫", "Review the PR ⏫")

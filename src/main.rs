@@ -1,13 +1,3 @@
-mod backend;
-mod cli;
-mod commands;
-mod config;
-mod demo;
-mod edit;
-mod host;
-mod markdown;
-mod output;
-
 use std::io::{self, Write};
 
 use clap::Parser;
@@ -16,26 +6,15 @@ use jiff::{Timestamp, Zoned};
 use miette::IntoDiagnostic;
 
 fn main() -> miette::Result<()> {
-    let cli = cli::Cli::parse();
+    let cli = nib::Cli::parse();
     let current_dir = std::env::current_dir().into_diagnostic()?;
     let user_config = user_config_path();
-    let config = config::load(&current_dir, user_config.as_deref(), |name| {
+    let config = nib::load_config(&current_dir, user_config.as_deref(), |name| {
         std::env::var_os(name)
     })?;
     let now = Zoned::new(Timestamp::now(), local_zone());
-    let backends = if std::env::var_os("NIB_DEMO").is_some_and(|v| !v.is_empty()) {
-        demo::backends(&now)
-    } else {
-        backend::Backends::system()
-    };
-    let out = commands::run(
-        cli,
-        &config,
-        &now,
-        &backends,
-        output::Style::detect(),
-        &mut host::System,
-    )?;
+    let demo = std::env::var_os("NIB_DEMO").is_some_and(|value| !value.is_empty());
+    let out = nib::run(cli, &config, &now, demo, nib::Style::detect())?;
     if out.is_empty() {
         return Ok(());
     }
@@ -57,8 +36,6 @@ fn user_config_path() -> Option<std::path::PathBuf> {
         .map(|root| root.join("nib/config.toml"))
 }
 
-// TimeZone::system() scans every file in zoneinfo on first use (3-8 ms);
-// reading the /etc/localtime link directly takes about 0.1 ms.
 fn local_zone() -> TimeZone {
     std::env::var_os("TZ")
         .is_none()

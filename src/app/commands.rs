@@ -1,12 +1,11 @@
 use jiff::Zoned;
 use miette::{IntoDiagnostic, Result};
 
-use crate::backend::Backends;
+use crate::app::edit;
+use crate::cli::output::{self, Style};
 use crate::cli::{Action, Cli};
-use crate::config::Config;
-use crate::edit;
-use crate::host::Host;
-use crate::output::{self, Style};
+use crate::domain::{Backends, Config};
+use crate::infra::host::Host;
 
 pub fn run(
     cli: Cli,
@@ -42,11 +41,11 @@ mod tests {
     use jiff::tz::{TimeZone, offset};
 
     use super::*;
-    use crate::backend::{
+    use crate::domain::{
         BackendError, Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes,
         Priority, Reminder, ReminderChange, ReminderSnapshot, Reminders,
     };
-    use crate::host::Scripted;
+    use crate::infra::host::Scripted;
 
     struct Fake;
 
@@ -463,7 +462,7 @@ mod tests {
             || -> Box<dyn Calendar> { unreachable!() },
         );
         let config = Config {
-            task: crate::config::Task {
+            task: crate::domain::TaskConfig {
                 list: Some("Snowglobe".into()),
                 priority: Some(Priority::Medium),
             },
@@ -510,7 +509,7 @@ mod tests {
             move || Box::new(Recorder(backend_recorded)),
         );
         let config = Config {
-            cal: crate::config::Cal {
+            cal: crate::domain::CalendarConfig {
                 calendars: vec!["Work".into(), "Birthdays".into()],
             },
             ..Config::default()

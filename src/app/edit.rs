@@ -1,16 +1,13 @@
-use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use jiff::Zoned;
 use miette::{IntoDiagnostic, Result, miette};
 use serde_json::json;
 
-use crate::backend::{Backends, ReminderChange};
-use crate::host::Host;
-use crate::markdown::{self, Plan, Session};
-use crate::output::clean;
+use crate::app::markdown::{self, Plan, Session};
+use crate::cli::output::clean;
+use crate::domain::{Backends, ReminderChange};
+use crate::infra::host::Host;
 
 const INSTANT: Duration = Duration::from_millis(500);
 
@@ -30,16 +27,16 @@ pub fn tasks(
         ));
     }
     let original = markdown::render(&session.document);
-    let path = temp_path();
-    fs::write(&path, &original).into_diagnostic()?;
+    let mut file = host.create_edit_file(&original).into_diagnostic()?;
     loop {
-        let elapsed = host.edit(&path).into_diagnostic()?;
-        let edited = fs::read_to_string(&path).into_diagnostic()?;
+        let elapsed = host.edit(file.path()).into_diagnostic()?;
+        file.preserve();
+        let edited = file.read().into_diagnostic()?;
         if edited == original {
             if elapsed < INSTANT {
                 host.say("Your editor returned right away. If it opens a window, make it wait, for example EDITOR=\"code --wait\".");
             }
-            let _ = fs::remove_file(&path);
+            file.remove_on_drop();
             return Ok("No changes.".into());
         }
         let plan = match markdown::parse(&edited)
@@ -53,7 +50,7 @@ pub fn tasks(
                 }
                 return Err(miette!(
                     "Nothing was changed. Your edits are in {}",
-                    path.display()
+                    file.path().display()
                 ));
             }
         };
@@ -61,17 +58,17 @@ pub fn tasks(
             for warning in &plan.warnings {
                 host.say(&clean(warning));
             }
-            let _ = fs::remove_file(&path);
+            file.remove_on_drop();
             return Ok("No changes.".into());
         }
         host.say(&clean(&markdown::describe(&plan, &snapshot)));
         if !confirmed(host, &plan)? {
             return Ok(format!(
                 "Nothing was changed. Your edits are in {}",
-                path.display()
+                file.path().display()
             ));
         }
-        if let Some(contents) = backup(&plan) {
+        if let Some(contents) = backup(&plan)? {
             let name = format!("{}-tasks.json", now.strftime("%Y%m%dT%H%M%S"));
             let saved = host.save_backup(&name, &contents).into_diagnostic()?;
             host.say(&format!(
@@ -80,21 +77,15 @@ pub fn tasks(
             ));
         }
         if let Err(e) = backends.reminders.apply(&plan.changes) {
-            host.say(&format!("Your edits are still in {}", path.display()));
+            host.say(&format!(
+                "Your edits are still in {}",
+                file.path().display()
+            ));
             return Err(e.into());
         }
-        let _ = fs::remove_file(&path);
+        file.remove_on_drop();
         return Ok(summary(&plan));
     }
-}
-
-fn temp_path() -> PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    std::env::temp_dir().join(format!(
-        "nib-tasks-{}-{}.md",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ))
 }
 
 fn edit_again(host: &mut dyn Host) -> Result<bool> {
@@ -104,24 +95,46 @@ fn edit_again(host: &mut dyn Host) -> Result<bool> {
 
 fn confirmed(host: &mut dyn Host, plan: &Plan) -> Result<bool> {
     let deletions = plan.deletions();
+    let backup_warning = backup_warning(plan);
     if deletions > 3 {
         let answer = host
             .ask(&format!(
-                "This deletes {deletions} reminders. Type {deletions} to apply: "
+                "This deletes {deletions} reminders.{backup_warning} Type {deletions} to apply: "
             ))
             .into_diagnostic()?;
         return Ok(answer == deletions.to_string());
     }
     let answer = host
         .ask(&format!(
-            "Apply {}? [y/N] ",
-            count(plan.changes.len(), "change")
+            "Apply {}?{backup_warning} [y/N] ",
+            count(plan.changes.len(), "change"),
         ))
         .into_diagnostic()?;
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
-fn backup(plan: &Plan) -> Option<String> {
+fn backup_warning(plan: &Plan) -> String {
+    let partial = plan
+        .changes
+        .iter()
+        .filter_map(|change| match change {
+            ReminderChange::Add { .. } => None,
+            ReminderChange::Update { before, .. } | ReminderChange::Delete { before } => {
+                before.backup_partial.then_some(())
+            }
+        })
+        .count();
+    if partial == 0 {
+        String::new()
+    } else {
+        format!(
+            " The backup will be partial for {} because EventKit returned data nib couldn't capture.",
+            count(partial, "reminder")
+        )
+    }
+}
+
+fn backup(plan: &Plan) -> Result<Option<String>> {
     let items: Vec<_> = plan
         .changes
         .iter()
@@ -131,6 +144,28 @@ fn backup(plan: &Plan) -> Option<String> {
             ReminderChange::Delete { before } => Some(("delete", before)),
         })
         .map(|(change, before)| {
+            let due_components = before.due_components.as_ref().map(|due| {
+                json!({
+                    "calendar": due.calendar,
+                    "time_zone": due.time_zone,
+                    "era": due.era,
+                    "year": due.year,
+                    "month": due.month,
+                    "day": due.day,
+                    "hour": due.hour,
+                    "minute": due.minute,
+                    "second": due.second,
+                    "nanosecond": due.nanosecond,
+                    "weekday": due.weekday,
+                    "weekday_ordinal": due.weekday_ordinal,
+                    "quarter": due.quarter,
+                    "week_of_month": due.week_of_month,
+                    "week_of_year": due.week_of_year,
+                    "year_for_week_of_year": due.year_for_week_of_year,
+                    "day_of_year": due.day_of_year,
+                    "is_leap_month": due.is_leap_month,
+                })
+            });
             json!({
                 "change": change,
                 "id": before.id,
@@ -138,12 +173,23 @@ fn backup(plan: &Plan) -> Option<String> {
                 "title": before.title,
                 "notes": before.notes,
                 "due": before.due.map(|d| d.to_string()),
-                "priority": before.priority.map(|p| p.as_str()),
+                "due_components": due_components,
+                "priority": before.priority.map(crate::domain::Priority::as_str),
                 "modified": before.modified.map(|t| t.to_string()),
+                "alarms_present": before.alarms_present,
+                "recurrence_present": before.recurrence_present,
+                "url": before.url,
+                "partial": before.backup_partial,
             })
         })
         .collect();
-    (!items.is_empty()).then(|| serde_json::to_string_pretty(&items).unwrap_or_default())
+    if items.is_empty() {
+        Ok(None)
+    } else {
+        serde_json::to_string_pretty(&items)
+            .map(Some)
+            .into_diagnostic()
+    }
 }
 
 fn summary(plan: &Plan) -> String {
@@ -184,17 +230,18 @@ fn count(n: usize, noun: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::fs;
     use std::rc::Rc;
 
     use jiff::civil::date;
     use jiff::tz::{TimeZone, offset};
 
     use super::*;
-    use crate::backend::{
-        BackendError, Calendar, NewReminder, Notes, Reminder, ReminderList, ReminderSnapshot,
-        Reminders, StoredReminder,
+    use crate::domain::{
+        BackendError, Calendar, NewReminder, Notes, Reminder, ReminderDueComponents, ReminderList,
+        ReminderSnapshot, Reminders, StoredReminder,
     };
-    use crate::host::Scripted;
+    use crate::infra::host::Scripted;
 
     type Applied = Rc<RefCell<Vec<ReminderChange>>>;
 
@@ -235,11 +282,13 @@ mod tests {
             title: title.into(),
             notes: None,
             due: None,
+            due_components: None,
             priority: None,
             modified: None,
-            has_alarms: false,
-            has_recurrence: false,
-            has_url: false,
+            alarms_present: false,
+            recurrence_present: false,
+            url: None,
+            backup_partial: false,
         }
     }
 
@@ -263,9 +312,17 @@ mod tests {
         conflict: bool,
         host: &mut Scripted,
     ) -> (Result<String>, Vec<ReminderChange>) {
+        run_snapshot(snapshot(titles), conflict, host)
+    }
+
+    fn run_snapshot(
+        snapshot: ReminderSnapshot,
+        conflict: bool,
+        host: &mut Scripted,
+    ) -> (Result<String>, Vec<ReminderChange>) {
         let applied = Applied::default();
         let recorder = Recorder {
-            snapshot: snapshot(titles),
+            snapshot,
             applied: applied.clone(),
             conflict,
         };
@@ -301,6 +358,50 @@ mod tests {
             host.said
                 .iter()
                 .any(|s| s.contains("✓ complete  \"Oat milk\""))
+        );
+    }
+
+    #[test]
+    fn backups_include_native_metadata_and_disclose_partial_data() {
+        let mut snapshot = snapshot(&["Oat milk"]);
+        snapshot.reminders[0].due = Some(date(2026, 10, 27));
+        snapshot.reminders[0].due_components = Some(ReminderDueComponents {
+            calendar: Some("gregorian".into()),
+            time_zone: Some("America/Chicago".into()),
+            era: Some(1),
+            year: Some(2026),
+            month: Some(10),
+            day: Some(27),
+            hour: Some(14),
+            minute: Some(30),
+            second: Some(15),
+            nanosecond: Some(0),
+            weekday: Some(3),
+            weekday_ordinal: Some(4),
+            quarter: Some(4),
+            week_of_month: Some(5),
+            week_of_year: Some(44),
+            year_for_week_of_year: Some(2026),
+            day_of_year: Some(300),
+            is_leap_month: false,
+        });
+        snapshot.reminders[0].alarms_present = true;
+        snapshot.reminders[0].recurrence_present = true;
+        snapshot.reminders[0].url = Some("https://example.com/reminder".into());
+        snapshot.reminders[0].backup_partial = true;
+        let mut host = Scripted::new().edit(check("Oat milk")).answer("y");
+        let (result, _) = run_snapshot(snapshot, false, &mut host);
+        assert!(result.is_ok());
+        let backup: serde_json::Value = serde_json::from_str(&host.backups[0].1).unwrap();
+        assert_eq!(backup[0]["alarms_present"], true);
+        assert_eq!(backup[0]["recurrence_present"], true);
+        assert_eq!(backup[0]["url"], "https://example.com/reminder");
+        assert_eq!(backup[0]["due_components"]["hour"], 14);
+        assert_eq!(backup[0]["due_components"]["time_zone"], "America/Chicago");
+        assert!(
+            host.said
+                .iter()
+                .any(|message| message.contains("backup will be partial"))
         );
     }
 

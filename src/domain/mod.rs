@@ -6,9 +6,6 @@ use jiff::{Timestamp, Zoned};
 use miette::Diagnostic;
 use thiserror::Error;
 
-#[cfg(target_os = "macos")]
-mod eventkit;
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Note {
     pub id: String,
@@ -38,6 +35,29 @@ pub enum Priority {
     Low,
     Medium,
     High,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Config {
+    pub task: TaskConfig,
+    pub cal: CalendarConfig,
+    pub note: NoteConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskConfig {
+    pub list: Option<String>,
+    pub priority: Option<Priority>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CalendarConfig {
+    pub calendars: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NoteConfig {
+    pub folder: Option<String>,
 }
 
 impl Priority {
@@ -82,6 +102,28 @@ pub struct ReminderList {
     pub writable: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReminderDueComponents {
+    pub calendar: Option<String>,
+    pub time_zone: Option<String>,
+    pub era: Option<i64>,
+    pub year: Option<i64>,
+    pub month: Option<i64>,
+    pub day: Option<i64>,
+    pub hour: Option<i64>,
+    pub minute: Option<i64>,
+    pub second: Option<i64>,
+    pub nanosecond: Option<i64>,
+    pub weekday: Option<i64>,
+    pub weekday_ordinal: Option<i64>,
+    pub quarter: Option<i64>,
+    pub week_of_month: Option<i64>,
+    pub week_of_year: Option<i64>,
+    pub year_for_week_of_year: Option<i64>,
+    pub day_of_year: Option<i64>,
+    pub is_leap_month: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredReminder {
     pub id: String,
@@ -89,11 +131,13 @@ pub struct StoredReminder {
     pub title: String,
     pub notes: Option<String>,
     pub due: Option<Date>,
+    pub due_components: Option<ReminderDueComponents>,
     pub priority: Option<Priority>,
     pub modified: Option<Timestamp>,
-    pub has_alarms: bool,
-    pub has_recurrence: bool,
-    pub has_url: bool,
+    pub alarms_present: bool,
+    pub recurrence_present: bool,
+    pub url: Option<String>,
+    pub backup_partial: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -105,11 +149,25 @@ pub struct ReminderSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReminderEdit {
     pub title: Option<String>,
-    pub notes: Option<Option<String>>,
-    pub due: Option<Option<Date>>,
-    pub priority: Option<Option<Priority>>,
+    pub notes: FieldEdit<String>,
+    pub due: FieldEdit<Date>,
+    pub priority: FieldEdit<Priority>,
     pub list_id: Option<String>,
     pub complete: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FieldEdit<T> {
+    #[default]
+    Unchanged,
+    Set(T),
+    Remove,
+}
+
+impl<T> FieldEdit<T> {
+    pub fn is_changed(&self) -> bool {
+        !matches!(self, Self::Unchanged)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,9 +188,7 @@ pub enum ReminderChange {
     },
 }
 
-// The stubs only return NotImplemented; the other variants are for the Apple backends.
 #[derive(Debug, Error, Diagnostic)]
-#[allow(dead_code)]
 pub enum BackendError {
     #[error("{terminal} doesn't have access to {app}")]
     #[diagnostic(
@@ -225,76 +281,6 @@ impl Backends {
             reminders: LazyCell::new(Box::new(reminders)),
             calendar: LazyCell::new(Box::new(calendar)),
         }
-    }
-
-    pub fn system() -> Self {
-        Self::new(
-            || Box::new(Unimplemented("Apple Notes")),
-            system_reminders,
-            system_calendar,
-        )
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn system_calendar() -> Box<dyn Calendar> {
-    Box::new(eventkit::EventKitCalendar)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn system_calendar() -> Box<dyn Calendar> {
-    Box::new(Unimplemented("Calendar"))
-}
-
-#[cfg(target_os = "macos")]
-fn system_reminders() -> Box<dyn Reminders> {
-    Box::new(eventkit::EventKitReminders)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn system_reminders() -> Box<dyn Reminders> {
-    Box::new(Unimplemented("Reminders"))
-}
-
-struct Unimplemented(&'static str);
-
-impl Unimplemented {
-    fn fail<T>(&self) -> Result<T, BackendError> {
-        Err(BackendError::NotImplemented { app: self.0 })
-    }
-}
-
-impl Notes for Unimplemented {
-    fn create(&self, _: NewNote) -> Result<Note, BackendError> {
-        self.fail()
-    }
-
-    fn list(&self, _: NoteQuery) -> Result<Vec<Note>, BackendError> {
-        self.fail()
-    }
-}
-
-impl Reminders for Unimplemented {
-    fn add(&self, _: NewReminder) -> Result<Reminder, BackendError> {
-        self.fail()
-    }
-
-    fn list(&self) -> Result<Vec<Reminder>, BackendError> {
-        self.fail()
-    }
-
-    fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
-        self.fail()
-    }
-
-    fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
-        self.fail()
-    }
-}
-
-impl Calendar for Unimplemented {
-    fn events(&self, _: EventQuery) -> Result<Vec<Event>, BackendError> {
-        self.fail()
     }
 }
 

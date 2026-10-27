@@ -12,14 +12,15 @@ use objc2_event_kit::{
 };
 use objc2_foundation::{
     NSArray, NSCalendar, NSCalendarIdentifierGregorian, NSDate, NSDateComponentUndefined,
-    NSDateComponents, NSError, NSInteger, NSString,
+    NSDateComponents, NSError, NSInteger, NSPredicate, NSString,
 };
 
-use super::{
-    BackendError, Calendar, Event, EventQuery, NewReminder, Priority, Reminder, ReminderChange,
-    ReminderEdit, ReminderList, ReminderSnapshot, Reminders, StoredReminder, terminal_name,
+use crate::app::markdown::normalize_title;
+use crate::domain::{
+    BackendError, Calendar, Event, EventQuery, FieldEdit, NewReminder, Priority, Reminder,
+    ReminderChange, ReminderDueComponents, ReminderEdit, ReminderList, ReminderSnapshot, Reminders,
+    StoredReminder, terminal_name,
 };
-use crate::markdown::normalize_title;
 
 const REMINDERS: &str = "Reminders";
 const CALENDARS: &str = "Calendars";
@@ -37,15 +38,7 @@ impl Calendar for EventKitCalendar {
             let end = NSDate::dateWithTimeIntervalSince1970(epoch_seconds(&query.range.end));
             let calendars = event_calendars(&store, &query.calendars)?;
             let chosen = (!calendars.is_empty()).then(|| NSArray::from_retained_slice(&calendars));
-            let found = unsafe {
-                let predicate = store.predicateForEventsWithStartDate_endDate_calendars(
-                    &start,
-                    &end,
-                    chosen.as_deref(),
-                );
-                store.eventsMatchingPredicate(&predicate)
-            };
-            let mut events: Vec<Event> = found.iter().filter_map(|e| to_event(&e, &zone)).collect();
+            let mut events = matching_events(&store, &start, &end, chosen.as_deref(), &zone);
             events.sort_by(|a, b| (a.start.timestamp(), &a.id).cmp(&(b.start.timestamp(), &b.id)));
             Ok(events)
         })
@@ -60,44 +53,19 @@ impl Reminders for EventKitReminders {
             let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
             let list = match new.list.as_deref() {
                 Some(name) => writable_reminder_calendar_named(&store, name)?,
-                None => unsafe { store.defaultCalendarForNewReminders() }.ok_or_else(|| {
+                None => default_reminder_calendar(&store).ok_or_else(|| {
                     failed(REMINDERS, "there is no default list for new reminders")
                 })?,
             };
-            unsafe {
-                let reminder = EKReminder::reminderWithEventStore(&store);
-                reminder.setTitle(Some(&NSString::from_str(&new.title)));
-                reminder.setCalendar(Some(&list));
-                reminder.setPriority(priority_to_eventkit(new.priority));
-                set_due(&reminder, new.due);
-                store
-                    .saveReminder_commit_error(&reminder, true)
-                    .map_err(|e| failed(REMINDERS, &e.localizedDescription().to_string()))?;
-                Ok(to_reminder(&reminder))
-            }
+            add_reminder(&store, &list, &new)
         })
     }
 
     fn list(&self) -> Result<Vec<Reminder>, BackendError> {
         autoreleasepool(|_| {
             let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
-            let predicate = unsafe {
-                store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars(
-                    None, None, None,
-                )
-            };
-            let (tx, rx) = mpsc::channel();
-            let block = RcBlock::new(move |found: *mut NSArray<EKReminder>| {
-                let reminders = unsafe { found.as_ref() }
-                    .map(|found| found.iter().map(|r| to_reminder(&r)).collect::<Vec<_>>());
-                let _ = tx.send(reminders);
-            });
-            let _request =
-                unsafe { store.fetchRemindersMatchingPredicate_completion(&predicate, &block) };
-            let mut reminders = rx
-                .recv_timeout(FETCH_TIMEOUT)
-                .map_err(|_| failed(REMINDERS, "timed out waiting for reminders"))?
-                .ok_or_else(|| failed(REMINDERS, "the reminder query returned nothing"))?;
+            let predicate = incomplete_reminders_predicate(&store, None);
+            let mut reminders = fetch_reminders(&store, &predicate, to_reminder)?;
             reminders.sort_by(|a, b| {
                 (a.due.is_none(), a.due, &a.title).cmp(&(b.due.is_none(), b.due, &b.title))
             });
@@ -108,11 +76,10 @@ impl Reminders for EventKitReminders {
     fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
         autoreleasepool(|_| {
             let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
-            let calendars: Vec<Retained<EKCalendar>> =
-                unsafe { store.calendarsForEntityType(EKEntityType::Reminder) }
-                    .iter()
-                    .filter(|c| list.is_none_or(|name| unsafe { c.title() }.to_string() == name))
-                    .collect();
+            let calendars: Vec<Retained<EKCalendar>> = calendars(&store, EKEntityType::Reminder)
+                .into_iter()
+                .filter(|calendar| list.is_none_or(|name| calendar_title(calendar) == name))
+                .collect();
             if let Some(name) = list
                 && calendars.is_empty()
             {
@@ -123,37 +90,14 @@ impl Reminders for EventKitReminders {
             }
             let lists = calendars
                 .iter()
-                .map(|c| unsafe {
-                    ReminderList {
-                        id: c.calendarIdentifier().to_string(),
-                        name: c.title().to_string(),
-                        writable: c.allowsContentModifications(),
-                    }
-                })
+                .map(|calendar| reminder_list(calendar))
                 .collect();
             if calendars.is_empty() {
                 return Ok(ReminderSnapshot::default());
             }
             let chosen = NSArray::from_retained_slice(&calendars);
-            let predicate = unsafe {
-                store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars(
-                    None,
-                    None,
-                    Some(&chosen),
-                )
-            };
-            let (tx, rx) = mpsc::channel();
-            let block = RcBlock::new(move |found: *mut NSArray<EKReminder>| {
-                let reminders = unsafe { found.as_ref() }
-                    .map(|found| found.iter().map(|r| to_stored(&r)).collect::<Vec<_>>());
-                let _ = tx.send(reminders);
-            });
-            let _request =
-                unsafe { store.fetchRemindersMatchingPredicate_completion(&predicate, &block) };
-            let mut reminders = rx
-                .recv_timeout(FETCH_TIMEOUT)
-                .map_err(|_| failed(REMINDERS, "timed out waiting for reminders"))?
-                .ok_or_else(|| failed(REMINDERS, "the reminder query returned nothing"))?;
+            let predicate = incomplete_reminders_predicate(&store, Some(&chosen));
+            let mut reminders = fetch_reminders(&store, &predicate, to_stored)?;
             reminders.sort_by(|a, b| {
                 (a.due.is_none(), a.due, &a.title).cmp(&(b.due.is_none(), b.due, &b.title))
             });
@@ -165,11 +109,11 @@ impl Reminders for EventKitReminders {
         autoreleasepool(|_| {
             let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
             if let Err(e) = stage(&store, changes) {
-                unsafe { store.reset() };
+                reset_store(&store);
                 return Err(e);
             }
-            unsafe { store.commit() }.map_err(|e| {
-                unsafe { store.reset() };
+            commit_store(&store).map_err(|e| {
+                reset_store(&store);
                 failed(
                     REMINDERS,
                     &format!("nothing was saved: {}", e.localizedDescription()),
@@ -179,6 +123,126 @@ impl Reminders for EventKitReminders {
     }
 }
 
+fn matching_events(
+    store: &EKEventStore,
+    start: &NSDate,
+    end: &NSDate,
+    calendars: Option<&NSArray<EKCalendar>>,
+    zone: &TimeZone,
+) -> Vec<Event> {
+    // SAFETY: The dates, calendars, and retained store are valid Objective-C objects for the
+    // duration of both synchronous EventKit calls, and EventKit returns EKEvent instances.
+    let found = unsafe {
+        let predicate =
+            store.predicateForEventsWithStartDate_endDate_calendars(start, end, calendars);
+        store.eventsMatchingPredicate(&predicate)
+    };
+    found
+        .iter()
+        .filter_map(|event| to_event(&event, zone))
+        .collect()
+}
+
+fn add_reminder(
+    store: &EKEventStore,
+    list: &EKCalendar,
+    new: &NewReminder,
+) -> Result<Reminder, BackendError> {
+    // SAFETY: The retained store and list belong to EventKit, all NSString arguments live through
+    // their setter calls, and the new reminder is saved before leaving the autorelease pool.
+    unsafe {
+        let reminder = EKReminder::reminderWithEventStore(store);
+        reminder.setTitle(Some(&NSString::from_str(&new.title)));
+        reminder.setCalendar(Some(list));
+        reminder.setPriority(priority_to_eventkit(new.priority));
+        set_due(&reminder, new.due);
+        store
+            .saveReminder_commit_error(&reminder, true)
+            .map_err(|error| failed(REMINDERS, &error.localizedDescription().to_string()))?;
+        Ok(to_reminder(&reminder))
+    }
+}
+
+fn incomplete_reminders_predicate(
+    store: &EKEventStore,
+    calendars: Option<&NSArray<EKCalendar>>,
+) -> Retained<NSPredicate> {
+    // SAFETY: The retained store and optional retained calendar array are valid for this
+    // synchronous predicate construction, and both date bounds are intentionally unbounded.
+    unsafe {
+        store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars(
+            None, None, calendars,
+        )
+    }
+}
+
+fn fetch_reminders<T: Send + 'static>(
+    store: &EKEventStore,
+    predicate: &NSPredicate,
+    convert: fn(&EKReminder) -> T,
+) -> Result<Vec<T>, BackendError> {
+    let (tx, rx) = mpsc::channel();
+    let block = RcBlock::new(move |found: *mut NSArray<EKReminder>| {
+        // SAFETY: EventKit invokes this callback with either null or a valid NSArray<EKReminder>
+        // for the callback's duration; every element is converted to owned Rust data here.
+        let values = unsafe { found.as_ref() }
+            .map(|found| found.iter().map(|reminder| convert(&reminder)).collect());
+        let _ = tx.send(values);
+    });
+    // SAFETY: The retained store and predicate remain alive until after the receive, and the block
+    // is retained by both this stack frame and the returned EventKit request token.
+    let _request = unsafe { store.fetchRemindersMatchingPredicate_completion(predicate, &block) };
+    rx.recv_timeout(FETCH_TIMEOUT)
+        .map_err(|_| failed(REMINDERS, "timed out waiting for reminders"))?
+        .ok_or_else(|| failed(REMINDERS, "the reminder query returned nothing"))
+}
+
+fn calendars(store: &EKEventStore, entity: EKEntityType) -> Vec<Retained<EKCalendar>> {
+    // SAFETY: The retained store is valid for this synchronous query and EventKit returns an array
+    // whose elements are EKCalendar objects retained while collected.
+    unsafe { store.calendarsForEntityType(entity) }
+        .iter()
+        .collect()
+}
+
+fn default_reminder_calendar(store: &EKEventStore) -> Option<Retained<EKCalendar>> {
+    // SAFETY: The retained store is valid and EventKit returns either nil or a retained EKCalendar.
+    unsafe { store.defaultCalendarForNewReminders() }
+}
+
+fn calendar_title(calendar: &EKCalendar) -> String {
+    // SAFETY: A typed retained EKCalendar guarantees the title selector and returned NSString type.
+    unsafe { calendar.title() }.to_string()
+}
+
+fn calendar_id(calendar: &EKCalendar) -> String {
+    // SAFETY: A typed retained EKCalendar guarantees the identifier selector and NSString result.
+    unsafe { calendar.calendarIdentifier() }.to_string()
+}
+
+fn calendar_is_writable(calendar: &EKCalendar) -> bool {
+    // SAFETY: A typed retained EKCalendar guarantees the content-modification selector.
+    unsafe { calendar.allowsContentModifications() }
+}
+
+fn reminder_list(calendar: &EKCalendar) -> ReminderList {
+    ReminderList {
+        id: calendar_id(calendar),
+        name: calendar_title(calendar),
+        writable: calendar_is_writable(calendar),
+    }
+}
+
+fn reset_store(store: &EKEventStore) {
+    // SAFETY: The retained store is valid and reset has no borrowed Objective-C return value.
+    unsafe { store.reset() };
+}
+
+fn commit_store(store: &EKEventStore) -> Result<(), Retained<NSError>> {
+    // SAFETY: The retained store is valid and all staged objects remain owned by EventKit.
+    unsafe { store.commit() }
+}
+
 fn event_calendars(
     store: &EKEventStore,
     names: &[String],
@@ -186,14 +250,11 @@ fn event_calendars(
     if names.is_empty() {
         return Ok(Vec::new());
     }
-    let available: Vec<Retained<EKCalendar>> =
-        unsafe { store.calendarsForEntityType(EKEntityType::Event) }
-            .iter()
-            .collect();
+    let available = calendars(store, EKEntityType::Event);
     for name in names {
         if !available
             .iter()
-            .any(|calendar| unsafe { calendar.title() }.to_string() == *name)
+            .any(|calendar| calendar_title(calendar) == *name)
         {
             return Err(BackendError::NotFound {
                 kind: "calendar",
@@ -204,7 +265,7 @@ fn event_calendars(
     Ok(available
         .into_iter()
         .filter(|calendar| {
-            let title = unsafe { calendar.title() }.to_string();
+            let title = calendar_title(calendar);
             names.contains(&title)
         })
         .collect())
@@ -214,18 +275,18 @@ fn writable_reminder_calendar_named(
     store: &EKEventStore,
     name: &str,
 ) -> Result<Retained<EKCalendar>, BackendError> {
-    let mut matches = unsafe { store.calendarsForEntityType(EKEntityType::Reminder) }
-        .iter()
-        .filter(|calendar| unsafe {
-            calendar.allowsContentModifications() && calendar.title().to_string() == name
-        })
+    let mut matches = calendars(store, EKEntityType::Reminder)
+        .into_iter()
+        .filter(|calendar| calendar_is_writable(calendar) && calendar_title(calendar) == name)
         .collect::<Vec<_>>();
     match matches.len() {
         0 => Err(BackendError::NotFound {
             kind: "writable reminder list",
             name: name.into(),
         }),
-        1 => Ok(matches.pop().unwrap()),
+        1 => Ok(matches
+            .pop()
+            .expect("a one-element vector must contain one calendar")),
         _ => Err(BackendError::Ambiguous {
             kind: "writable reminder list",
             name: name.into(),
@@ -242,7 +303,7 @@ fn stage(store: &EKEventStore, changes: &[ReminderChange]) -> Result<(), Backend
             ReminderChange::Update { before, .. } | ReminderChange::Delete { before } => {
                 match find_reminder(store, &before.id) {
                     Some(reminder) if to_stored(&reminder) == *before => {
-                        current.push(Some(reminder))
+                        current.push(Some(reminder));
                     }
                     _ => {
                         conflicts.push(format!("\"{}\"", normalize_title(&before.title)));
@@ -266,21 +327,13 @@ fn stage(store: &EKEventStore, changes: &[ReminderChange]) -> Result<(), Backend
                     priority,
                 },
                 _,
-            ) => unsafe {
-                let reminder = EKReminder::reminderWithEventStore(store);
-                reminder.setCalendar(Some(&*writable_calendar(store, list_id)?));
-                reminder.setTitle(Some(&NSString::from_str(title)));
-                reminder.setNotes(notes.as_deref().map(NSString::from_str).as_deref());
-                reminder.setPriority(priority_to_eventkit(*priority));
-                set_due(&reminder, *due);
-                save(store, &reminder, title)?;
-            },
+            ) => stage_add(store, list_id, title, notes.as_deref(), *due, *priority)?,
             (ReminderChange::Update { before, edit }, Some(reminder)) => {
                 update(store, &reminder, edit)?;
                 save(store, &reminder, &before.title)?;
             }
             (ReminderChange::Delete { before }, Some(reminder)) => {
-                unsafe { store.removeReminder_commit_error(&reminder, false) }.map_err(|e| {
+                remove_reminder(store, &reminder, false).map_err(|e| {
                     failed(
                         REMINDERS,
                         &format!(
@@ -297,23 +350,55 @@ fn stage(store: &EKEventStore, changes: &[ReminderChange]) -> Result<(), Backend
     Ok(())
 }
 
+fn stage_add(
+    store: &EKEventStore,
+    list_id: &str,
+    title: &str,
+    notes: Option<&str>,
+    due: Option<Date>,
+    priority: Option<Priority>,
+) -> Result<(), BackendError> {
+    let list = writable_calendar(store, list_id)?;
+    // SAFETY: The retained EventKit store and calendar are valid, temporary NSString values live
+    // through each setter call, and the reminder is staged before any object can be released.
+    unsafe {
+        let reminder = EKReminder::reminderWithEventStore(store);
+        reminder.setCalendar(Some(&list));
+        reminder.setTitle(Some(&NSString::from_str(title)));
+        reminder.setNotes(notes.map(NSString::from_str).as_deref());
+        reminder.setPriority(priority_to_eventkit(priority));
+        set_due(&reminder, due);
+        save(store, &reminder, title)
+    }
+}
+
 fn update(
     store: &EKEventStore,
     reminder: &EKReminder,
     edit: &ReminderEdit,
 ) -> Result<(), BackendError> {
+    // SAFETY: The typed reminder and store are retained for every setter call, temporary NSString
+    // values outlive their calls, and any destination calendar is retained before assignment.
     unsafe {
         if let Some(title) = &edit.title {
             reminder.setTitle(Some(&NSString::from_str(title)));
         }
-        if let Some(notes) = &edit.notes {
-            reminder.setNotes(notes.as_deref().map(NSString::from_str).as_deref());
+        match &edit.notes {
+            FieldEdit::Set(notes) => reminder.setNotes(Some(&NSString::from_str(notes))),
+            FieldEdit::Remove => reminder.setNotes(None),
+            FieldEdit::Unchanged => {}
         }
-        if let Some(due) = edit.due {
-            set_due(reminder, due);
+        match edit.due {
+            FieldEdit::Set(due) => set_due(reminder, Some(due)),
+            FieldEdit::Remove => set_due(reminder, None),
+            FieldEdit::Unchanged => {}
         }
-        if let Some(priority) = edit.priority {
-            reminder.setPriority(priority_to_eventkit(priority));
+        match edit.priority {
+            FieldEdit::Set(priority) => {
+                reminder.setPriority(priority_to_eventkit(Some(priority)));
+            }
+            FieldEdit::Remove => reminder.setPriority(priority_to_eventkit(None)),
+            FieldEdit::Unchanged => {}
         }
         if let Some(list_id) = &edit.list_id {
             reminder.setCalendar(Some(&*writable_calendar(store, list_id)?));
@@ -326,23 +411,29 @@ fn update(
 }
 
 fn set_due(reminder: &EKReminder, due: Option<Date>) {
-    let Some(date) = due else {
-        unsafe { reminder.setDueDateComponents(None) };
-        return;
-    };
-    let parts = unsafe { reminder.dueDateComponents() }.unwrap_or_else(|| date_components(date));
-    if parts.calendar().is_none() {
-        parts.setCalendar(
-            NSCalendar::calendarWithIdentifier(unsafe { NSCalendarIdentifierGregorian }).as_deref(),
-        );
+    // SAFETY: The typed reminder is retained for all accesses, and the newly built or retained
+    // NSDateComponents object remains alive through assignment back to the reminder.
+    unsafe {
+        let Some(date) = due else {
+            reminder.setDueDateComponents(None);
+            return;
+        };
+        let parts = reminder
+            .dueDateComponents()
+            .unwrap_or_else(|| date_components(date));
+        if parts.calendar().is_none() {
+            parts.setCalendar(gregorian_calendar().as_deref());
+        }
+        parts.setYear(date.year().into());
+        parts.setMonth(date.month().into());
+        parts.setDay(date.day().into());
+        reminder.setDueDateComponents(Some(&parts));
     }
-    parts.setYear(date.year().into());
-    parts.setMonth(date.month().into());
-    parts.setDay(date.day().into());
-    unsafe { reminder.setDueDateComponents(Some(&parts)) };
 }
 
 fn save(store: &EKEventStore, reminder: &EKReminder, title: &str) -> Result<(), BackendError> {
+    // SAFETY: The typed store and reminder are retained, and EventKit owns the staged reminder for
+    // the duration of the synchronous save operation.
     unsafe { store.saveReminder_commit_error(reminder, false) }.map_err(|e| {
         failed(
             REMINDERS,
@@ -356,12 +447,16 @@ fn save(store: &EKEventStore, reminder: &EKReminder, title: &str) -> Result<(), 
 }
 
 fn find_reminder(store: &EKEventStore, id: &str) -> Option<Retained<EKReminder>> {
+    // SAFETY: The typed store is retained, the temporary identifier lives through the lookup, and
+    // downcast verifies the returned calendar item's Objective-C class before use.
     unsafe { store.calendarItemWithIdentifier(&NSString::from_str(id)) }?
         .downcast::<EKReminder>()
         .ok()
 }
 
 fn writable_calendar(store: &EKEventStore, id: &str) -> Result<Retained<EKCalendar>, BackendError> {
+    // SAFETY: The typed store is retained and the temporary identifier lives through this
+    // synchronous lookup; EventKit returns either nil or an EKCalendar.
     let calendar =
         unsafe { store.calendarWithIdentifier(&NSString::from_str(id)) }.ok_or_else(|| {
             BackendError::NotFound {
@@ -369,18 +464,35 @@ fn writable_calendar(store: &EKEventStore, id: &str) -> Result<Retained<EKCalend
                 name: id.into(),
             }
         })?;
-    if unsafe { calendar.allowsContentModifications() } {
+    if calendar_is_writable(&calendar) {
         Ok(calendar)
     } else {
         Err(failed(
             REMINDERS,
-            &format!("\"{}\" is read-only", unsafe { calendar.title() }),
+            &format!("\"{}\" is read-only", calendar_title(&calendar)),
         ))
     }
 }
 
+fn remove_reminder(
+    store: &EKEventStore,
+    reminder: &EKReminder,
+    commit: bool,
+) -> Result<(), Retained<NSError>> {
+    // SAFETY: The typed store and reminder are retained for the synchronous removal call.
+    unsafe { store.removeReminder_commit_error(reminder, commit) }
+}
+
 fn to_stored(reminder: &EKReminder) -> StoredReminder {
+    // SAFETY: Every selector is invoked on a typed retained EKReminder and all Objective-C values
+    // are copied into owned Rust values before this function returns.
     unsafe {
+        let due = reminder.dueDateComponents();
+        let url_object = reminder.URL();
+        let url = url_object
+            .as_ref()
+            .and_then(|value| value.absoluteString())
+            .map(|value| value.to_string());
         StoredReminder {
             id: reminder.calendarItemIdentifier().to_string(),
             list_id: reminder
@@ -389,18 +501,51 @@ fn to_stored(reminder: &EKReminder) -> StoredReminder {
                 .unwrap_or_default(),
             title: reminder.title().to_string(),
             notes: reminder.notes().map(|n| n.to_string()),
-            due: reminder
-                .dueDateComponents()
+            due: due
+                .as_ref()
                 .and_then(|parts| date_from_parts(parts.year(), parts.month(), parts.day())),
+            due_components: due.as_deref().map(reminder_due_components),
             priority: priority_from_eventkit(reminder.priority()),
             modified: reminder
                 .lastModifiedDate()
                 .and_then(|d| timestamp_from_epoch(d.timeIntervalSince1970())),
-            has_alarms: reminder.hasAlarms(),
-            has_recurrence: reminder.hasRecurrenceRules(),
-            has_url: reminder.URL().is_some(),
+            alarms_present: reminder.hasAlarms(),
+            recurrence_present: reminder.hasRecurrenceRules(),
+            backup_partial: url_object.is_some() && url.is_none(),
+            url,
         }
     }
+}
+
+fn reminder_due_components(parts: &NSDateComponents) -> ReminderDueComponents {
+    ReminderDueComponents {
+        calendar: parts
+            .calendar()
+            .map(|calendar| calendar.calendarIdentifier().to_string()),
+        time_zone: parts.timeZone().map(|zone| zone.name().to_string()),
+        era: component(parts.era()),
+        year: component(parts.year()),
+        month: component(parts.month()),
+        day: component(parts.day()),
+        hour: component(parts.hour()),
+        minute: component(parts.minute()),
+        second: component(parts.second()),
+        nanosecond: component(parts.nanosecond()),
+        weekday: component(parts.weekday()),
+        weekday_ordinal: component(parts.weekdayOrdinal()),
+        quarter: component(parts.quarter()),
+        week_of_month: component(parts.weekOfMonth()),
+        week_of_year: component(parts.weekOfYear()),
+        year_for_week_of_year: component(parts.yearForWeekOfYear()),
+        day_of_year: component(parts.dayOfYear()),
+        is_leap_month: parts.isLeapMonth(),
+    }
+}
+
+fn component(value: NSInteger) -> Option<i64> {
+    (value != NSDateComponentUndefined)
+        .then_some(value)
+        .and_then(|value| i64::try_from(value).ok())
 }
 
 fn timestamp_from_epoch(seconds: f64) -> Option<Timestamp> {
@@ -413,11 +558,11 @@ fn authorized_store(
     entity: EKEntityType,
     app: &'static str,
 ) -> Result<Retained<EKEventStore>, BackendError> {
-    let status = unsafe { EKEventStore::authorizationStatusForEntityType(entity) };
+    let status = authorization_status(entity);
     if status == EKAuthorizationStatus::FullAccess
         || (status == EKAuthorizationStatus::NotDetermined && request_access(entity, app)?)
     {
-        return Ok(unsafe { EKEventStore::new() });
+        return Ok(new_event_store());
     }
     Err(BackendError::PermissionDenied {
         app,
@@ -425,13 +570,32 @@ fn authorized_store(
     })
 }
 
+fn authorization_status(entity: EKEntityType) -> EKAuthorizationStatus {
+    // SAFETY: EKEntityType values come from EventKit's closed set and this class query has no
+    // borrowed return value or caller-managed memory.
+    unsafe { EKEventStore::authorizationStatusForEntityType(entity) }
+}
+
+fn new_event_store() -> Retained<EKEventStore> {
+    // SAFETY: NSObject-style `new` returns a retained EKEventStore with no caller preconditions.
+    unsafe { EKEventStore::new() }
+}
+
 fn request_access(entity: EKEntityType, app: &'static str) -> Result<bool, BackendError> {
     eprintln!("Waiting for macOS to grant access to {app}...");
-    let store = unsafe { EKEventStore::new() };
+    let store = new_event_store();
     let (tx, rx) = mpsc::channel();
-    let block = RcBlock::new(move |granted: Bool, _: *mut NSError| {
-        let _ = tx.send(granted.as_bool());
+    let block = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+        // SAFETY: EventKit passes either null or a valid NSError pointer for the duration of the
+        // callback; the localized description is copied to an owned String before returning.
+        let result = unsafe { error.as_ref() }.map_or_else(
+            || Ok(granted.as_bool()),
+            |error| Err(error.localizedDescription().to_string()),
+        );
+        let _ = tx.send(result);
     });
+    // SAFETY: The retained store and copied block remain alive until the callback sends its owned
+    // result, and the selected request method matches the requested EventKit entity type.
     unsafe {
         if entity == EKEntityType::Event {
             store.requestFullAccessToEventsWithCompletion(RcBlock::as_ptr(&block));
@@ -441,9 +605,12 @@ fn request_access(entity: EKEntityType, app: &'static str) -> Result<bool, Backe
     }
     rx.recv_timeout(PROMPT_TIMEOUT)
         .map_err(|_| failed(app, "timed out waiting for the macOS permission prompt"))
+        .and_then(|result| result.map_err(|message| failed(app, &message)))
 }
 
 fn to_event(event: &EKEvent, zone: &TimeZone) -> Option<Event> {
+    // SAFETY: Every selector is invoked on a typed retained EKEvent and all returned values are
+    // converted to owned Rust data before this function returns.
     unsafe {
         let start = zoned_from_epoch(event.startDate().timeIntervalSince1970(), zone)?;
         let identifier = event
@@ -467,12 +634,12 @@ fn epoch_seconds(time: &Zoned) -> f64 {
 }
 
 fn zoned_from_epoch(seconds: f64, zone: &TimeZone) -> Option<Zoned> {
-    Timestamp::from_second(seconds.floor() as i64)
-        .ok()
-        .map(|t| t.to_zoned(zone.clone()))
+    timestamp_from_epoch(seconds.floor()).map(|timestamp| timestamp.to_zoned(zone.clone()))
 }
 
 fn to_reminder(reminder: &EKReminder) -> Reminder {
+    // SAFETY: Every selector is invoked on a typed retained EKReminder and all returned values are
+    // converted to owned Rust data before this function returns.
     unsafe {
         Reminder {
             id: reminder.calendarItemIdentifier().to_string(),
@@ -505,13 +672,17 @@ fn priority_to_eventkit(priority: Option<Priority>) -> usize {
 
 fn date_components(date: Date) -> Retained<NSDateComponents> {
     let parts = NSDateComponents::new();
-    parts.setCalendar(
-        NSCalendar::calendarWithIdentifier(unsafe { NSCalendarIdentifierGregorian }).as_deref(),
-    );
+    parts.setCalendar(gregorian_calendar().as_deref());
     parts.setYear(date.year().into());
     parts.setMonth(date.month().into());
     parts.setDay(date.day().into());
     parts
+}
+
+fn gregorian_calendar() -> Option<Retained<NSCalendar>> {
+    // SAFETY: Foundation exposes this as a process-lifetime calendar identifier constant, and the
+    // constructor copies or retains it during the synchronous call.
+    NSCalendar::calendarWithIdentifier(unsafe { NSCalendarIdentifierGregorian })
 }
 
 fn date_from_parts(year: NSInteger, month: NSInteger, day: NSInteger) -> Option<Date> {
@@ -538,7 +709,7 @@ mod tests {
     use jiff::civil::date;
 
     use super::*;
-    use crate::markdown;
+    use crate::app::markdown;
 
     struct LiveReminderCleanup {
         id: Option<String>,
@@ -572,7 +743,7 @@ mod tests {
                 let Some(reminder) = find_reminder(&store, &id) else {
                     return;
                 };
-                if let Err(error) = unsafe { store.removeReminder_commit_error(&reminder, true) } {
+                if let Err(error) = remove_reminder(&store, &reminder, true) {
                     eprintln!("cleanup failed: {}", error.localizedDescription());
                 }
             });
@@ -660,9 +831,11 @@ mod tests {
             Some(date(2026, 2, 28))
         );
         let calendar = parts.calendar().unwrap();
+        let gregorian =
+            gregorian_calendar().expect("Foundation always provides Gregorian calendar");
         assert_eq!(
             calendar.calendarIdentifier().to_string(),
-            unsafe { NSCalendarIdentifierGregorian }.to_string()
+            gregorian.calendarIdentifier().to_string()
         );
     }
 
@@ -684,11 +857,8 @@ mod tests {
         assert_eq!(added.due, Some(date(2030, 1, 15)));
         assert_eq!(added.priority, Some(Priority::Low));
         let store = authorized_store(EKEntityType::Reminder, REMINDERS).unwrap();
-        let reminder = unsafe { store.calendarItemWithIdentifier(&NSString::from_str(&added.id)) }
-            .unwrap()
-            .downcast::<EKReminder>()
-            .unwrap();
-        unsafe { store.removeReminder_commit_error(&reminder, true) }.unwrap();
+        let reminder = find_reminder(&store, &added.id).unwrap();
+        remove_reminder(&store, &reminder, true).unwrap();
     }
 
     #[test]
@@ -699,10 +869,10 @@ mod tests {
             return;
         }
         let store = authorized_store(EKEntityType::Reminder, REMINDERS).unwrap();
-        let list = unsafe { store.defaultCalendarForNewReminders() }
-            .expect("there is no default list for new reminders");
-        let list_id = unsafe { list.calendarIdentifier() }.to_string();
-        let list_name = unsafe { list.title() }.to_string();
+        let list =
+            default_reminder_calendar(&store).expect("there is no default list for new reminders");
+        let list_id = calendar_id(&list);
+        let list_name = calendar_title(&list);
         let title = format!(
             "nib live test {} *bold* #tag \\ 📅 2030-01-01",
             std::process::id()
@@ -770,8 +940,8 @@ mod tests {
             [ReminderChange::Update { edit, .. }]
                 if edit.title.as_deref()
                     == Some(title.replacen("nib live test", "nib edited live test", 1).as_str())
-                    && edit.due == Some(Some(date(2030, 2, 3)))
-                    && edit.priority == Some(Some(Priority::High))
+                    && edit.due == FieldEdit::Set(date(2030, 2, 3))
+                    && edit.priority == FieldEdit::Set(Priority::High)
                     && edit.complete
         ));
         EventKitReminders.apply(&plan.changes).unwrap();
