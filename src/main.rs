@@ -2,6 +2,7 @@ mod backend;
 mod cli;
 mod commands;
 mod demo;
+mod markdown;
 mod output;
 
 use std::io::{self, Write};

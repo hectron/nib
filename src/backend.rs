@@ -1,8 +1,8 @@
 use std::cell::LazyCell;
 use std::ops::Range;
 
-use jiff::Zoned;
 use jiff::civil::Date;
+use jiff::{Timestamp, Zoned};
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -70,6 +70,66 @@ pub struct NewReminder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventQuery {
     pub range: Range<Zoned>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderList {
+    pub id: String,
+    pub name: String,
+    pub writable: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredReminder {
+    pub id: String,
+    pub list_id: String,
+    pub title: String,
+    pub notes: Option<String>,
+    pub due: Option<Date>,
+    pub priority: Option<Priority>,
+    pub modified: Option<Timestamp>,
+    pub has_alarms: bool,
+    pub has_recurrence: bool,
+    pub has_url: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReminderSnapshot {
+    pub lists: Vec<ReminderList>,
+    pub reminders: Vec<StoredReminder>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReminderEdit {
+    pub title: Option<String>,
+    pub notes: Option<Option<String>>,
+    pub due: Option<Option<Date>>,
+    pub priority: Option<Option<Priority>>,
+    pub list_id: Option<String>,
+    pub complete: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReminderChange {
+    Add {
+        list_id: String,
+        title: String,
+        notes: Option<String>,
+        due: Option<Date>,
+        priority: Option<Priority>,
+    },
+    Update {
+        before: StoredReminder,
+        edit: ReminderEdit,
+    },
+    Delete {
+        before: StoredReminder,
+    },
 }
 
 // The stubs only return NotImplemented; the other variants are for the Apple backends.
