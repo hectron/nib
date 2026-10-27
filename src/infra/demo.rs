@@ -201,6 +201,9 @@ fn demo_written(index: usize, change: &ReminderChange) -> Option<StoredReminder>
             }
             demo_field(&mut written.notes, &edit.notes);
             demo_field(&mut written.due, &edit.due);
+            if let Some(parts) = &edit.due_components {
+                written.due_components = Some((**parts).clone());
+            }
             demo_field(&mut written.priority, &edit.priority);
             if let Some(list_id) = &edit.list_id {
                 written.list_id.clone_from(list_id);

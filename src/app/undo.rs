@@ -2,20 +2,33 @@ use jiff::Zoned;
 use miette::{IntoDiagnostic, Result};
 
 use crate::app::{edit, journal, markdown};
-use crate::cli::output::clean;
+use crate::cli::output::clean_lines;
 use crate::domain::{Backends, ChangeCounts, ReminderChange};
 use crate::infra::host::Host;
+
+#[derive(Debug)]
+pub enum Outcome {
+    Cancelled {
+        id: String,
+    },
+    Applied {
+        id: String,
+        undo_id: String,
+        counts: ChangeCounts,
+    },
+}
 
 pub fn run(
     entry: Option<&str>,
     now: &Zoned,
     backends: &Backends,
     host: &mut dyn Host,
-) -> Result<Option<(String, ChangeCounts)>> {
+) -> Result<Outcome> {
+    let _lock = host.lock_journal().into_diagnostic()?;
     let (id, changes, counts, partial) = journal::undo_changes(entry, host)?;
-    host.say(&clean(&describe(&id, &changes, partial)));
+    host.say(&clean_lines(&describe(&id, &changes, partial)));
     if !confirmed(host, &changes)? {
-        return Ok(None);
+        return Ok(Outcome::Cancelled { id });
     }
     let contents = edit::backup_changes(&changes)?.unwrap_or_else(|| "[]".into());
     let name = format!("{}-undo.json", now.strftime("%Y%m%dT%H%M%S"));
@@ -24,12 +37,23 @@ pub fn run(
         "Backed up the reminders being changed to {}",
         saved.display()
     ));
-    let applied = backends.reminders.apply(&changes)?;
-    if let Err(error) = journal::record_undo(now, &id, &changes, &applied, host) {
-        host.say("The undo was applied, but nib couldn't record the journal entry.");
+    let pending_id = journal::begin_undo(now, &id, &changes, host)?;
+    let applied = match backends.reminders.apply(&changes) {
+        Ok(applied) => applied,
+        Err(error) => {
+            host.remove_journal(&pending_id).into_diagnostic()?;
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = journal::finish_undo(&pending_id, now, &id, &changes, &applied, host) {
+        host.say("The undo was applied, but its journal entry is still marked pending.");
         return Err(error);
     }
-    Ok(Some((id, counts)))
+    Ok(Outcome::Applied {
+        id,
+        undo_id: pending_id,
+        counts,
+    })
 }
 
 fn describe(id: &str, changes: &[ReminderChange], partial: bool) -> String {
@@ -43,21 +67,24 @@ fn describe(id: &str, changes: &[ReminderChange], partial: bool) -> String {
                     markdown::normalize_title(&before.title)
                 )
             }
-            ReminderChange::Update { before, edit } if edit.completed == Some(false) => {
+            ReminderChange::Update { before, edit }
+                if edit.completed == Some(false) && reverted_fields(edit) == ["completion"] =>
+            {
                 format!(
                     "  ○ incomplete \"{}\"",
                     markdown::normalize_title(&before.title)
                 )
             }
-            ReminderChange::Update { before, .. } => {
+            ReminderChange::Update { before, edit } => {
                 format!(
-                    "  ~ restore   \"{}\"",
-                    markdown::normalize_title(&before.title)
+                    "  ~ restore   \"{}\" ({})",
+                    markdown::normalize_title(&before.title),
+                    reverted_fields(edit).join(", ")
                 )
             }
             ReminderChange::Delete { before } => {
                 format!(
-                    "  - delete    added reminder \"{}\"",
+                    "  - delete    re-created reminder \"{}\"",
                     markdown::normalize_title(&before.title)
                 )
             }
@@ -76,6 +103,29 @@ fn describe(id: &str, changes: &[ReminderChange], partial: bool) -> String {
         lines.push("  ! At least one deleted reminder has a partial backup.".into());
     }
     lines.join("\n")
+}
+
+fn reverted_fields(edit: &crate::domain::ReminderEdit) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if edit.title.is_some() {
+        fields.push("title");
+    }
+    if edit.notes.is_changed() {
+        fields.push("notes");
+    }
+    if edit.due.is_changed() || edit.due_components.is_some() {
+        fields.push("due date");
+    }
+    if edit.priority.is_changed() {
+        fields.push("priority");
+    }
+    if edit.list_id.is_some() {
+        fields.push("list");
+    }
+    if edit.completed.is_some() {
+        fields.push("completion");
+    }
+    fields
 }
 
 fn confirmed(host: &mut dyn Host, changes: &[ReminderChange]) -> Result<bool> {
@@ -226,8 +276,10 @@ mod tests {
     #[test]
     fn undo_confirms_backs_up_applies_and_journals() {
         let (backends, state, mut host) = setup(false);
-        let result = run(None, &now(), &backends, &mut host).unwrap().unwrap();
-        assert_eq!(result.0, "20261026T090000-journal");
+        let Outcome::Applied { id, .. } = run(None, &now(), &backends, &mut host).unwrap() else {
+            panic!("undo should be applied");
+        };
+        assert_eq!(id, "20261026T090000-journal");
         assert!(!state.borrow().completed);
         assert_eq!(host.backups.len(), 1);
         assert_eq!(host.backups[0].0, "20261026T090000-undo.json");
@@ -243,5 +295,41 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("Finish report"));
         assert!(state.borrow().completed);
         assert_eq!(host.journals.len(), 1);
+    }
+
+    #[test]
+    fn failed_final_journal_save_leaves_pending_marker_and_refuses_second_undo() {
+        let (backends, state, mut host) = setup(false);
+        host.fail_next_journal_replace();
+        let first = run(None, &now(), &backends, &mut host).unwrap_err();
+        assert!(first.to_string().contains("injected journal save failure"));
+        assert!(!state.borrow().completed);
+        assert_eq!(host.journals.len(), 2);
+
+        let second = run(None, &now(), &backends, &mut host).unwrap_err();
+        let message = second.to_string();
+        assert!(message.contains("still pending"));
+        assert!(message.contains("/backups/20261026T090000-journal-test2.json"));
+    }
+
+    #[test]
+    fn preview_keeps_lines_and_names_fields_being_restored() {
+        let before = reminder(false);
+        let changes = vec![
+            ReminderChange::Update {
+                before: before.clone(),
+                edit: ReminderEdit {
+                    notes: crate::domain::FieldEdit::Remove,
+                    due: crate::domain::FieldEdit::Set(date(2026, 10, 27)),
+                    list_id: Some("list-2".into()),
+                    ..ReminderEdit::default()
+                },
+            },
+            ReminderChange::Delete { before },
+        ];
+        let preview = clean_lines(&describe("entry-1", &changes, false));
+        assert!(preview.contains('\n'));
+        assert!(preview.contains("notes, due date, list"));
+        assert!(preview.contains("re-created reminder"));
     }
 }

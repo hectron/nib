@@ -5,7 +5,9 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
+
+pub trait JournalLock {}
 
 pub trait Host {
     fn create_edit_file(&mut self, contents: &str) -> io::Result<EditFile> {
@@ -17,7 +19,10 @@ pub trait Host {
     fn say(&mut self, message: &str);
     fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf>;
     fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf>;
+    fn replace_journal(&mut self, id: &str, contents: &str) -> io::Result<PathBuf>;
+    fn remove_journal(&mut self, id: &str) -> io::Result<()>;
     fn journal_files(&mut self) -> io::Result<Vec<JournalFile>>;
+    fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>>;
 }
 
 pub struct System;
@@ -25,8 +30,13 @@ pub struct System;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalFile {
     pub id: String,
-    pub contents: String,
+    pub path: PathBuf,
+    pub written: u128,
+    pub contents: Result<String, String>,
 }
+
+impl JournalLock for File {}
+impl JournalLock for () {}
 
 pub struct EditFile {
     path: PathBuf,
@@ -126,6 +136,58 @@ fn save_backup_in(dir: &Path, name: &str, contents: &str) -> io::Result<PathBuf>
     ))
 }
 
+fn save_journal_in(dir: &Path, name: &str, contents: &str) -> io::Result<PathBuf> {
+    for _ in 0..128 {
+        let path = dir.join(backup_name(name));
+        let temporary = path.with_extension(format!("json.{}.tmp", random_token()));
+        let result: io::Result<()> = (|| {
+            let mut file = secure_new(&temporary)?;
+            file.write_all(contents.as_bytes())?;
+            file.sync_all()?;
+            std::fs::hard_link(&temporary, &path)?;
+            File::open(dir)?.sync_all()?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&temporary);
+        match result {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("couldn't write journal {}: {error}", path.display()),
+                ));
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "couldn't allocate a unique journal file",
+    ))
+}
+
+fn replace_journal_in(dir: &Path, id: &str, contents: &str) -> io::Result<PathBuf> {
+    let path = dir.join(format!("{id}.json"));
+    let temporary = path.with_extension(format!("json.{}.tmp", random_token()));
+    let result: io::Result<PathBuf> = (|| {
+        let mut file = secure_new(&temporary)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)?;
+        File::open(dir)?.sync_all()?;
+        Ok(path.clone())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("couldn't update journal {}: {error}", path.display()),
+        )
+    })
+}
+
 fn backups_dir() -> io::Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME isn't set"))?;
     Ok(PathBuf::from(home).join("Library/Application Support/nib/backups"))
@@ -151,9 +213,20 @@ fn journal_files_in(dir: &Path) -> io::Result<Vec<JournalFile>> {
         {
             continue;
         }
+        let contents = std::fs::read_to_string(&path).map_err(|error| error.to_string());
+        let written = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .and_then(|modified| {
+                modified
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_err(io::Error::other)
+            })
+            .map_or(0, |duration| duration.as_nanos());
         files.push(JournalFile {
             id: id.to_owned(),
-            contents: std::fs::read_to_string(path)?,
+            path,
+            written,
+            contents,
         });
     }
     Ok(files)
@@ -200,11 +273,121 @@ impl Host for System {
     }
 
     fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
-        self.save_backup(name, contents)
+        let dir = backups_dir()?;
+        std::fs::create_dir_all(&dir)?;
+        save_journal_in(&dir, name, contents)
+    }
+
+    fn replace_journal(&mut self, id: &str, contents: &str) -> io::Result<PathBuf> {
+        replace_journal_in(&backups_dir()?, id, contents)
+    }
+
+    fn remove_journal(&mut self, id: &str) -> io::Result<()> {
+        let dir = backups_dir()?;
+        std::fs::remove_file(dir.join(format!("{id}.json")))?;
+        File::open(dir)?.sync_all()
     }
 
     fn journal_files(&mut self) -> io::Result<Vec<JournalFile>> {
         journal_files_in(&backups_dir()?)
+    }
+
+    fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>> {
+        let dir = backups_dir()?;
+        std::fs::create_dir_all(&dir)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join("journal.lock"))?;
+        file.lock()?;
+        Ok(Box::new(file))
+    }
+}
+
+pub struct Memory {
+    system: System,
+    backups: Vec<(String, String)>,
+    journals: Vec<(String, String, u128)>,
+    sequence: u128,
+}
+
+impl Memory {
+    pub fn new() -> Self {
+        Self {
+            system: System,
+            backups: Vec::new(),
+            journals: Vec::new(),
+            sequence: 0,
+        }
+    }
+}
+
+impl Host for Memory {
+    fn edit(&mut self, path: &Path) -> io::Result<Duration> {
+        self.system.edit(path)
+    }
+
+    fn ask(&mut self, prompt: &str) -> io::Result<String> {
+        self.system.ask(prompt)
+    }
+
+    fn say(&mut self, message: &str) {
+        self.system.say(message);
+    }
+
+    fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
+        self.backups.push((name.into(), contents.into()));
+        Ok(PathBuf::from("demo-backups").join(name))
+    }
+
+    fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
+        self.sequence += 1;
+        let id = backup_name(name);
+        self.journals
+            .push((id.clone(), contents.into(), self.sequence));
+        Ok(PathBuf::from("demo-backups").join(id))
+    }
+
+    fn replace_journal(&mut self, id: &str, contents: &str) -> io::Result<PathBuf> {
+        self.sequence += 1;
+        let entry = self
+            .journals
+            .iter_mut()
+            .find(|(name, _, _)| name.strip_suffix(".json").unwrap_or(name) == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "journal entry not found"))?;
+        entry.1 = contents.into();
+        entry.2 = self.sequence;
+        Ok(PathBuf::from("demo-backups").join(&entry.0))
+    }
+
+    fn remove_journal(&mut self, id: &str) -> io::Result<()> {
+        let index = self
+            .journals
+            .iter()
+            .position(|(name, _, _)| name.strip_suffix(".json").unwrap_or(name) == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "journal entry not found"))?;
+        self.journals.remove(index);
+        Ok(())
+    }
+
+    fn journal_files(&mut self) -> io::Result<Vec<JournalFile>> {
+        Ok(self
+            .journals
+            .iter()
+            .map(|(name, contents, written)| JournalFile {
+                id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
+                path: PathBuf::from("demo-backups").join(name),
+                written: *written,
+                contents: Ok(contents.clone()),
+            })
+            .collect())
+    }
+
+    fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>> {
+        Ok(Box::new(()))
     }
 }
 
@@ -215,6 +398,9 @@ pub struct Scripted {
     pub said: Vec<String>,
     pub backups: Vec<(String, String)>,
     pub journals: Vec<(String, String)>,
+    unreadable_journals: Vec<(String, String)>,
+    sequence: u128,
+    fail_replace_once: bool,
 }
 
 #[cfg(test)]
@@ -226,6 +412,9 @@ impl Scripted {
             said: Vec::new(),
             backups: Vec::new(),
             journals: Vec::new(),
+            unreadable_journals: Vec::new(),
+            sequence: 0,
+            fail_replace_once: false,
         }
     }
 
@@ -242,6 +431,16 @@ impl Scripted {
     pub fn journal(mut self, id: &str, contents: &str) -> Self {
         self.journals.push((format!("{id}.json"), contents.into()));
         self
+    }
+
+    pub fn unreadable_journal(mut self, id: &str, error: &str) -> Self {
+        self.unreadable_journals
+            .push((format!("{id}.json"), error.into()));
+        self
+    }
+
+    pub fn fail_next_journal_replace(&mut self) {
+        self.fail_replace_once = true;
     }
 }
 
@@ -275,19 +474,68 @@ impl Host for Scripted {
     }
 
     fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
-        self.journals.push((name.into(), contents.into()));
-        Ok(PathBuf::from("/backups").join(name))
+        self.sequence += 1;
+        let saved_name = if self.journals.iter().any(|(saved, _)| saved == name) {
+            let (stem, extension) = name.rsplit_once('.').unwrap_or((name, "json"));
+            format!("{stem}-test{}.{}", self.sequence, extension)
+        } else {
+            name.into()
+        };
+        self.journals.push((saved_name.clone(), contents.into()));
+        Ok(PathBuf::from("/backups").join(saved_name))
+    }
+
+    fn replace_journal(&mut self, id: &str, contents: &str) -> io::Result<PathBuf> {
+        if self.fail_replace_once {
+            self.fail_replace_once = false;
+            return Err(io::Error::other("injected journal save failure"));
+        }
+        self.sequence += 1;
+        let entry = self
+            .journals
+            .iter_mut()
+            .find(|(name, _)| name.strip_suffix(".json").unwrap_or(name) == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "journal entry not found"))?;
+        entry.1 = contents.into();
+        Ok(PathBuf::from("/backups").join(&entry.0))
+    }
+
+    fn remove_journal(&mut self, id: &str) -> io::Result<()> {
+        let index = self
+            .journals
+            .iter()
+            .position(|(name, _)| name.strip_suffix(".json").unwrap_or(name) == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "journal entry not found"))?;
+        self.journals.remove(index);
+        Ok(())
     }
 
     fn journal_files(&mut self) -> io::Result<Vec<JournalFile>> {
-        Ok(self
+        let readable = self
             .journals
             .iter()
-            .map(|(name, contents)| JournalFile {
+            .enumerate()
+            .map(|(index, (name, contents))| JournalFile {
                 id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
-                contents: contents.clone(),
-            })
-            .collect())
+                path: PathBuf::from("/backups").join(name),
+                written: u128::try_from(index).unwrap_or_default(),
+                contents: Ok(contents.clone()),
+            });
+        let unreadable =
+            self.unreadable_journals
+                .iter()
+                .enumerate()
+                .map(|(index, (name, error))| JournalFile {
+                    id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
+                    path: PathBuf::from("/backups").join(name),
+                    written: u128::try_from(self.journals.len() + index).unwrap_or_default(),
+                    contents: Err(error.clone()),
+                });
+        Ok(readable.chain(unreadable).collect())
+    }
+
+    fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>> {
+        Ok(Box::new(()))
     }
 }
 
@@ -360,10 +608,16 @@ mod tests {
     fn journal_files_ignore_task_backups() {
         let dir = TestDir::new();
         save_backup_in(&dir.0, "20261026T090000-tasks.json", "[]").unwrap();
-        let journal = save_backup_in(&dir.0, "20261026T090000-journal.json", "{}").unwrap();
+        let journal = save_journal_in(&dir.0, "20261026T090000-journal.json", "{}").unwrap();
+        let mut temporary = secure_new(
+            &dir.0
+                .join("20261026T090000-journal-deadbeef.json.feedface.tmp"),
+        )
+        .unwrap();
+        temporary.write_all(b"partial").unwrap();
         let files = journal_files_in(&dir.0).unwrap();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].contents, "{}");
+        assert_eq!(files[0].contents.as_deref(), Ok("{}"));
         assert_eq!(files[0].id, journal.file_stem().unwrap().to_str().unwrap());
     }
 }

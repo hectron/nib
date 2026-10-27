@@ -40,16 +40,14 @@ pub fn run(
         Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
         Action::ListEvents(query) => output::list(&backends.calendar.events(query)?, json, style),
         Action::Log => output::journal(&journal::summaries(host)?, json, style),
-        Action::Undo { entry } => undo::run(entry.as_deref(), now, backends, host)?.map_or_else(
-            || {
-                Ok(if json {
-                    "null".into()
-                } else {
-                    "Nothing was changed.".into()
-                })
-            },
-            |(id, counts)| output::undo(&id, counts, json),
-        ),
+        Action::Undo { entry } => match undo::run(entry.as_deref(), now, backends, host)? {
+            undo::Outcome::Cancelled { id } => output::undo_cancelled(&id, json),
+            undo::Outcome::Applied {
+                id,
+                undo_id,
+                counts,
+            } => output::undo(&id, &undo_id, counts, json),
+        },
     }
 }
 
@@ -361,7 +359,7 @@ mod tests {
         assert_eq!(built_by(&["log"]), Vec::<&str>::new());
     }
 
-    fn journal_entry(time: &str, change: &str) -> String {
+    fn journal_entry(time: &str, action: &str, undo_of: Option<&str>, change: &str) -> String {
         let reminder = serde_json::json!({
             "id": "reminder-1",
             "list_id": "list-1",
@@ -385,7 +383,8 @@ mod tests {
         serde_json::json!({
             "version": 1,
             "time": time,
-            "action": "task_edit",
+            "action": action,
+            "undo_of": undo_of,
             "changes": [journal_change]
         })
         .to_string()
@@ -393,8 +392,13 @@ mod tests {
 
     fn journal_output(args: &[&str]) -> String {
         let backends = fake_backends(&Built::default());
-        let older = journal_entry("2026-10-25T14:00:00Z", "added");
-        let newer = journal_entry("2026-10-26T14:00:00Z", "deleted");
+        let older = journal_entry("2026-10-25T14:00:00Z", "task_edit", None, "added");
+        let newer = journal_entry(
+            "2026-10-26T14:00:00Z",
+            "undo",
+            Some("older-journal"),
+            "deleted",
+        );
         let mut host = Scripted::new()
             .journal("older-journal", &older)
             .journal("newer-journal", &newer);
@@ -413,9 +417,9 @@ mod tests {
     #[test]
     fn log_lists_newest_entries_with_counts() {
         assert_snapshot!(journal_output(&["log"]), @r"
-        ENTRY          TIME                  ADDED  UPDATED  COMPLETED  DELETED
-        newer-journal  2026-10-26T14:00:00Z  0      0        0          1
-        older-journal  2026-10-25T14:00:00Z  1      0        0          0
+        ENTRY          TIME                  ACTION     UNDO OF        UNDONE  ADDED  UPDATED  COMPLETED  DELETED
+        newer-journal  2026-10-26T14:00:00Z  undo       older-journal          0      0        0          1
+        older-journal  2026-10-25T14:00:00Z  task_edit                 yes     1      0        0          0
         ");
     }
 
@@ -426,6 +430,9 @@ mod tests {
           {
             "id": "newer-journal",
             "time": "2026-10-26T14:00:00Z",
+            "action": "undo",
+            "undo_of": "older-journal",
+            "undone": false,
             "added": 0,
             "updated": 0,
             "completed": 0,
@@ -434,6 +441,9 @@ mod tests {
           {
             "id": "older-journal",
             "time": "2026-10-25T14:00:00Z",
+            "action": "task_edit",
+            "undo_of": null,
+            "undone": true,
             "added": 1,
             "updated": 0,
             "completed": 0,
@@ -447,6 +457,7 @@ mod tests {
     fn undo_json_has_stable_fields() {
         assert_snapshot!(output::undo(
             "20261026T090000-journal-abcd",
+            "20261026T090100-journal-efgh",
             ChangeCounts {
                 added: 1,
                 updated: 2,
@@ -458,10 +469,31 @@ mod tests {
         .unwrap(), @r#"
         {
           "id": "20261026T090000-journal-abcd",
+          "undo_id": "20261026T090100-journal-efgh",
+          "applied": true,
           "added": 1,
           "updated": 2,
           "completed": 3,
           "deleted": 4
+        }
+        "#);
+    }
+
+    #[test]
+    fn cancelled_undo_json_is_an_object() {
+        assert_snapshot!(output::undo_cancelled(
+            "20261026T090000-journal-abcd",
+            true,
+        )
+        .unwrap(), @r#"
+        {
+          "id": "20261026T090000-journal-abcd",
+          "undo_id": null,
+          "applied": false,
+          "added": 0,
+          "updated": 0,
+          "completed": 0,
+          "deleted": 0
         }
         "#);
     }

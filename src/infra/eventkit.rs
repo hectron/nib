@@ -119,18 +119,31 @@ impl Reminders for EventKitReminders {
             Ok(ApplyResult {
                 written: staged
                     .into_iter()
-                    .map(|reminder| reminder.as_deref().map(stored_after_commit))
-                    .collect(),
+                    .map(|reminder| {
+                        reminder
+                            .as_deref()
+                            .map(|reminder| stored_after_commit(&store, reminder))
+                            .transpose()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
             })
         })
     }
 }
 
-fn stored_after_commit(reminder: &EKReminder) -> StoredReminder {
-    // SAFETY: The typed reminder remains retained after its store committed, so refreshing it and
-    // immediately copying its fields cannot outlive either Objective-C object.
-    unsafe { reminder.refresh() };
-    to_stored(reminder)
+fn stored_after_commit(
+    _store: &EKEventStore,
+    reminder: &EKReminder,
+) -> Result<StoredReminder, BackendError> {
+    // SAFETY: The typed reminder and its retained store remain alive while EventKit refreshes the
+    // object synchronously, and all fields are copied before either reference can be released.
+    if !unsafe { reminder.refresh() } {
+        return Err(failed(
+            REMINDERS,
+            "a saved reminder disappeared before nib could record it",
+        ));
+    }
+    Ok(to_stored(reminder))
 }
 
 fn matching_events(
@@ -419,7 +432,8 @@ fn stage_restore(
         reminder.setNotes(before.notes.as_deref().map(NSString::from_str).as_deref());
         reminder.setPriority(priority_to_eventkit(before.priority));
         if let Some(parts) = &before.due_components {
-            reminder.setDueDateComponents(Some(&restore_due_components(parts)));
+            let restored = restore_due_components(parts)?;
+            reminder.setDueDateComponents(Some(&restored));
         } else {
             set_due(&reminder, before.due);
         }
@@ -450,10 +464,15 @@ fn update(
             FieldEdit::Remove => reminder.setNotes(None),
             FieldEdit::Unchanged => {}
         }
-        match edit.due {
-            FieldEdit::Set(due) => set_due(reminder, Some(due)),
-            FieldEdit::Remove => set_due(reminder, None),
-            FieldEdit::Unchanged => {}
+        if let Some(parts) = &edit.due_components {
+            let restored = restore_due_components(parts)?;
+            reminder.setDueDateComponents(Some(&restored));
+        } else {
+            match edit.due {
+                FieldEdit::Set(due) => set_due(reminder, Some(due)),
+                FieldEdit::Remove => set_due(reminder, None),
+                FieldEdit::Unchanged => {}
+            }
         }
         match edit.priority {
             FieldEdit::Set(priority) => {
@@ -472,13 +491,34 @@ fn update(
     Ok(())
 }
 
-fn restore_due_components(value: &ReminderDueComponents) -> Retained<NSDateComponents> {
+fn restore_due_components(
+    value: &ReminderDueComponents,
+) -> Result<Retained<NSDateComponents>, BackendError> {
     let parts = NSDateComponents::new();
-    parts.setCalendar(gregorian_calendar().as_deref());
+    let calendar = match value.calendar.as_deref() {
+        Some(identifier) => NSCalendar::calendarWithIdentifier(&NSString::from_str(identifier))
+            .ok_or_else(|| {
+                failed(
+                    REMINDERS,
+                    &format!("saved calendar {identifier:?} isn't available"),
+                )
+            })?,
+        None => gregorian_calendar()
+            .ok_or_else(|| failed(REMINDERS, "the Gregorian calendar isn't available"))?,
+    };
+    parts.setCalendar(Some(&calendar));
     let time_zone = value
         .time_zone
         .as_deref()
-        .and_then(|name| NSTimeZone::timeZoneWithName(&NSString::from_str(name)));
+        .map(|name| {
+            NSTimeZone::timeZoneWithName(&NSString::from_str(name)).ok_or_else(|| {
+                failed(
+                    REMINDERS,
+                    &format!("saved time zone {name:?} isn't available"),
+                )
+            })
+        })
+        .transpose()?;
     parts.setTimeZone(time_zone.as_deref());
     if let Some(value) = value.era {
         parts.setEra(value.try_into().unwrap_or(NSDateComponentUndefined));
@@ -526,7 +566,7 @@ fn restore_due_components(value: &ReminderDueComponents) -> Retained<NSDateCompo
         parts.setDayOfYear(value.try_into().unwrap_or(NSDateComponentUndefined));
     }
     parts.setLeapMonth(value.is_leap_month);
-    parts
+    Ok(parts)
 }
 
 fn set_due(reminder: &EKReminder, due: Option<Date>) {
@@ -974,7 +1014,7 @@ mod tests {
             second: Some(15),
             ..ReminderDueComponents::default()
         };
-        let restored = restore_due_components(&captured);
+        let restored = restore_due_components(&captured).unwrap();
         assert_eq!(restored.year(), 2026);
         assert_eq!(restored.month(), 10);
         assert_eq!(restored.day(), 27);
@@ -985,6 +1025,36 @@ mod tests {
             restored.timeZone().unwrap().name().to_string(),
             "America/Chicago"
         );
+    }
+
+    #[test]
+    fn restored_due_components_keep_the_captured_calendar() {
+        let restored = restore_due_components(&ReminderDueComponents {
+            calendar: Some("buddhist".into()),
+            year: Some(2569),
+            month: Some(10),
+            day: Some(27),
+            ..ReminderDueComponents::default()
+        })
+        .unwrap();
+        assert_eq!(
+            restored
+                .calendar()
+                .unwrap()
+                .calendarIdentifier()
+                .to_string(),
+            "buddhist"
+        );
+    }
+
+    #[test]
+    fn restoring_an_unknown_saved_time_zone_fails() {
+        let error = restore_due_components(&ReminderDueComponents {
+            time_zone: Some("Not/A-Time-Zone".into()),
+            ..ReminderDueComponents::default()
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("Not/A-Time-Zone"));
     }
 
     #[test]
@@ -1007,6 +1077,72 @@ mod tests {
         let store = authorized_store(EKEntityType::Reminder, REMINDERS).unwrap();
         let reminder = find_reminder(&store, &added.id).unwrap();
         remove_reminder(&store, &reminder, true).unwrap();
+    }
+
+    #[test]
+    #[ignore = "writes to your real Reminders; set NIB_LIVE_WRITE=1 and run with --ignored"]
+    fn edits_and_undoes_a_real_reminder() {
+        if std::env::var_os("NIB_LIVE_WRITE").is_none() {
+            eprintln!("skipped: set NIB_LIVE_WRITE=1 to write to your real Reminders");
+            return;
+        }
+        let store = authorized_store(EKEntityType::Reminder, REMINDERS).unwrap();
+        let list =
+            default_reminder_calendar(&store).expect("there is no default list for new reminders");
+        let list_id = calendar_id(&list);
+        let list_name = calendar_title(&list);
+        let title = format!("nib undo live test {}", std::process::id());
+        let mut cleanup = LiveReminderCleanup {
+            id: None,
+            list_id: list_id.clone(),
+            list_name,
+            title: title.clone(),
+        };
+        let added = EventKitReminders
+            .apply(&[ReminderChange::Add {
+                list_id,
+                title: title.clone(),
+                notes: None,
+                due: None,
+                priority: None,
+            }])
+            .unwrap()
+            .written
+            .into_iter()
+            .next()
+            .flatten()
+            .unwrap();
+        cleanup.id = Some(added.id.clone());
+        let edited_title = format!("{title} edited");
+        let edited = EventKitReminders
+            .apply(&[ReminderChange::Update {
+                before: added.clone(),
+                edit: ReminderEdit {
+                    title: Some(edited_title),
+                    ..ReminderEdit::default()
+                },
+            }])
+            .unwrap()
+            .written
+            .into_iter()
+            .next()
+            .flatten()
+            .unwrap();
+        let restored = EventKitReminders
+            .apply(&[ReminderChange::Update {
+                before: edited,
+                edit: ReminderEdit {
+                    title: Some(title.clone()),
+                    ..ReminderEdit::default()
+                },
+            }])
+            .unwrap()
+            .written
+            .into_iter()
+            .next()
+            .flatten()
+            .unwrap();
+        assert_eq!(restored.title, title);
     }
 
     #[test]

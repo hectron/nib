@@ -680,6 +680,7 @@ pub fn plan(
                     item.notes.clone().map_or(FieldEdit::Remove, FieldEdit::Set)
                 },
                 due: field_edit(item.due, before.due),
+                due_components: None,
                 priority: field_edit(item.priority, before.priority),
                 list_id: (list.id != before.list_id).then(|| list.id.clone()),
                 completed: item.done.then_some(true),

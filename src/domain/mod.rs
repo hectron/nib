@@ -166,6 +166,7 @@ pub struct ReminderEdit {
     pub title: Option<String>,
     pub notes: FieldEdit<String>,
     pub due: FieldEdit<Date>,
+    pub due_components: Option<Box<ReminderDueComponents>>,
     pub priority: FieldEdit<Priority>,
     pub list_id: Option<String>,
     pub completed: Option<bool>,
@@ -229,7 +230,25 @@ impl ChangeCounts {
 pub struct JournalSummary {
     pub id: String,
     pub time: Timestamp,
+    pub action: JournalAction,
+    pub undo_of: Option<String>,
+    pub undone: bool,
     pub counts: ChangeCounts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalAction {
+    TaskEdit,
+    Undo,
+}
+
+impl JournalAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskEdit => "task_edit",
+            Self::Undo => "undo",
+        }
+    }
 }
 
 #[derive(Debug, Error, Diagnostic)]

@@ -28,6 +28,8 @@ nib note list -f Work
 nib t Pay rent fri !high '#bills'
 nib today
 nib task edit
+nib log
+nib undo
 nib cal --week
 ```
 
@@ -61,7 +63,7 @@ NIB_DEMO=1 nib t Pay rent tomorrow !high
 NIB_DEMO=1 nib note list
 ```
 
-Nothing is saved while `NIB_DEMO=1` is set.
+Nothing is saved while `NIB_DEMO=1` is set, including backups and undo history.
 
 ## Guides
 

@@ -121,10 +121,12 @@ pub fn journal(entries: &[JournalSummary], json: bool, style: Style) -> Result<S
     list(entries, json, style)
 }
 
-pub fn undo(id: &str, counts: ChangeCounts, json: bool) -> Result<String> {
+pub fn undo(id: &str, undo_id: &str, counts: ChangeCounts, json: bool) -> Result<String> {
     if json {
         return to_json(&UndoJson {
             id,
+            undo_id: Some(undo_id),
+            applied: true,
             added: counts.added,
             updated: counts.updated,
             completed: counts.completed,
@@ -135,6 +137,21 @@ pub fn undo(id: &str, counts: ChangeCounts, json: bool) -> Result<String> {
         "Undid {} from {id}.",
         count(counts.total(), "change")
     ))
+}
+
+pub fn undo_cancelled(id: &str, json: bool) -> Result<String> {
+    if json {
+        return to_json(&UndoJson {
+            id,
+            undo_id: None,
+            applied: false,
+            added: 0,
+            updated: 0,
+            completed: 0,
+            deleted: 0,
+        });
+    }
+    Ok("Nothing was changed.".into())
 }
 
 fn count(n: usize, noun: &str) -> String {
@@ -165,6 +182,10 @@ pub fn clean(text: &str) -> String {
             c => c,
         })
         .collect()
+}
+
+pub fn clean_lines(text: &str) -> String {
+    text.lines().map(clean).collect::<Vec<_>>().join("\n")
 }
 
 impl Tabular for Note {
@@ -306,6 +327,9 @@ struct TodayJson<'a> {
 struct JournalJson<'a> {
     id: &'a str,
     time: Timestamp,
+    action: &'static str,
+    undo_of: Option<&'a str>,
+    undone: bool,
     added: usize,
     updated: usize,
     completed: usize,
@@ -315,6 +339,8 @@ struct JournalJson<'a> {
 #[derive(Serialize)]
 struct UndoJson<'a> {
     id: &'a str,
+    undo_id: Option<&'a str>,
+    applied: bool,
     added: usize,
     updated: usize,
     completed: usize,
@@ -326,6 +352,9 @@ impl Serialize for JournalSummary {
         JournalJson {
             id: &self.id,
             time: self.time,
+            action: self.action.as_str(),
+            undo_of: self.undo_of.as_deref(),
+            undone: self.undone,
             added: self.counts.added,
             updated: self.counts.updated,
             completed: self.counts.completed,
@@ -336,14 +365,30 @@ impl Serialize for JournalSummary {
 }
 
 impl Tabular for JournalSummary {
-    const HEADER: &'static [&'static str] =
-        &["ENTRY", "TIME", "ADDED", "UPDATED", "COMPLETED", "DELETED"];
+    const HEADER: &'static [&'static str] = &[
+        "ENTRY",
+        "TIME",
+        "ACTION",
+        "UNDO OF",
+        "UNDONE",
+        "ADDED",
+        "UPDATED",
+        "COMPLETED",
+        "DELETED",
+    ];
     const TITLE_COLUMN: usize = 0;
 
     fn row(&self) -> Vec<String> {
         vec![
             self.id.clone(),
             self.time.to_string(),
+            self.action.as_str().into(),
+            self.undo_of.clone().unwrap_or_default(),
+            if self.undone {
+                "yes".into()
+            } else {
+                String::new()
+            },
             self.counts.added.to_string(),
             self.counts.updated.to_string(),
             self.counts.completed.to_string(),

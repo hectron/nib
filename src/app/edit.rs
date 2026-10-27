@@ -6,7 +6,7 @@ use serde_json::json;
 
 use crate::app::journal;
 use crate::app::markdown::{self, Plan, Session};
-use crate::cli::output::clean;
+use crate::cli::output::{clean, clean_lines};
 use crate::domain::{Backends, ReminderChange};
 use crate::infra::host::Host;
 
@@ -62,7 +62,7 @@ pub fn tasks(
             file.remove_on_drop();
             return Ok("No changes.".into());
         }
-        host.say(&clean(&markdown::describe(&plan, &snapshot)));
+        host.say(&clean_lines(&markdown::describe(&plan, &snapshot)));
         if !confirmed(host, &plan)? {
             return Ok(format!(
                 "Nothing was changed. Your edits are in {}",

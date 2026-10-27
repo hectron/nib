@@ -28,10 +28,40 @@ pub fn run(
     demo: bool,
     style: Style,
 ) -> miette::Result<String> {
-    let backends = if demo {
-        infra::demo::backends(now)
+    if demo {
+        let backends = infra::demo::backends(now);
+        app::commands::run(
+            cli,
+            config,
+            now,
+            &backends,
+            style,
+            &mut infra::host::Memory::new(),
+        )
     } else {
-        infra::system_backends()
-    };
-    app::commands::run(cli, config, now, &backends, style, &mut infra::host::System)
+        let backends = infra::system_backends();
+        app::commands::run(cli, config, now, &backends, style, &mut infra::host::System)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use jiff::civil::date;
+    use jiff::tz::{TimeZone, offset};
+
+    use super::*;
+
+    #[test]
+    fn demo_log_uses_an_empty_in_memory_journal() {
+        let now = date(2026, 10, 26)
+            .at(9, 0, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-4)))
+            .unwrap();
+        let cli = Cli::try_parse_from(["nib", "log", "--json"]).unwrap();
+        assert_eq!(
+            run(cli, &Config::default(), &now, true, Style::default()).unwrap(),
+            "[]"
+        );
+    }
 }
