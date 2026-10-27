@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/hectron/nib/main/docs/config.schema.json",
+  "title": "nib configuration",
+  "description": "Configuration for the nib command-line interface.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "list": {
+          "type": "string",
+          "description": "Default Reminders list."
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "description": "Default reminder priority."
+        },
+        "parse_inline": {
+          "type": "boolean",
+          "default": true,
+          "description": "Parse trailing due dates, priorities, and list names."
+        }
+      }
+    },
+    "cal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "calendars": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Calendars included by default."
+        }
+      }
+    },
+    "note": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "folder": {
+          "type": "string",
+          "description": "Default folder for newly created notes."
+        }
+      }
+    }
+  }
+}

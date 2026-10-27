@@ -62,6 +62,8 @@ folder = "Notes"
 
 A `nib.toml` in a project directory overrides these field by field, and `.nib.local.toml` holds personal overrides you don't commit. See [Configuration](docs/configuration.md) for every setting, environment variables, and precedence.
 
+Run `nib config list --origin` to see every effective value and where it came from.
+
 ## Why nib
 
 - Fast, focused commands with short aliases and useful defaults.

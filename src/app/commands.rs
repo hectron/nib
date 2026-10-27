@@ -20,6 +20,9 @@ pub fn run(
         Action::Doctor => Err(miette::miette!(
             "doctor must be run through the system diagnostic entry point"
         )),
+        Action::Config(_) => Err(miette::miette!(
+            "config must be run through the configuration entry point"
+        )),
         Action::Today { date, query } => {
             let reminders = backends.reminders.list()?;
             let (overdue, remaining): (Vec<_>, Vec<_>) = reminders
@@ -92,9 +95,10 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        ApplyResult, AutomationStatus, BackendError, Calendar, ChangeCounts, DoctorProbe,
-        EditorSetting, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes,
-        PermissionStatus, Priority, Reminder, ReminderChange, ReminderSnapshot, Reminders,
+        ApplyResult, AutomationStatus, BackendError, Calendar, ChangeCounts, ConfigEntry,
+        ConfigKey, ConfigOrigin, ConfigValue, DoctorProbe, EditorSetting, Event, EventQuery,
+        NewNote, NewReminder, Note, NoteQuery, Notes, PermissionStatus, Priority, Reminder,
+        ReminderChange, ReminderSnapshot, Reminders,
     };
     use crate::infra::host::Scripted;
 
@@ -994,6 +998,196 @@ mod tests {
         .unwrap();
 
         assert_eq!(recorded.take().unwrap().calendars, ["Work", "Birthdays"]);
+    }
+
+    fn config_entries() -> Vec<ConfigEntry> {
+        vec![
+            ConfigEntry {
+                key: ConfigKey::TaskList,
+                value: ConfigValue::String("Work".into()),
+                origin: ConfigOrigin::File("/Users/me/project/nib.toml".into()),
+            },
+            ConfigEntry {
+                key: ConfigKey::TaskPriority,
+                value: ConfigValue::Unset,
+                origin: ConfigOrigin::Default,
+            },
+            ConfigEntry {
+                key: ConfigKey::TaskParseInline,
+                value: ConfigValue::Bool(true),
+                origin: ConfigOrigin::Environment("NIB_TASK_PARSE_INLINE"),
+            },
+            ConfigEntry {
+                key: ConfigKey::CalCalendars,
+                value: ConfigValue::Strings(vec!["Work".into(), "Personal".into()]),
+                origin: ConfigOrigin::Default,
+            },
+            ConfigEntry {
+                key: ConfigKey::NoteFolder,
+                value: ConfigValue::String("Notes".into()),
+                origin: ConfigOrigin::File("/Users/me/.config/nib/config.toml".into()),
+            },
+        ]
+    }
+
+    #[test]
+    fn config_list_text_outputs_are_stable() {
+        let entries = config_entries();
+        assert_snapshot!(output::config_list(&entries, false, false, Style::default()).unwrap(), @r#"
+        KEY                VALUE
+        task.list          Work
+        task.priority      <unset>
+        task.parse_inline  true
+        cal.calendars      ["Work", "Personal"]
+        note.folder        Notes
+        "#);
+        assert_snapshot!(output::config_list(&entries, true, false, Style::default()).unwrap(), @r#"
+        KEY                VALUE                 ORIGIN
+        task.list          Work                  /Users/me/project/nib.toml
+        task.priority      <unset>               default
+        task.parse_inline  true                  NIB_TASK_PARSE_INLINE
+        cal.calendars      ["Work", "Personal"]  default
+        note.folder        Notes                 /Users/me/.config/nib/config.toml
+        "#);
+    }
+
+    #[test]
+    fn config_list_json_outputs_are_stable() {
+        let entries = config_entries();
+        assert_snapshot!(output::config_list(&entries, true, true, Style::default()).unwrap(), @r#"
+        [
+          {
+            "id": "task.list",
+            "value": "Work",
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/project/nib.toml"
+            }
+          },
+          {
+            "id": "task.priority",
+            "value": null,
+            "origin": {
+              "kind": "default"
+            }
+          },
+          {
+            "id": "task.parse_inline",
+            "value": true,
+            "origin": {
+              "kind": "env",
+              "variable": "NIB_TASK_PARSE_INLINE"
+            }
+          },
+          {
+            "id": "cal.calendars",
+            "value": [
+              "Work",
+              "Personal"
+            ],
+            "origin": {
+              "kind": "default"
+            }
+          },
+          {
+            "id": "note.folder",
+            "value": "Notes",
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/.config/nib/config.toml"
+            }
+          }
+        ]
+        "#);
+        assert_snapshot!(output::config_list(&entries, false, true, Style::default()).unwrap(), @r#"
+        [
+          {
+            "id": "task.list",
+            "value": "Work",
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/project/nib.toml"
+            }
+          },
+          {
+            "id": "task.priority",
+            "value": null,
+            "origin": {
+              "kind": "default"
+            }
+          },
+          {
+            "id": "task.parse_inline",
+            "value": true,
+            "origin": {
+              "kind": "env",
+              "variable": "NIB_TASK_PARSE_INLINE"
+            }
+          },
+          {
+            "id": "cal.calendars",
+            "value": [
+              "Work",
+              "Personal"
+            ],
+            "origin": {
+              "kind": "default"
+            }
+          },
+          {
+            "id": "note.folder",
+            "value": "Notes",
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/.config/nib/config.toml"
+            }
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn config_single_and_write_outputs_are_stable() {
+        let entry = &config_entries()[0];
+        let path = std::path::Path::new("/Users/me/.config/nib/config.toml");
+        assert_snapshot!(output::config_get(entry, false, Style::default()).unwrap(), @"Work");
+        assert_snapshot!(output::config_get(entry, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "task.list",
+          "value": "Work"
+        }
+        "#);
+        assert_snapshot!(output::config_set("task.list", &entry.value, path, false, Style::default()).unwrap(), @"Set task.list in /Users/me/.config/nib/config.toml");
+        assert_snapshot!(output::config_set("task.list", &entry.value, path, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "task.list",
+          "value": "Work",
+          "path": "/Users/me/.config/nib/config.toml"
+        }
+        "#);
+        assert_snapshot!(output::config_unset("task.list", path, true, false, Style::default()).unwrap(), @"Unset task.list in /Users/me/.config/nib/config.toml");
+        assert_snapshot!(output::config_unset("task.list", path, true, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "task.list",
+          "path": "/Users/me/.config/nib/config.toml",
+          "changed": true
+        }
+        "#);
+        assert_snapshot!(output::config_unset("task.list", path, false, false, Style::default()).unwrap(), @"task.list isn't set in /Users/me/.config/nib/config.toml; nothing changed");
+        assert_snapshot!(output::config_unset("task.list", path, false, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "task.list",
+          "path": "/Users/me/.config/nib/config.toml",
+          "changed": false
+        }
+        "#);
+        assert_snapshot!(output::config_path(path, false, Style::default()).unwrap(), @"/Users/me/.config/nib/config.toml");
+        assert_snapshot!(output::config_path(path, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "user",
+          "path": "/Users/me/.config/nib/config.toml"
+        }
+        "#);
     }
 
     #[test]
