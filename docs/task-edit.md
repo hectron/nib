@@ -1,0 +1,63 @@
+# Edit reminders as Markdown
+
+Open every incomplete reminder in your editor:
+
+```bash
+nib task edit
+```
+
+Limit the file to one list:
+
+```bash
+nib task edit --list Work
+```
+
+nib uses `$VISUAL`, then `$EDITOR`, and falls back to `vi`. GUI editors must wait for the file to close; for example, set `EDITOR="code --wait"`.
+
+## Format
+
+```markdown
+## Work 🆔 a1b2c3d4
+
+- [ ] Review pull request ⏫ 📅 2026-11-03 🆔 e5f6a7b8
+    Check the release notes.
+- [ ] Draft announcement 🔼
+```
+
+- `##` starts an existing reminder list. Keep its `🆔` value.
+- `- [ ]` is an incomplete reminder. Change it to `- [x]` to complete it.
+- `⏫`, `🔼`, and `🔽` mean high, medium, and low priority.
+- `📅 YYYY-MM-DD` is the due date.
+- Indent notes with four spaces or a tab beneath their reminder.
+- A reminder without an `🆔` is new.
+- HTML comments are ignored.
+
+Edit a title or note in place. Remove the priority or due-date marker to clear that field. Delete an existing reminder line to delete it. Move a line beneath another list heading to move the reminder.
+
+nib cannot create or rename lists in this file. Changes that touch a read-only list are rejected.
+
+## Before anything changes
+
+Saving the file only builds a plan. nib validates the Markdown, prints every add, update, completion, move, and deletion, then asks for confirmation.
+
+Deleting more than three reminders requires typing the exact deletion count. An empty response never confirms a normal change.
+
+Before updating, completing, moving, or deleting an existing reminder, nib writes its original data to:
+
+```text
+~/Library/Application Support/nib/backups
+```
+
+Backup names start with a local timestamp, include `-tasks-`, and end with a random suffix plus `.json` to avoid overwriting another backup. New reminders do not need a backup. nib warns when EventKit returned only enough data for a partial backup.
+
+## Safety rules
+
+- The edit file is created with owner-only permissions.
+- Reminders with unsafe control characters in the title or notes, or line breaks in the title, are skipped and cannot be changed through the file.
+- A file with no reminder lines is rejected; delete reminders in smaller groups.
+- List and reminder IDs must remain unique and must come from the opened file.
+- If a reminder changed in Apple Reminders while the editor was open, nib aborts instead of overwriting it.
+- Parse errors can be reopened in the editor. If you stop or decline the preview, the edited file is kept and its path is printed.
+- A failed apply keeps the edited file and leaves the EventKit batch uncommitted.
+
+The Markdown format represents titles, notes, due dates, priorities, completion, and list placement. Alarms, repeats, and links are not rendered. Ordinary edits preserve them; a deletion loses them, and nib shows that loss in the preview. Removing an existing reminder's `🆔` turns it into a delete plus an add, which also loses that metadata.
