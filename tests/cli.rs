@@ -10,6 +10,7 @@ fn command() -> assert_cmd::Command {
         )
         .env_remove("NIB_TASK_LIST")
         .env_remove("NIB_TASK_PRIORITY")
+        .env_remove("NIB_TASK_PARSE_INLINE")
         .env_remove("NIB_CAL_CALENDARS")
         .env_remove("NIB_NOTE_FOLDER");
     command

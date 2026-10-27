@@ -21,6 +21,7 @@ struct FileConfig {
 struct FileTask {
     list: Option<String>,
     priority: Option<Priority>,
+    parse_inline: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,6 +138,9 @@ fn apply(config: &mut Config, other: FileConfig) {
         if task.priority.is_some() {
             config.task.priority = task.priority;
         }
+        if let Some(parse_inline) = task.parse_inline {
+            config.task.parse_inline = parse_inline;
+        }
     }
     if let Some(cal) = other.cal
         && let Some(calendars) = cal.calendars
@@ -159,6 +163,9 @@ fn apply_environment(
     }
     if let Some(value) = environment(&env, "NIB_TASK_PRIORITY")? {
         config.task.priority = Some(parse_priority("NIB_TASK_PRIORITY", &value)?);
+    }
+    if let Some(value) = environment(&env, "NIB_TASK_PARSE_INLINE")? {
+        config.task.parse_inline = parse_bool("NIB_TASK_PARSE_INLINE", &value)?;
     }
     if let Some(value) = environment(&env, "NIB_CAL_CALENDARS")? {
         config.cal.calendars = value
@@ -196,6 +203,18 @@ fn parse_priority(name: &'static str, value: &str) -> Result<Priority, ConfigErr
             name,
             value: value.into(),
             expected: "low, medium, or high",
+        }),
+    }
+}
+
+fn parse_bool(name: &'static str, value: &str) -> Result<bool, ConfigError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(ConfigError::Environment {
+            name,
+            value: value.into(),
+            expected: "true or false",
         }),
     }
 }
@@ -263,7 +282,7 @@ mod tests {
         fs::create_dir_all(&package).unwrap();
         write(
             &temp.join("nib.toml"),
-            "[task]\nlist = \"Root\"\npriority = \"low\"\n[cal]\ncalendars = [\"Home\"]\n",
+            "[task]\nlist = \"Root\"\npriority = \"low\"\nparse_inline = false\n[cal]\ncalendars = [\"Home\"]\n",
         );
         write(
             &project.join(".nib.toml"),
@@ -274,6 +293,7 @@ mod tests {
         let config = load(&package, None, no_env).unwrap();
         assert_eq!(config.task.list.as_deref(), Some("Project"));
         assert_eq!(config.task.priority, Some(Priority::High));
+        assert!(!config.task.parse_inline);
         assert_eq!(config.cal.calendars, ["Home"]);
         assert_eq!(config.note.folder.as_deref(), Some("Work"));
     }
@@ -297,11 +317,12 @@ mod tests {
         let temp = TempDir::new();
         write(
             &temp.join("nib.toml"),
-            "[task]\nlist = \"Project\"\npriority = \"low\"\n[cal]\ncalendars = [\"Home\"]\n[note]\nfolder = \"Archive\"\n",
+            "[task]\nlist = \"Project\"\npriority = \"low\"\nparse_inline = false\n[cal]\ncalendars = [\"Home\"]\n[note]\nfolder = \"Archive\"\n",
         );
         let env = HashMap::from([
             ("NIB_TASK_LIST", "Environment"),
             ("NIB_TASK_PRIORITY", "medium"),
+            ("NIB_TASK_PARSE_INLINE", "true"),
             ("NIB_CAL_CALENDARS", "Work, Birthdays"),
             ("NIB_NOTE_FOLDER", "Inbox"),
         ]);
@@ -309,6 +330,7 @@ mod tests {
         let config = load(&temp.0, None, |name| env.get(name).map(OsString::from)).unwrap();
         assert_eq!(config.task.list.as_deref(), Some("Environment"));
         assert_eq!(config.task.priority, Some(Priority::Medium));
+        assert!(config.task.parse_inline);
         assert_eq!(config.cal.calendars, ["Work", "Birthdays"]);
         assert_eq!(config.note.folder.as_deref(), Some("Inbox"));
     }
@@ -395,12 +417,18 @@ mod tests {
 
     #[test]
     fn invalid_environment_values_name_the_variable() {
-        let error = load(Path::new("/"), None, |name| {
-            (name == "NIB_TASK_PRIORITY").then(|| OsString::from("urgent"))
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("NIB_TASK_PRIORITY"), "{error}");
-        assert!(error.contains("urgent"), "{error}");
+        let cases = [
+            ("NIB_TASK_PRIORITY", "urgent"),
+            ("NIB_TASK_PARSE_INLINE", "sometimes"),
+        ];
+        for (variable, value) in cases {
+            let error = load(Path::new("/"), None, |name| {
+                (name == variable).then(|| OsString::from(value))
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(variable), "{error}");
+            assert!(error.contains(value), "{error}");
+        }
     }
 }

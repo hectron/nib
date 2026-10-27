@@ -44,10 +44,21 @@ pub struct Config {
     pub note: NoteConfig,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskConfig {
     pub list: Option<String>,
     pub priority: Option<Priority>,
+    pub parse_inline: bool,
+}
+
+impl Default for TaskConfig {
+    fn default() -> Self {
+        Self {
+            list: None,
+            priority: None,
+            parse_inline: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
