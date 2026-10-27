@@ -1,5 +1,6 @@
 use std::cell::LazyCell;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use jiff::civil::{Date, Time};
 use jiff::tz::TimeZone;
@@ -83,6 +84,81 @@ pub struct CalendarConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NoteConfig {
     pub folder: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigKey {
+    TaskList,
+    TaskPriority,
+    TaskParseInline,
+    CalCalendars,
+    NoteFolder,
+}
+
+impl ConfigKey {
+    pub const ALL: [Self; 5] = [
+        Self::TaskList,
+        Self::TaskPriority,
+        Self::TaskParseInline,
+        Self::CalCalendars,
+        Self::NoteFolder,
+    ];
+
+    pub fn parse(key: &str) -> Option<Self> {
+        match key {
+            "task.list" => Some(Self::TaskList),
+            "task.priority" => Some(Self::TaskPriority),
+            "task.parse_inline" => Some(Self::TaskParseInline),
+            "cal.calendars" => Some(Self::CalCalendars),
+            "note.folder" => Some(Self::NoteFolder),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskList => "task.list",
+            Self::TaskPriority => "task.priority",
+            Self::TaskParseInline => "task.parse_inline",
+            Self::CalCalendars => "cal.calendars",
+            Self::NoteFolder => "note.folder",
+        }
+    }
+
+    pub fn parts(self) -> (&'static str, &'static str) {
+        self.as_str()
+            .split_once('.')
+            .expect("configuration keys always contain a section separator")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigValue {
+    Unset,
+    String(String),
+    Priority(Priority),
+    Bool(bool),
+    Strings(Vec<String>),
+}
+
+impl ConfigValue {
+    pub fn is_unset(&self) -> bool {
+        matches!(self, Self::Unset)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigOrigin {
+    Default,
+    File(PathBuf),
+    Environment(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigEntry {
+    pub key: ConfigKey,
+    pub value: ConfigValue,
+    pub origin: ConfigOrigin,
 }
 
 impl Priority {
@@ -254,6 +330,7 @@ pub struct JournalSummary {
     pub undo_of: Option<String>,
     pub undone: bool,
     pub counts: ChangeCounts,
+    pub unrecorded: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

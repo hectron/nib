@@ -1,12 +1,14 @@
 use std::ops::Range;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use jiff::civil::Date;
 use jiff::{ToSpan, Zoned};
 use thiserror::Error;
 
 use crate::domain::{Config, EventQuery, NewNote, NewReminder, NoteQuery, Priority};
 
+pub(crate) mod completions;
 pub mod output;
 mod task;
 
@@ -27,6 +29,7 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Doctor,
+    Config(ConfigAction),
     Today {
         date: Date,
         query: EventQuery,
@@ -48,8 +51,22 @@ pub enum Action {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[arg(long)]
+        refresh: bool,
+        #[arg(value_enum)]
+        kind: CompletionKind,
+    },
+    /// Generate a shell completion script
+    Completions {
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
     /// Check system access and configuration without prompting
     Doctor,
+    /// Inspect and edit configuration
+    Config(ConfigArgs),
     /// Show today's reminders and events
     Today(TodayArgs),
     /// Create and list notes
@@ -79,6 +96,86 @@ pub struct UndoArgs {
     /// Resolve an interrupted undo journal entry
     #[arg(long, value_name = "ID")]
     resolve: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    action: ConfigAction,
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum ConfigAction {
+    /// List effective settings
+    List {
+        /// Show where each value came from
+        #[arg(long)]
+        origin: bool,
+    },
+    /// Print one effective setting
+    Get { key: String },
+    /// Set a value in a configuration file
+    Set {
+        key: String,
+        value: String,
+        #[command(flatten)]
+        target: ConfigTargetArgs,
+    },
+    /// Remove a value from a configuration file
+    Unset {
+        key: String,
+        #[command(flatten)]
+        target: ConfigTargetArgs,
+    },
+    /// Print the user configuration path
+    Path,
+}
+
+#[derive(Debug, Clone, Copy, Default, Args, PartialEq, Eq)]
+#[group(multiple = false)]
+pub struct ConfigTargetArgs {
+    /// Write .nib.local.toml in the current directory
+    #[arg(long)]
+    pub local: bool,
+    /// Write nib.toml in the current directory
+    #[arg(long)]
+    pub project: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompletionShell {
+    Zsh,
+    Bash,
+    Fish,
+}
+
+impl From<CompletionShell> for Shell {
+    fn from(shell: CompletionShell) -> Self {
+        match shell {
+            CompletionShell::Zsh => Self::Zsh,
+            CompletionShell::Bash => Self::Bash,
+            CompletionShell::Fish => Self::Fish,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompletionKind {
+    ReminderLists,
+    WritableReminderLists,
+    Calendars,
+    NoteFolders,
+}
+
+impl CompletionKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReminderLists => "reminder-lists",
+            Self::WritableReminderLists => "writable-reminder-lists",
+            Self::Calendars => "calendars",
+            Self::NoteFolders => "note-folders",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -251,9 +348,15 @@ pub(crate) enum ActionError {
 }
 
 impl Command {
-    pub(crate) fn into_action(self, now: &Zoned, config: &Config) -> Result<Action, ActionError> {
-        Ok(match self {
+    pub(crate) fn into_action(
+        self,
+        now: &Zoned,
+        config: &Config,
+    ) -> Result<Option<Action>, ActionError> {
+        Ok(Some(match self {
+            Command::Complete { .. } | Command::Completions { .. } => return Ok(None),
             Command::Doctor => Action::Doctor,
+            Command::Config(ConfigArgs { action }) => Action::Config(action),
             Command::Today(TodayArgs { calendar }) => Action::Today {
                 date: now.date(),
                 query: EventQuery {
@@ -321,7 +424,7 @@ impl Command {
             },
             Command::Log => Action::Log,
             Command::Undo(UndoArgs { entry, resolve }) => Action::Undo { entry, resolve },
-        })
+        }))
     }
 }
 
@@ -329,6 +432,33 @@ impl Cli {
     pub fn is_doctor(&self) -> bool {
         matches!(self.command, Command::Doctor)
     }
+
+    pub(crate) fn completion_request(&self) -> Option<CompletionRequest> {
+        match self.command {
+            Command::Complete { refresh, kind } => {
+                Some(CompletionRequest::Values { kind, refresh })
+            }
+            Command::Completions { shell } => Some(CompletionRequest::Script(shell)),
+            _ => None,
+        }
+    }
+
+    pub fn is_config(&self) -> bool {
+        matches!(self.command, Command::Config(_))
+    }
+
+    pub(crate) fn into_config(self) -> Option<(bool, ConfigAction)> {
+        match self.command {
+            Command::Config(ConfigArgs { action }) => Some((self.json, action)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionRequest {
+    Script(CompletionShell),
+    Values { kind: CompletionKind, refresh: bool },
 }
 
 #[cfg(test)]
@@ -357,8 +487,12 @@ mod tests {
     }
 
     fn parse_at(now: &Zoned, args: &[&str]) -> Result<Action, clap::Error> {
-        Cli::try_parse_from(["nib"].iter().chain(args))
-            .map(|cli| cli.command.into_action(now, &Config::default()).unwrap())
+        Cli::try_parse_from(["nib"].iter().chain(args)).map(|cli| {
+            cli.command
+                .into_action(now, &Config::default())
+                .unwrap()
+                .unwrap()
+        })
     }
 
     fn parse(args: &[&str]) -> Result<Action, clap::Error> {
@@ -374,6 +508,7 @@ mod tests {
             .unwrap()
             .command
             .into_action(now, config)
+            .map(|action| action.unwrap())
     }
 
     fn assert_parses(cases: &[(&[&str], Action)]) {
@@ -443,6 +578,62 @@ mod tests {
     #[test]
     fn doctor_command() {
         assert_eq!(parse(&["doctor"]).unwrap(), Action::Doctor);
+    }
+
+    #[test]
+    fn config_commands() {
+        assert_parses(&[
+            (
+                &["config", "list", "--origin"],
+                Action::Config(ConfigAction::List { origin: true }),
+            ),
+            (
+                &["config", "get", "task.list"],
+                Action::Config(ConfigAction::Get {
+                    key: "task.list".into(),
+                }),
+            ),
+            (
+                &["config", "set", "task.list", "Work", "--local"],
+                Action::Config(ConfigAction::Set {
+                    key: "task.list".into(),
+                    value: "Work".into(),
+                    target: ConfigTargetArgs {
+                        local: true,
+                        project: false,
+                    },
+                }),
+            ),
+            (
+                &["config", "unset", "note.folder", "--project"],
+                Action::Config(ConfigAction::Unset {
+                    key: "note.folder".into(),
+                    target: ConfigTargetArgs {
+                        local: false,
+                        project: true,
+                    },
+                }),
+            ),
+            (&["config", "path"], Action::Config(ConfigAction::Path)),
+            (
+                &["config", "get", "future.key"],
+                Action::Config(ConfigAction::Get {
+                    key: "future.key".into(),
+                }),
+            ),
+        ]);
+
+        let error = Cli::try_parse_from([
+            "nib",
+            "config",
+            "set",
+            "task.list",
+            "Work",
+            "--local",
+            "--project",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -844,6 +1035,7 @@ mod tests {
                 .unwrap()
                 .command
                 .into_action(&now, &config)
+                .unwrap()
                 .unwrap()
         };
 

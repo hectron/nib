@@ -8,7 +8,8 @@ use serde::{Serialize, Serializer};
 
 use crate::app::doctor::{Check, CheckStatus};
 use crate::domain::{
-    ChangeCounts, Event, JournalSummary, Note, Priority, Reminder, time_zone_is_local_at,
+    ChangeCounts, ConfigEntry, ConfigOrigin, ConfigValue, Event, JournalSummary, Note, Priority,
+    Reminder, time_zone_is_local_at,
 };
 
 pub trait Tabular: Serialize {
@@ -279,6 +280,174 @@ pub fn doctor(checks: &[Check], json: bool, style: Style) -> Result<String> {
         })
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+pub fn config_list(
+    entries: &[ConfigEntry],
+    show_origin: bool,
+    json: bool,
+    style: Style,
+) -> Result<String> {
+    if json {
+        let entries = entries
+            .iter()
+            .map(|entry| ConfigEntryJson {
+                id: entry.key.as_str(),
+                value: ConfigValueJson::from(&entry.value),
+                origin: ConfigOriginJson::from(&entry.origin),
+            })
+            .collect::<Vec<_>>();
+        return to_json(&entries, style);
+    }
+    let rows = entries
+        .iter()
+        .map(|entry| {
+            let mut row = vec![
+                entry.key.as_str().to_owned(),
+                config_value_text(&entry.value),
+            ];
+            if show_origin {
+                row.push(config_origin_text(&entry.origin));
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    Ok(config_table(
+        if show_origin {
+            &["KEY", "VALUE", "ORIGIN"]
+        } else {
+            &["KEY", "VALUE"]
+        },
+        &rows,
+        style,
+    ))
+}
+
+pub fn config_get(entry: &ConfigEntry, json: bool, style: Style) -> Result<String> {
+    if json {
+        return to_json(
+            &ConfigGetJson {
+                id: entry.key.as_str(),
+                value: ConfigValueJson::from(&entry.value),
+            },
+            style,
+        );
+    }
+    Ok(clean(&config_value_text(&entry.value)))
+}
+
+pub fn config_set(
+    key: &str,
+    value: &ConfigValue,
+    path: &std::path::Path,
+    json: bool,
+    style: Style,
+) -> Result<String> {
+    if json {
+        return to_json(
+            &ConfigSetJson {
+                id: key,
+                value: ConfigValueJson::from(value),
+                path: path.display().to_string(),
+            },
+            style,
+        );
+    }
+    Ok(clean(&format!("Set {key} in {}", path.display())))
+}
+
+pub fn config_unset(
+    key: &str,
+    path: &std::path::Path,
+    changed: bool,
+    json: bool,
+    style: Style,
+) -> Result<String> {
+    if json {
+        return to_json(
+            &ConfigUnsetJson {
+                id: key,
+                path: path.display().to_string(),
+                changed,
+            },
+            style,
+        );
+    }
+    if changed {
+        Ok(clean(&format!("Unset {key} in {}", path.display())))
+    } else {
+        Ok(clean(&format!(
+            "{key} isn't set in {}; nothing changed",
+            path.display()
+        )))
+    }
+}
+
+pub fn config_path(path: &std::path::Path, json: bool, style: Style) -> Result<String> {
+    if json {
+        return to_json(
+            &ConfigPathJson {
+                id: "user",
+                path: path.display().to_string(),
+            },
+            style,
+        );
+    }
+    Ok(clean(&path.display().to_string()))
+}
+
+fn config_table(headers: &[&str], rows: &[Vec<String>], style: Style) -> String {
+    let mut table = Table::new();
+    table
+        .force_no_tty()
+        .load_style(NOTHING)
+        .set_truncation_indicator("…");
+    if style.color {
+        table.enforce_styling().style_text_only();
+    }
+    if let Some(width) = style.width {
+        table
+            .set_width(width)
+            .set_content_arrangement(ContentArrangement::Dynamic);
+    }
+    let mut header = Row::from(
+        headers
+            .iter()
+            .map(|header| Cell::new(header).add_attribute(Attribute::Bold)),
+    );
+    header.max_height(1);
+    table.set_header(header);
+    for row in rows {
+        let mut row = Row::from(row.iter().map(|cell| clean(cell)));
+        row.max_height(1);
+        table.add_row(row);
+    }
+    for column in table.column_iter_mut() {
+        column.set_padding((0, 2));
+    }
+    table.trim_fmt()
+}
+
+fn config_value_text(value: &ConfigValue) -> String {
+    match value {
+        ConfigValue::Unset => "<unset>".into(),
+        ConfigValue::String(value) => value.clone(),
+        ConfigValue::Priority(value) => value.as_str().into(),
+        ConfigValue::Bool(value) => value.to_string(),
+        ConfigValue::Strings(values) => {
+            let mut array = toml_edit::Array::new();
+            array.extend(values.iter().cloned());
+            array.to_string()
+        }
+    }
+}
+
+fn config_origin_text(origin: &ConfigOrigin) -> String {
+    match origin {
+        ConfigOrigin::Default => "default".into(),
+        ConfigOrigin::File(path) => path.display().to_string(),
+        ConfigOrigin::Environment(name) => (*name).into(),
+    }
 }
 
 fn styled_symbol(symbol: &str, color: &str, style: Style) -> String {
@@ -663,6 +832,7 @@ struct JournalJson<'a> {
     updated: usize,
     completed: usize,
     deleted: usize,
+    unrecorded: usize,
 }
 
 #[derive(Serialize)]
@@ -697,6 +867,7 @@ impl Serialize for JournalSummary {
             updated: self.counts.updated,
             completed: self.counts.completed,
             deleted: self.counts.deleted,
+            unrecorded: self.unrecorded,
         }
         .serialize(serializer)
     }
@@ -714,6 +885,7 @@ impl Tabular for JournalSummary {
         "UPDATED",
         "COMPLETED",
         "DELETED",
+        "UNRECORDED",
     ];
     const TITLE_COLUMN: usize = 0;
 
@@ -733,6 +905,7 @@ impl Tabular for JournalSummary {
             self.counts.updated.to_string(),
             self.counts.completed.to_string(),
             self.counts.deleted.to_string(),
+            self.unrecorded.to_string(),
         ]
     }
 
@@ -754,6 +927,80 @@ struct DoctorCheckJson {
     status: &'static str,
     message: String,
     fix: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ConfigEntryJson<'a> {
+    id: &'a str,
+    value: ConfigValueJson<'a>,
+    origin: ConfigOriginJson<'a>,
+}
+
+#[derive(Serialize)]
+struct ConfigGetJson<'a> {
+    id: &'a str,
+    value: ConfigValueJson<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum ConfigOriginJson<'a> {
+    Default,
+    File { path: String },
+    Env { variable: &'a str },
+}
+
+impl<'a> From<&'a ConfigOrigin> for ConfigOriginJson<'a> {
+    fn from(origin: &'a ConfigOrigin) -> Self {
+        match origin {
+            ConfigOrigin::Default => Self::Default,
+            ConfigOrigin::File(path) => Self::File {
+                path: path.display().to_string(),
+            },
+            ConfigOrigin::Environment(variable) => Self::Env { variable },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ConfigValueJson<'a> {
+    Null,
+    String(&'a str),
+    Bool(bool),
+    Strings(&'a [String]),
+}
+
+impl<'a> From<&'a ConfigValue> for ConfigValueJson<'a> {
+    fn from(value: &'a ConfigValue) -> Self {
+        match value {
+            ConfigValue::Unset => Self::Null,
+            ConfigValue::String(value) => Self::String(value),
+            ConfigValue::Priority(value) => Self::String(value.as_str()),
+            ConfigValue::Bool(value) => Self::Bool(*value),
+            ConfigValue::Strings(values) => Self::Strings(values),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ConfigSetJson<'a> {
+    id: &'a str,
+    value: ConfigValueJson<'a>,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct ConfigUnsetJson<'a> {
+    id: &'a str,
+    path: String,
+    changed: bool,
+}
+
+#[derive(Serialize)]
+struct ConfigPathJson {
+    id: &'static str,
+    path: String,
 }
 
 impl From<&Check> for DoctorCheckJson {
@@ -1178,6 +1425,32 @@ mod tests {
                 .unwrap()
                 .contains(r#""Hi\u001b]0;pwned\u0007\nthere""#)
         );
+    }
+
+    #[test]
+    fn config_array_text_is_valid_toml_and_rows_stay_single_line() {
+        let value = ConfigValue::Strings(vec!["Work\nOps".into(), "Wo\"rk".into()]);
+        let text = config_value_text(&value);
+        let parsed = text.parse::<toml_edit::Value>().unwrap();
+        assert!(matches!(parsed, toml_edit::Value::Array(_)));
+
+        let entries = [ConfigEntry {
+            key: crate::domain::ConfigKey::TaskList,
+            value: ConfigValue::String("a very long configured value".into()),
+            origin: ConfigOrigin::File("/a/very/long/path/to/nib.toml".into()),
+        }];
+        let rendered = config_list(
+            &entries,
+            true,
+            false,
+            Style {
+                color: false,
+                width: Some(24),
+            },
+        )
+        .unwrap();
+        assert_eq!(rendered.lines().count(), 2, "{rendered}");
+        assert!(rendered.contains('…'), "{rendered}");
     }
 
     #[test]

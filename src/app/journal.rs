@@ -48,7 +48,6 @@ enum Status {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "change", rename_all = "snake_case")]
 enum PlannedChange {
-    Add { title: String },
     Restore { id: String, title: String },
     Update { id: String, title: String },
     Delete { id: String, title: String },
@@ -59,7 +58,17 @@ struct Loaded {
     path: std::path::PathBuf,
     written: u128,
     written_at: Option<Timestamp>,
+    contents: String,
     entry: Entry,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UndoPlan {
+    pub id: String,
+    pub changes: Vec<ReminderChange>,
+    pub counts: ChangeCounts,
+    pub partial: bool,
+    fingerprint: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +200,7 @@ impl From<ReminderRecord> for StoredReminder {
             absolute_alarms: value.absolute_alarms,
             recurrence_present: value.recurrence_present,
             url: value.url,
-            backup_partial: value.partial || value.unrecorded.unwrap_or(false),
+            backup_partial: value.partial,
         }
     }
 }
@@ -261,8 +270,9 @@ pub fn record_edit(
     result: &ApplyResult,
     host: &mut dyn Host,
 ) -> Result<String> {
-    let _lock = host.lock_journal().into_diagnostic()?;
-    record(now, Action::TaskEdit, None, changes, result, host)
+    let id = record(now, Action::TaskEdit, None, changes, result, host)?;
+    warn_unrecorded(result, host);
+    Ok(id)
 }
 
 pub fn begin_undo(
@@ -278,7 +288,10 @@ pub fn begin_undo(
         action: Action::Undo,
         status: Status::Pending,
         undo_of: Some(undo_of.to_owned()),
-        planned_changes: changes.iter().map(PlannedChange::from).collect(),
+        planned_changes: changes
+            .iter()
+            .map(PlannedChange::try_from)
+            .collect::<Result<Vec<_>>>()?,
         changes: Vec::new(),
     };
     save_new(now, &entry, host)
@@ -303,6 +316,7 @@ pub fn finish_undo(
     )?;
     let contents = serde_json::to_string_pretty(&entry).into_diagnostic()?;
     let path = host.replace_journal(id, &contents).into_diagnostic()?;
+    warn_unrecorded(result, host);
     Ok(path
         .file_stem()
         .and_then(|name| name.to_str())
@@ -427,12 +441,12 @@ fn save_new(now: &Zoned, entry: &Entry, host: &mut dyn Host) -> Result<String> {
         .to_owned())
 }
 
-impl From<&ReminderChange> for PlannedChange {
-    fn from(value: &ReminderChange) -> Self {
-        match value {
-            ReminderChange::Add { title, .. } => Self::Add {
-                title: title.clone(),
-            },
+impl TryFrom<&ReminderChange> for PlannedChange {
+    type Error = miette::Report;
+
+    fn try_from(value: &ReminderChange) -> Result<Self> {
+        Ok(match value {
+            ReminderChange::Add { .. } => return Err(miette!("an undo can't plan an add")),
             ReminderChange::Restore { before } => Self::Restore {
                 id: before.id.clone(),
                 title: before.title.clone(),
@@ -445,7 +459,7 @@ impl From<&ReminderChange> for PlannedChange {
                 id: before.id.clone(),
                 title: before.title.clone(),
             },
-        }
+        })
     }
 }
 
@@ -463,6 +477,7 @@ pub fn summaries(now: Timestamp, host: &mut dyn Host) -> Result<Vec<JournalSumma
         .into_iter()
         .map(|loaded| {
             let entry_counts = counts(&loaded.entry);
+            let unrecorded = unrecorded_count(&loaded.entry);
             JournalSummary {
                 undone: inactive.contains(&loaded.id),
                 id: loaded.id,
@@ -472,16 +487,13 @@ pub fn summaries(now: Timestamp, host: &mut dyn Host) -> Result<Vec<JournalSumma
                 status: status(loaded.entry.status),
                 undo_of: loaded.entry.undo_of,
                 counts: entry_counts,
+                unrecorded,
             }
         })
         .collect())
 }
 
-pub fn undo_changes(
-    wanted: Option<&str>,
-    now: Timestamp,
-    host: &mut dyn Host,
-) -> Result<(String, Vec<ReminderChange>, ChangeCounts, bool)> {
+pub fn undo_changes(wanted: Option<&str>, now: Timestamp, host: &mut dyn Host) -> Result<UndoPlan> {
     let mut entries = load(now, host)?;
     sort_entries(&mut entries);
     if let Some(pending) = entries
@@ -515,11 +527,20 @@ pub fn undo_changes(
             .ok_or_else(|| miette!("there are no journal entries to undo"))?,
     };
     let id = loaded.id;
+    let fingerprint = loaded.contents;
     let entry = loaded.entry;
     if entry.action == Action::Undo && entry.changes.is_empty() && !entry.planned_changes.is_empty()
     {
         return Err(miette!(
             "journal entry {id:?} was resolved after an interrupted undo and can't be reversed because its committed values weren't recorded"
+        ));
+    }
+    let unrecorded = unrecorded_titles(&entry);
+    if !unrecorded.is_empty() {
+        return Err(miette!(
+            "journal entry {id:?} can't be undone because nib couldn't re-read {} after saving: {}",
+            count(unrecorded.len(), "reminder"),
+            unrecorded.join(", ")
         ));
     }
     let partial = entry.changes.iter().any(|change| match change {
@@ -547,7 +568,26 @@ pub fn undo_changes(
         })
         .collect::<Vec<_>>();
     let undo_counts = change_counts(&changes);
-    Ok((id, changes, undo_counts, partial))
+    Ok(UndoPlan {
+        id,
+        changes,
+        counts: undo_counts,
+        partial,
+        fingerprint,
+    })
+}
+
+pub fn recheck_undo(plan: &UndoPlan, now: Timestamp, host: &mut dyn Host) -> Result<()> {
+    let unchanged = undo_changes(Some(&plan.id), now, host)
+        .is_ok_and(|current| current.fingerprint == plan.fingerprint);
+    if unchanged {
+        Ok(())
+    } else {
+        Err(miette!(
+            "journal entry {:?} changed while nib waited for confirmation; nothing was changed",
+            plan.id
+        ))
+    }
 }
 
 pub fn pending_undo(id: &str, now: Timestamp, host: &mut dyn Host) -> Result<Vec<String>> {
@@ -587,7 +627,6 @@ pub fn resolve_pending(id: &str, applied: bool, now: Timestamp, host: &mut dyn H
 fn expected_state(change: &PlannedChange) -> String {
     let title = |title: &str| crate::app::markdown::normalize_title(title);
     match change {
-        PlannedChange::Add { title: name } => format!("\"{}\" exists again", title(name)),
         PlannedChange::Restore { title: name, .. } => {
             format!("\"{}\" is re-created", title(name))
         }
@@ -631,6 +670,7 @@ fn parse(file: JournalFile) -> Result<Loaded> {
         path: file.path,
         written: file.written,
         written_at: file.written_at,
+        contents,
         entry,
     })
 }
@@ -691,12 +731,57 @@ fn planned_counts(changes: &[PlannedChange]) -> ChangeCounts {
     let mut counts = ChangeCounts::default();
     for change in changes {
         match change {
-            PlannedChange::Add { .. } | PlannedChange::Restore { .. } => counts.added += 1,
+            PlannedChange::Restore { .. } => counts.added += 1,
             PlannedChange::Update { .. } => counts.updated += 1,
             PlannedChange::Delete { .. } => counts.deleted += 1,
         }
     }
     counts
+}
+
+fn unrecorded_count(entry: &Entry) -> usize {
+    unrecorded_records(entry).count()
+}
+
+fn unrecorded_titles(entry: &Entry) -> Vec<String> {
+    unrecorded_records(entry)
+        .map(|record| {
+            format!(
+                "\"{}\"",
+                crate::app::markdown::normalize_title(&record.title)
+            )
+        })
+        .collect()
+}
+
+fn unrecorded_records(entry: &Entry) -> impl Iterator<Item = &ReminderRecord> {
+    entry.changes.iter().filter_map(|change| {
+        let written = match change {
+            Change::Added { written }
+            | Change::Updated { written, .. }
+            | Change::Completed { written, .. } => written,
+            Change::Deleted { .. } => return None,
+        };
+        written.unrecorded.unwrap_or(false).then_some(written)
+    })
+}
+
+fn warn_unrecorded(result: &ApplyResult, host: &mut dyn Host) {
+    let unrecorded = result.unrecorded.iter().filter(|value| **value).count();
+    if unrecorded > 0 {
+        host.say(&format!(
+            "warning: nib couldn't re-read {} after saving; undo of this entry is limited",
+            count(unrecorded, "reminder")
+        ));
+    }
+}
+
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 fn change_counts(changes: &[ReminderChange]) -> ChangeCounts {
@@ -840,6 +925,97 @@ mod tests {
     }
 
     #[test]
+    fn unrecorded_reminders_are_reported_and_cannot_be_undone() {
+        let before = reminder("complete-1", "Finish report");
+        let mut written = before.clone();
+        written.completed = true;
+        let change = ReminderChange::Update {
+            before,
+            edit: ReminderEdit {
+                completed: Some(true),
+                ..ReminderEdit::default()
+            },
+        };
+        let mut host = Scripted::new();
+
+        let id = record_edit(
+            &now(),
+            &[change],
+            &ApplyResult {
+                written: vec![Some(written)],
+                unrecorded: vec![true],
+            },
+            &mut host,
+        )
+        .unwrap();
+
+        assert_eq!(
+            host.said,
+            [
+                "warning: nib couldn't re-read 1 reminder after saving; undo of this entry is limited"
+            ]
+        );
+        assert_eq!(
+            summaries(now().timestamp(), &mut host).unwrap()[0].unrecorded,
+            1
+        );
+        let error = undo_changes(Some(&id), now().timestamp(), &mut host)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("couldn't re-read 1 reminder after saving"));
+        assert!(error.contains("\"Finish report\""));
+    }
+
+    #[test]
+    fn recheck_rejects_an_entry_changed_during_confirmation() {
+        let mut host = Scripted::new();
+        record_edit(
+            &now(),
+            &[ReminderChange::Delete {
+                before: reminder("delete-1", "Old reminder"),
+            }],
+            &ApplyResult {
+                written: vec![None],
+                unrecorded: Vec::new(),
+            },
+            &mut host,
+        )
+        .unwrap();
+        let plan = undo_changes(None, now().timestamp(), &mut host).unwrap();
+        host.journals[0].1.push('\n');
+
+        let error = recheck_undo(&plan, now().timestamp(), &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("changed while nib waited for confirmation"));
+    }
+
+    #[test]
+    fn an_undo_cannot_plan_an_add() {
+        let mut host = Scripted::new();
+        let error = begin_undo(
+            &now(),
+            "original",
+            &[ReminderChange::Add {
+                list_id: "list-1".into(),
+                title: "New reminder".into(),
+                notes: None,
+                due: None,
+                due_time: None,
+                due_time_zone: None,
+                priority: None,
+            }],
+            &mut host,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("can't plan an add"));
+        assert_eq!(host.journals, Vec::<(String, String)>::new());
+    }
+
+    #[test]
     fn undo_inverts_every_change_and_uses_the_latest_entry() {
         let before = reminder("complete-1", "Finish report");
         let mut written = before.clone();
@@ -873,11 +1049,10 @@ mod tests {
         };
         let mut host = Scripted::new();
         record_edit(&now(), &changes, &result, &mut host).unwrap();
-        let (id, inverse, counts, partial) =
-            undo_changes(None, now().timestamp(), &mut host).unwrap();
-        assert_eq!(id, "20261026T090000-journal");
+        let plan = undo_changes(None, now().timestamp(), &mut host).unwrap();
+        assert_eq!(plan.id, "20261026T090000-journal");
         assert_eq!(
-            counts,
+            plan.counts,
             ChangeCounts {
                 added: 1,
                 updated: 1,
@@ -885,18 +1060,18 @@ mod tests {
                 deleted: 1,
             }
         );
-        assert!(!partial);
+        assert!(!plan.partial);
         assert!(matches!(
-            &inverse[0],
+            &plan.changes[0],
             ReminderChange::Delete { before } if before == &added
         ));
         assert!(matches!(
-            &inverse[1],
+            &plan.changes[1],
             ReminderChange::Update { before, edit }
                 if before == &written && edit.completed == Some(false)
         ));
         assert!(matches!(
-            &inverse[2],
+            &plan.changes[2],
             ReminderChange::Restore { before } if before == &deleted
         ));
     }
@@ -1005,9 +1180,9 @@ mod tests {
             &mut host,
         )
         .unwrap();
-        let (_, changes, _, _) = undo_changes(None, now().timestamp(), &mut host).unwrap();
+        let plan = undo_changes(None, now().timestamp(), &mut host).unwrap();
         assert!(matches!(
-            &changes[..],
+            plan.changes.as_slice(),
             [ReminderChange::Update { before, edit }]
                 if before == &written
                     && edit.due == FieldEdit::Unchanged
@@ -1075,13 +1250,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            undo_changes(None, now().timestamp(), &mut host).unwrap().0,
+            undo_changes(None, now().timestamp(), &mut host).unwrap().id,
             first_id
         );
-        let (_, changes, _, _) =
-            undo_changes(Some(&undo_id), now().timestamp(), &mut host).unwrap();
+        let plan = undo_changes(Some(&undo_id), now().timestamp(), &mut host).unwrap();
         assert!(matches!(
-            &changes[0],
+            &plan.changes[0],
             ReminderChange::Delete { before } if before.id == "second-new"
         ));
     }
@@ -1116,7 +1290,7 @@ mod tests {
         host.journals.swap(0, 1);
 
         assert_eq!(
-            undo_changes(None, now().timestamp(), &mut host).unwrap().0,
+            undo_changes(None, now().timestamp(), &mut host).unwrap().id,
             committed_last
         );
     }

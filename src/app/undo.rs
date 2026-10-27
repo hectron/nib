@@ -31,21 +31,28 @@ pub fn run(
     backends: &Backends,
     host: &mut dyn Host,
 ) -> Result<Outcome> {
-    let _lock = host.lock_journal().into_diagnostic()?;
-    let (id, changes, counts, partial) = journal::undo_changes(entry, now.timestamp(), host)?;
-    host.say(&clean_lines(&describe(&id, &changes, partial)));
-    if !confirmed(host, &changes)? {
-        return Ok(Outcome::Cancelled { id });
+    let lock = host.lock_journal().into_diagnostic()?;
+    let plan = journal::undo_changes(entry, now.timestamp(), host)?;
+    drop(lock);
+    host.say(&clean_lines(&describe(
+        &plan.id,
+        &plan.changes,
+        plan.partial,
+    )));
+    if !confirmed(host, &plan.changes)? {
+        return Ok(Outcome::Cancelled { id: plan.id });
     }
-    let contents = edit::backup_changes(&changes)?.unwrap_or_else(|| "[]".into());
+    let _lock = host.lock_journal().into_diagnostic()?;
+    journal::recheck_undo(&plan, now.timestamp(), host)?;
+    let contents = edit::backup_changes(&plan.changes)?.unwrap_or_else(|| "[]".into());
     let name = format!("{}-undo.json", now.strftime("%Y%m%dT%H%M%S"));
     let saved = host.save_backup(&name, &contents).into_diagnostic()?;
     host.say(&format!(
         "Backed up the reminders being changed to {}",
         saved.display()
     ));
-    let pending_id = journal::begin_undo(now, &id, &changes, host)?;
-    let applied = match backends.reminders.apply(&changes) {
+    let pending_id = journal::begin_undo(now, &plan.id, &plan.changes, host)?;
+    let applied = match backends.reminders.apply(&plan.changes) {
         Ok(applied) => applied,
         Err(error) => {
             if let Err(removal_error) = host.remove_journal(&pending_id) {
@@ -56,14 +63,16 @@ pub fn run(
             return Err(error.into());
         }
     };
-    if let Err(error) = journal::finish_undo(&pending_id, now, &id, &changes, &applied, host) {
+    if let Err(error) =
+        journal::finish_undo(&pending_id, now, &plan.id, &plan.changes, &applied, host)
+    {
         host.say("The undo was applied, but its journal entry is still marked pending.");
         return Err(error);
     }
     Ok(Outcome::Applied {
-        id,
+        id: plan.id,
         undo_id: pending_id,
-        counts,
+        counts: plan.counts,
     })
 }
 
@@ -191,6 +200,7 @@ fn count(n: usize, noun: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -208,6 +218,7 @@ mod tests {
     struct State {
         reminder: Rc<RefCell<StoredReminder>>,
         unrecorded: bool,
+        journal_locks: Rc<Cell<usize>>,
     }
 
     impl Reminders for State {
@@ -224,6 +235,10 @@ mod tests {
         }
 
         fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
+            assert!(
+                self.journal_locks.get() > 0,
+                "apply requires the journal lock"
+            );
             let [ReminderChange::Update { before, edit }] = changes else {
                 unreachable!()
             };
@@ -299,12 +314,14 @@ mod tests {
             state.borrow_mut().title = "Changed elsewhere".into();
         }
         let backend_state = state.clone();
+        let journal_locks = host.journal_lock_state();
         let backends = Backends::new(
             || -> Box<dyn Notes> { unreachable!() },
             move || {
                 Box::new(State {
                     reminder: backend_state,
                     unrecorded,
+                    journal_locks,
                 })
             },
             || -> Box<dyn Calendar> { unreachable!() },
@@ -325,6 +342,43 @@ mod tests {
         assert_eq!(host.journals.len(), 2);
         assert!(host.journals[1].1.contains("\"action\": \"undo\""));
         assert!(host.said.iter().any(|line| line.contains("○ incomplete")));
+        assert_eq!(host.journal_lock_count, 2);
+    }
+
+    #[test]
+    fn undo_releases_the_lock_for_confirmation_and_rechecks_the_entry() {
+        let (backends, state, mut host) = setup(false, false);
+        let id = host.journals[0].0.strip_suffix(".json").unwrap().to_owned();
+        let changed = format!("{}\n", host.journals[0].1);
+        host = host.replace_journal_on_answer(&id, &changed);
+
+        let error = run(None, &now(), &backends, &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("changed while nib waited for confirmation"));
+        assert!(state.borrow().completed);
+        assert_eq!(host.backups, Vec::<(String, String)>::new());
+        assert_eq!(host.journals.len(), 1);
+        assert_eq!(host.journal_lock_count, 2);
+    }
+
+    #[test]
+    fn undo_refuses_an_unrecorded_reminder_before_prompting() {
+        let (backends, state, mut host) = setup(false, false);
+        let mut entry: serde_json::Value = serde_json::from_str(&host.journals[0].1).unwrap();
+        entry["changes"][0]["written"]["unrecorded"] = serde_json::json!(true);
+        host.journals[0].1 = serde_json::to_string_pretty(&entry).unwrap();
+
+        let error = run(None, &now(), &backends, &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("couldn't re-read 1 reminder after saving"));
+        assert!(error.contains("\"Finish report\""));
+        assert!(state.borrow().completed);
+        assert_eq!(host.backups, Vec::<(String, String)>::new());
+        assert_eq!(host.journal_lock_count, 1);
     }
 
     #[test]
@@ -361,6 +415,8 @@ mod tests {
         assert!(!state.borrow().completed);
         assert!(host.journals[1].1.contains("\"status\": \"applied\""));
         assert!(host.journals[1].1.contains("\"unrecorded\": true"));
+        assert!(host.said.iter().any(|line| line
+            == "warning: nib couldn't re-read 1 reminder after saving; undo of this entry is limited"));
     }
 
     #[test]

@@ -2,23 +2,25 @@ use jiff::Zoned;
 use miette::{IntoDiagnostic, Result};
 
 use crate::app::{edit, journal, undo};
+use crate::cli::Action;
 use crate::cli::output::{self, Style};
-use crate::cli::{Action, Cli};
-use crate::domain::{Backends, Config};
+use crate::domain::Backends;
 use crate::infra::host::Host;
 
 pub fn run(
-    cli: Cli,
-    config: &Config,
+    action: Action,
+    json: bool,
     now: &Zoned,
     backends: &Backends,
     style: Style,
     host: &mut dyn Host,
 ) -> Result<String> {
-    let json = cli.json;
-    match cli.command.into_action(now, config).into_diagnostic()? {
+    match action {
         Action::Doctor => Err(miette::miette!(
             "doctor must be run through the system diagnostic entry point"
+        )),
+        Action::Config(_) => Err(miette::miette!(
+            "config must be run through the configuration entry point"
         )),
         Action::Today { date, query } => {
             let reminders = backends.reminders.list()?;
@@ -48,12 +50,15 @@ pub fn run(
         Action::ListEvents(query) => {
             output::list(&backends.calendar.events(query)?, json, now, style)
         }
-        Action::Log => output::journal(
-            &journal::summaries(now.timestamp(), host)?,
-            json,
-            now,
-            style,
-        ),
+        Action::Log => {
+            let _lock = host.lock_journal().into_diagnostic()?;
+            output::journal(
+                &journal::summaries(now.timestamp(), host)?,
+                json,
+                now,
+                style,
+            )
+        }
         Action::Undo {
             entry: _,
             resolve: Some(id),
@@ -91,11 +96,13 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        ApplyResult, AutomationStatus, BackendError, Calendar, ChangeCounts, DoctorProbe,
-        EditorSetting, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes,
-        PermissionStatus, Priority, Reminder, ReminderChange, ReminderSnapshot, Reminders,
+        ApplyResult, AutomationStatus, BackendError, Calendar, ChangeCounts, ConfigEntry,
+        ConfigKey, ConfigOrigin, ConfigValue, DoctorProbe, EditorSetting, Event, EventQuery,
+        NewNote, NewReminder, Note, NoteQuery, Notes, PermissionStatus, Priority, Reminder,
+        ReminderChange, ReminderSnapshot, Reminders,
     };
     use crate::infra::host::Scripted;
+    use crate::{Cli, Config};
 
     struct Fake;
 
@@ -354,9 +361,15 @@ mod tests {
     fn nib(args: &[&str]) -> String {
         let backends = fake_backends(&Built::default());
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        let json = cli.json;
+        let action = cli
+            .command
+            .into_action(&now(), &Config::default())
+            .unwrap()
+            .unwrap();
         run(
-            cli,
-            &Config::default(),
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
@@ -372,9 +385,15 @@ mod tests {
             move || Box::new(AgendaCalendar(events)),
         );
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        let json = cli.json;
+        let action = cli
+            .command
+            .into_action(&now(), &Config::default())
+            .unwrap()
+            .unwrap();
         run(
-            cli,
-            &Config::default(),
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
@@ -408,9 +427,15 @@ mod tests {
         let built = Built::default();
         let backends = fake_backends(&built);
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        let json = cli.json;
+        let action = cli
+            .command
+            .into_action(&now(), &Config::default())
+            .unwrap()
+            .unwrap();
         run(
-            cli,
-            &Config::default(),
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
@@ -445,7 +470,8 @@ mod tests {
             "alarms_present": false,
             "recurrence_present": false,
             "url": null,
-            "partial": false
+            "partial": false,
+            "unrecorded": true
         });
         let journal_change = if change == "deleted" {
             serde_json::json!({ "change": change, "backup": reminder })
@@ -463,6 +489,10 @@ mod tests {
     }
 
     fn journal_output(args: &[&str]) -> String {
+        journal_run(args).0
+    }
+
+    fn journal_run(args: &[&str]) -> (String, Scripted) {
         let backends = fake_backends(&Built::default());
         let older = journal_entry("2026-10-25T14:00:00Z", "task_edit", None, "added");
         let newer = journal_entry(
@@ -475,24 +505,29 @@ mod tests {
             .journal("older-journal", &older)
             .journal("newer-journal", &newer);
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
-        run(
-            cli,
-            &Config::default(),
-            &now(),
-            &backends,
-            Style::default(),
-            &mut host,
-        )
-        .unwrap()
+        let json = cli.json;
+        let action = cli
+            .command
+            .into_action(&now(), &Config::default())
+            .unwrap()
+            .unwrap();
+        let output = run(action, json, &now(), &backends, Style::default(), &mut host).unwrap();
+        (output, host)
     }
 
     #[test]
     fn log_lists_newest_entries_with_counts() {
         assert_snapshot!(journal_output(&["log"]), @r"
-        ENTRY          WRITTEN               ACTION     STATUS   UNDO OF        UNDONE  ADDED  UPDATED  COMPLETED  DELETED
-        newer-journal  2026-10-26T14:00:00Z  undo       applied  older-journal          0      0        0          1
-        older-journal  2026-10-25T14:00:00Z  task_edit  applied                 yes     1      0        0          0
+        ENTRY          WRITTEN               ACTION     STATUS   UNDO OF        UNDONE  ADDED  UPDATED  COMPLETED  DELETED  UNRECORDED
+        newer-journal  2026-10-26T14:00:00Z  undo       applied  older-journal          0      0        0          1        0
+        older-journal  2026-10-25T14:00:00Z  task_edit  applied                 yes     1      0        0          0        1
         ");
+    }
+
+    #[test]
+    fn log_takes_the_journal_lock() {
+        let (_, host) = journal_run(&["log"]);
+        assert_eq!(host.journal_lock_count, 1);
     }
 
     #[test]
@@ -510,7 +545,8 @@ mod tests {
             "added": 0,
             "updated": 0,
             "completed": 0,
-            "deleted": 1
+            "deleted": 1,
+            "unrecorded": 0
           },
           {
             "id": "older-journal",
@@ -523,7 +559,8 @@ mod tests {
             "added": 1,
             "updated": 0,
             "completed": 0,
-            "deleted": 0
+            "deleted": 0,
+            "unrecorded": 1
           }
         ]
         "#);
@@ -569,6 +606,23 @@ mod tests {
           "id": "20261026T090100-journal-efgh",
           "resolved": true,
           "applied": true
+        }
+        "#);
+    }
+
+    #[test]
+    fn cancelled_undo_resolution_json_has_stable_fields() {
+        assert_snapshot!(output::undo_resolution(
+            "20261026T090100-journal-efgh",
+            None,
+            true,
+            Style::default(),
+        )
+        .unwrap(), @r#"
+        {
+          "id": "20261026T090100-journal-efgh",
+          "resolved": false,
+          "applied": false
         }
         "#);
     }
@@ -955,9 +1009,11 @@ mod tests {
             ..Config::default()
         };
         let cli = Cli::try_parse_from(["nib", "t", "Review", "PR"]).unwrap();
+        let json = cli.json;
+        let action = cli.command.into_action(&now(), &config).unwrap().unwrap();
         run(
-            cli,
-            &config,
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
@@ -1003,9 +1059,11 @@ mod tests {
             ..Config::default()
         };
         let cli = Cli::try_parse_from(["nib", "cal"]).unwrap();
+        let json = cli.json;
+        let action = cli.command.into_action(&now(), &config).unwrap().unwrap();
         run(
-            cli,
-            &config,
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
@@ -1014,6 +1072,196 @@ mod tests {
         .unwrap();
 
         assert_eq!(recorded.take().unwrap().calendars, ["Work", "Birthdays"]);
+    }
+
+    fn config_entries() -> Vec<ConfigEntry> {
+        vec![
+            ConfigEntry {
+                key: ConfigKey::TaskList,
+                value: ConfigValue::String("Work".into()),
+                origin: ConfigOrigin::File("/Users/me/project/nib.toml".into()),
+            },
+            ConfigEntry {
+                key: ConfigKey::TaskPriority,
+                value: ConfigValue::Unset,
+                origin: ConfigOrigin::Default,
+            },
+            ConfigEntry {
+                key: ConfigKey::TaskParseInline,
+                value: ConfigValue::Bool(true),
+                origin: ConfigOrigin::Environment("NIB_TASK_PARSE_INLINE"),
+            },
+            ConfigEntry {
+                key: ConfigKey::CalCalendars,
+                value: ConfigValue::Strings(vec!["Work".into(), "Personal".into()]),
+                origin: ConfigOrigin::Default,
+            },
+            ConfigEntry {
+                key: ConfigKey::NoteFolder,
+                value: ConfigValue::String("Notes".into()),
+                origin: ConfigOrigin::File("/Users/me/.config/nib/config.toml".into()),
+            },
+        ]
+    }
+
+    #[test]
+    fn config_list_text_outputs_are_stable() {
+        let entries = config_entries();
+        assert_snapshot!(output::config_list(&entries, false, false, Style::default()).unwrap(), @r#"
+        KEY                VALUE
+        task.list          Work
+        task.priority      <unset>
+        task.parse_inline  true
+        cal.calendars      ["Work", "Personal"]
+        note.folder        Notes
+        "#);
+        assert_snapshot!(output::config_list(&entries, true, false, Style::default()).unwrap(), @r#"
+        KEY                VALUE                 ORIGIN
+        task.list          Work                  /Users/me/project/nib.toml
+        task.priority      <unset>               default
+        task.parse_inline  true                  NIB_TASK_PARSE_INLINE
+        cal.calendars      ["Work", "Personal"]  default
+        note.folder        Notes                 /Users/me/.config/nib/config.toml
+        "#);
+    }
+
+    #[test]
+    fn config_list_json_outputs_are_stable() {
+        let entries = config_entries();
+        assert_snapshot!(output::config_list(&entries, true, true, Style::default()).unwrap(), @r#"
+        [
+          {
+            "id": "task.list",
+            "value": "Work",
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/project/nib.toml"
+            }
+          },
+          {
+            "id": "task.priority",
+            "value": null,
+            "origin": {
+              "kind": "default"
+            }
+          },
+          {
+            "id": "task.parse_inline",
+            "value": true,
+            "origin": {
+              "kind": "env",
+              "variable": "NIB_TASK_PARSE_INLINE"
+            }
+          },
+          {
+            "id": "cal.calendars",
+            "value": [
+              "Work",
+              "Personal"
+            ],
+            "origin": {
+              "kind": "default"
+            }
+          },
+          {
+            "id": "note.folder",
+            "value": "Notes",
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/.config/nib/config.toml"
+            }
+          }
+        ]
+        "#);
+        assert_snapshot!(output::config_list(&entries, false, true, Style::default()).unwrap(), @r#"
+        [
+          {
+            "id": "task.list",
+            "value": "Work",
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/project/nib.toml"
+            }
+          },
+          {
+            "id": "task.priority",
+            "value": null,
+            "origin": {
+              "kind": "default"
+            }
+          },
+          {
+            "id": "task.parse_inline",
+            "value": true,
+            "origin": {
+              "kind": "env",
+              "variable": "NIB_TASK_PARSE_INLINE"
+            }
+          },
+          {
+            "id": "cal.calendars",
+            "value": [
+              "Work",
+              "Personal"
+            ],
+            "origin": {
+              "kind": "default"
+            }
+          },
+          {
+            "id": "note.folder",
+            "value": "Notes",
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/.config/nib/config.toml"
+            }
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn config_single_and_write_outputs_are_stable() {
+        let entry = &config_entries()[0];
+        let path = std::path::Path::new("/Users/me/.config/nib/config.toml");
+        assert_snapshot!(output::config_get(entry, false, Style::default()).unwrap(), @"Work");
+        assert_snapshot!(output::config_get(entry, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "task.list",
+          "value": "Work"
+        }
+        "#);
+        assert_snapshot!(output::config_set("task.list", &entry.value, path, false, Style::default()).unwrap(), @"Set task.list in /Users/me/.config/nib/config.toml");
+        assert_snapshot!(output::config_set("task.list", &entry.value, path, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "task.list",
+          "value": "Work",
+          "path": "/Users/me/.config/nib/config.toml"
+        }
+        "#);
+        assert_snapshot!(output::config_unset("task.list", path, true, false, Style::default()).unwrap(), @"Unset task.list in /Users/me/.config/nib/config.toml");
+        assert_snapshot!(output::config_unset("task.list", path, true, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "task.list",
+          "path": "/Users/me/.config/nib/config.toml",
+          "changed": true
+        }
+        "#);
+        assert_snapshot!(output::config_unset("task.list", path, false, false, Style::default()).unwrap(), @"task.list isn't set in /Users/me/.config/nib/config.toml; nothing changed");
+        assert_snapshot!(output::config_unset("task.list", path, false, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "task.list",
+          "path": "/Users/me/.config/nib/config.toml",
+          "changed": false
+        }
+        "#);
+        assert_snapshot!(output::config_path(path, false, Style::default()).unwrap(), @"/Users/me/.config/nib/config.toml");
+        assert_snapshot!(output::config_path(path, true, Style::default()).unwrap(), @r#"
+        {
+          "id": "user",
+          "path": "/Users/me/.config/nib/config.toml"
+        }
+        "#);
     }
 
     #[test]

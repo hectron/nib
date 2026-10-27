@@ -1,3 +1,4 @@
+pub(crate) mod completions;
 pub(crate) mod config;
 pub(crate) mod demo;
 pub(crate) mod doctor;
@@ -14,37 +15,43 @@ use crate::domain::{
 };
 use crate::domain::{Backends, Calendar, Notes, Reminders};
 
-pub(crate) fn system_backends() -> Backends {
-    Backends::new(system_notes, system_reminders, system_calendar)
+pub(crate) fn system_backends(cache: completions::CacheFile) -> Backends {
+    let notes_cache = cache.clone();
+    let reminders_cache = cache.clone();
+    Backends::new(
+        move || system_notes(notes_cache),
+        move || system_reminders(reminders_cache),
+        move || system_calendar(cache),
+    )
 }
 
 #[cfg(target_os = "macos")]
-fn system_notes() -> Box<dyn Notes> {
-    Box::new(notes::AppleNotes::new())
+fn system_notes(cache: completions::CacheFile) -> Box<dyn Notes> {
+    Box::new(notes::AppleNotes::new(cache))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn system_notes() -> Box<dyn Notes> {
+fn system_notes(_: completions::CacheFile) -> Box<dyn Notes> {
     Box::new(Unimplemented("Apple Notes"))
 }
 
 #[cfg(target_os = "macos")]
-fn system_calendar() -> Box<dyn Calendar> {
-    Box::new(eventkit::EventKitCalendar)
+fn system_calendar(cache: completions::CacheFile) -> Box<dyn Calendar> {
+    Box::new(eventkit::EventKitCalendar::new(cache))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn system_calendar() -> Box<dyn Calendar> {
+fn system_calendar(_: completions::CacheFile) -> Box<dyn Calendar> {
     Box::new(Unimplemented("Calendar"))
 }
 
 #[cfg(target_os = "macos")]
-fn system_reminders() -> Box<dyn Reminders> {
-    Box::new(eventkit::EventKitReminders)
+fn system_reminders(cache: completions::CacheFile) -> Box<dyn Reminders> {
+    Box::new(eventkit::EventKitReminders::new(cache))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn system_reminders() -> Box<dyn Reminders> {
+fn system_reminders(_: completions::CacheFile) -> Box<dyn Reminders> {
     Box::new(Unimplemented("Reminders"))
 }
 
