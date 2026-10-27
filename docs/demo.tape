@@ -11,7 +11,6 @@ Set Height 700
 Set TypingSpeed 35ms
 
 Env NIB_DEMO "1"
-Env NO_COLOR "1"
 
 Sleep 1s
 Type `nib t Plan launch tomorrow !high`
