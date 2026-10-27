@@ -5,6 +5,7 @@ use jiff::civil::Date;
 use jiff::{ToSpan, Zoned};
 
 use crate::backend::{EventQuery, NewNote, NewReminder, NoteQuery, Priority};
+use crate::config::Config;
 
 /// Fast CLI for Apple Notes, Reminders, and Calendar
 #[derive(Debug, Parser)]
@@ -114,6 +115,9 @@ pub struct TaskCapture {
 
 #[derive(Debug, Args)]
 struct TaskOpts {
+    /// Reminder list to add to
+    #[arg(short, long, value_name = "NAME", requires = "words")]
+    list: Option<String>,
     /// Due date: today, tomorrow, or YYYY-MM-DD
     #[arg(short, long, value_name = "DATE", value_parser = due, requires = "words")]
     due: Option<Due>,
@@ -128,6 +132,9 @@ pub struct CalArgs {
     /// Show the next seven days instead of today
     #[arg(short, long, global = true)]
     week: bool,
+    /// Only show events from this calendar
+    #[arg(long, value_name = "NAME", global = true)]
+    calendar: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -195,17 +202,18 @@ fn days_from_today(now: &Zoned, count: i32) -> Result<Range<Zoned>, jiff::Error>
 }
 
 impl TaskOpts {
-    fn add(self, title: String, now: &Zoned) -> Result<Action, jiff::Error> {
+    fn add(self, title: String, now: &Zoned, config: &Config) -> Result<Action, jiff::Error> {
         Ok(Action::AddTask(NewReminder {
             title,
+            list: self.list.or_else(|| config.task.list.clone()),
             due: self.due.map(|due| due.on(now.date())).transpose()?,
-            priority: self.priority,
+            priority: self.priority.or(config.task.priority),
         }))
     }
 }
 
 impl Command {
-    pub fn into_action(self, now: &Zoned) -> Result<Action, jiff::Error> {
+    pub fn into_action(self, now: &Zoned, config: &Config) -> Result<Action, jiff::Error> {
         Ok(match self {
             Command::Note(NoteArgs {
                 action,
@@ -213,7 +221,7 @@ impl Command {
             }) => match action {
                 Some(NoteAction::New(Title { words })) => Action::NewNote(NewNote {
                     title: words.join(" "),
-                    folder,
+                    folder: folder.or_else(|| config.note.folder.clone()),
                 }),
                 Some(NoteAction::List) | None => Action::ListNotes(NoteQuery { folder }),
             },
@@ -226,7 +234,7 @@ impl Command {
                 } else {
                     Action::NewNote(NewNote {
                         title: words.join(" "),
-                        folder,
+                        folder: folder.or_else(|| config.note.folder.clone()),
                     })
                 }
             }
@@ -234,20 +242,31 @@ impl Command {
                 Some(TaskAction::Add {
                     title: Title { words },
                     opts,
-                }) => opts.add(words.join(" "), now)?,
+                }) => opts.add(words.join(" "), now, config)?,
                 Some(TaskAction::List) | None => Action::ListTasks,
-                Some(TaskAction::Edit { list }) => Action::EditTasks { list },
+                Some(TaskAction::Edit { list }) => Action::EditTasks {
+                    list: list.or_else(|| config.task.list.clone()),
+                },
             },
             Command::T(TaskCapture { words, opts }) => {
                 if words.is_empty() {
                     Action::ListTasks
                 } else {
-                    opts.add(words.join(" "), now)?
+                    opts.add(words.join(" "), now, config)?
                 }
             }
-            Command::Cal(CalArgs { action, week }) => match action {
+            Command::Cal(CalArgs {
+                action,
+                week,
+                calendar,
+            }) => match action {
                 Some(CalAction::List) | None => Action::ListEvents(EventQuery {
                     range: days_from_today(now, if week { 7 } else { 1 })?,
+                    calendars: if calendar.is_empty() {
+                        config.cal.calendars.clone()
+                    } else {
+                        calendar
+                    },
                 }),
             },
         })
@@ -272,7 +291,7 @@ mod tests {
 
     fn parse_at(now: &Zoned, args: &[&str]) -> Result<Action, clap::Error> {
         Cli::try_parse_from(["nib"].iter().chain(args))
-            .map(|cli| cli.command.into_action(now).unwrap())
+            .map(|cli| cli.command.into_action(now, &Config::default()).unwrap())
     }
 
     fn parse(args: &[&str]) -> Result<Action, clap::Error> {
@@ -301,6 +320,7 @@ mod tests {
     fn task(title: &str, due: Option<Date>, priority: Option<Priority>) -> Action {
         Action::AddTask(NewReminder {
             title: title.into(),
+            list: None,
             due,
             priority,
         })
@@ -309,6 +329,7 @@ mod tests {
     fn events(from: Date, until: Date) -> Action {
         Action::ListEvents(EventQuery {
             range: at(from, 0, 0)..at(until, 0, 0),
+            calendars: Vec::new(),
         })
     }
 
@@ -391,7 +412,7 @@ mod tests {
             .map(|(args, now)| {
                 let now = now.to_zoned(new_york.clone()).unwrap();
                 let args: Vec<&str> = args.split(' ').collect();
-                let Action::ListEvents(EventQuery { range }) = parse_at(&now, &args).unwrap()
+                let Action::ListEvents(EventQuery { range, .. }) = parse_at(&now, &args).unwrap()
                 else {
                     panic!("nib {args:?} should list events");
                 };
@@ -474,5 +495,51 @@ mod tests {
         for (args, kind) in cases {
             assert_eq!(parse(args).unwrap_err().kind(), *kind, "{args:?}");
         }
+    }
+
+    #[test]
+    fn configuration_defaults_apply_only_where_intended() {
+        let config = Config {
+            task: crate::config::Task {
+                list: Some("Snowglobe".into()),
+                priority: Some(Priority::Medium),
+            },
+            cal: crate::config::Cal {
+                calendars: vec!["Work".into()],
+            },
+            note: crate::config::Note {
+                folder: Some("Inbox".into()),
+            },
+        };
+        let now = at(date(2026, 10, 26), 9, 30);
+        let action = |args: &[&str]| {
+            Cli::try_parse_from(["nib"].iter().chain(args))
+                .unwrap()
+                .command
+                .into_action(&now, &config)
+                .unwrap()
+        };
+
+        assert_eq!(
+            action(&["t", "Review", "PR"]),
+            Action::AddTask(NewReminder {
+                title: "Review PR".into(),
+                list: Some("Snowglobe".into()),
+                due: None,
+                priority: Some(Priority::Medium),
+            })
+        );
+        assert_eq!(
+            action(&["task", "edit"]),
+            Action::EditTasks {
+                list: Some("Snowglobe".into())
+            }
+        );
+        assert_eq!(action(&["n", "Idea"]), note("Idea", Some("Inbox")));
+        assert_eq!(action(&["n"]), notes(None));
+        assert!(matches!(
+            action(&["cal"]),
+            Action::ListEvents(EventQuery { calendars, .. }) if calendars == ["Work"]
+        ));
     }
 }

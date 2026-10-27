@@ -1,0 +1,17 @@
+---
+source: tests/cli.rs
+expression: "String::from_utf8(out.stdout).unwrap()"
+---
+Add a reminder from the rest of the line, or list reminders
+
+Usage: nib t [OPTIONS] [TITLE]...
+
+Arguments:
+  [TITLE]...  Title of the new reminder; lists reminders when omitted
+
+Options:
+      --json                 Print JSON instead of text
+  -l, --list <NAME>          Reminder list to add to
+  -d, --due <DATE>           Due date: today, tomorrow, or YYYY-MM-DD
+  -p, --priority <PRIORITY>  [possible values: low, medium, high]
+  -h, --help                 Print help

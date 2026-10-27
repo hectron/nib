@@ -32,7 +32,8 @@ pub struct Event {
     pub all_day: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Priority {
     Low,
     Medium,
@@ -63,6 +64,7 @@ pub struct NoteQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewReminder {
     pub title: String,
+    pub list: Option<String>,
     pub due: Option<Date>,
     pub priority: Option<Priority>,
 }
@@ -70,6 +72,7 @@ pub struct NewReminder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventQuery {
     pub range: Range<Zoned>,
+    pub calendars: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +149,13 @@ pub enum BackendError {
         help("check the spelling and try again")
     )]
     NotFound { kind: &'static str, name: String },
+
+    #[error("more than one {kind} is named \"{name}\"")]
+    #[diagnostic(
+        code(nib::backend::ambiguous),
+        help("rename one of them, or choose a unique name")
+    )]
+    Ambiguous { kind: &'static str, name: String },
 
     #[error("{app} integration is not implemented yet")]
     #[diagnostic(
@@ -305,6 +315,10 @@ mod tests {
                 kind: "folder",
                 name: "Archive".into(),
             },
+            BackendError::Ambiguous {
+                kind: "writable reminder list",
+                name: "Work".into(),
+            },
             BackendError::NotImplemented { app: "Calendar" },
             BackendError::Failed {
                 app: "Reminders",
@@ -326,6 +340,8 @@ mod tests {
           help: turn on WezTerm under System Settings > Privacy & Security > Reminders, then run the command again; the VS Code terminal, ssh sessions, and cron jobs can't show the permission prompt
         nib::backend::not_found: folder "Archive" not found
           help: check the spelling and try again
+        nib::backend::ambiguous: more than one writable reminder list is named "Work"
+          help: rename one of them, or choose a unique name
         nib::backend::not_implemented: Calendar integration is not implemented yet
           help: only the command-line interface exists so far
         nib::backend::failed: Reminders request failed: timed out

@@ -1,11 +1,22 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 
-fn nib(args: &[&str]) -> std::process::Output {
-    cargo_bin_cmd!("nib")
-        .args(args)
+fn command() -> assert_cmd::Command {
+    let mut command = cargo_bin_cmd!("nib");
+    command
         .env("NO_COLOR", "1")
-        .output()
-        .unwrap()
+        .env(
+            "XDG_CONFIG_HOME",
+            std::env::temp_dir().join(format!("nib-cli-test-{}", std::process::id())),
+        )
+        .env_remove("NIB_TASK_LIST")
+        .env_remove("NIB_TASK_PRIORITY")
+        .env_remove("NIB_CAL_CALENDARS")
+        .env_remove("NIB_NOTE_FOLDER");
+    command
+}
+
+fn nib(args: &[&str]) -> std::process::Output {
+    command().args(args).output().unwrap()
 }
 
 #[test]
@@ -18,6 +29,27 @@ fn help() {
 #[test]
 fn task_help() {
     let out = nib(&["task", "--help"]);
+    assert!(out.status.success());
+    insta::assert_snapshot!(String::from_utf8(out.stdout).unwrap());
+}
+
+#[test]
+fn task_capture_help() {
+    let out = nib(&["t", "--help"]);
+    assert!(out.status.success());
+    insta::assert_snapshot!(String::from_utf8(out.stdout).unwrap());
+}
+
+#[test]
+fn task_add_help() {
+    let out = nib(&["task", "add", "--help"]);
+    assert!(out.status.success());
+    insta::assert_snapshot!(String::from_utf8(out.stdout).unwrap());
+}
+
+#[test]
+fn calendar_help() {
+    let out = nib(&["cal", "--help"]);
     assert!(out.status.success());
     insta::assert_snapshot!(String::from_utf8(out.stdout).unwrap());
 }
@@ -36,12 +68,7 @@ fn stub_backend_fails_cleanly() {
 
 #[test]
 fn demo_backend_shows_sample_data() {
-    let out = cargo_bin_cmd!("nib")
-        .arg("t")
-        .env("NO_COLOR", "1")
-        .env("NIB_DEMO", "1")
-        .output()
-        .unwrap();
+    let out = command().arg("t").env("NIB_DEMO", "1").output().unwrap();
     assert!(
         out.status.success(),
         "{}",

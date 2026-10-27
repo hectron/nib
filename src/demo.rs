@@ -73,6 +73,12 @@ impl Notes for Demo {
 
 impl Reminders for Demo {
     fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError> {
+        if let Some(name) = reminder.list.as_deref().filter(|name| *name != "Reminders") {
+            return Err(BackendError::NotFound {
+                kind: "writable reminder list",
+                name: name.into(),
+            });
+        }
         Ok(Reminder {
             id: "reminder-5".into(),
             title: reminder.title,
@@ -150,18 +156,53 @@ impl Reminders for Demo {
 impl Calendar for Demo {
     fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
         let events = [
-            ("event-1", "Book club", self.at(-1, 18, 0)?, false),
-            ("event-2", "Standup", self.at(0, 9, 30)?, false),
-            ("event-3", "Design review", self.at(0, 14, 0)?, false),
-            ("event-4", "Lunch with Sam", self.at(2, 12, 0)?, false),
-            ("event-5", "Team offsite", self.at(3, 0, 0)?, true),
-            ("event-6", "Sprint planning", self.at(5, 10, 0)?, false),
-            ("event-7", "Retro", self.at(9, 16, 0)?, false),
+            (
+                "event-1",
+                "Book club",
+                self.at(-1, 18, 0)?,
+                false,
+                "Personal",
+            ),
+            ("event-2", "Standup", self.at(0, 9, 30)?, false, "Work"),
+            (
+                "event-3",
+                "Design review",
+                self.at(0, 14, 0)?,
+                false,
+                "Work",
+            ),
+            (
+                "event-4",
+                "Lunch with Sam",
+                self.at(2, 12, 0)?,
+                false,
+                "Personal",
+            ),
+            ("event-5", "Team offsite", self.at(3, 0, 0)?, true, "Work"),
+            (
+                "event-6",
+                "Sprint planning",
+                self.at(5, 10, 0)?,
+                false,
+                "Work",
+            ),
+            ("event-7", "Retro", self.at(9, 16, 0)?, false, "Work"),
         ];
+        for name in &query.calendars {
+            if !events.iter().any(|event| event.4 == name) {
+                return Err(BackendError::NotFound {
+                    kind: "calendar",
+                    name: name.clone(),
+                });
+            }
+        }
         Ok(events
             .into_iter()
-            .filter(|(_, _, start, _)| query.range.contains(start))
-            .map(|(id, title, start, all_day)| Event {
+            .filter(|(_, _, start, _, calendar)| {
+                query.range.contains(start)
+                    && (query.calendars.is_empty() || query.calendars.iter().any(|c| c == calendar))
+            })
+            .map(|(id, title, start, all_day, _)| Event {
                 id: id.into(),
                 title: title.into(),
                 start,
@@ -192,6 +233,7 @@ mod tests {
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
         run(
             cli,
+            &crate::config::Config::default(),
             &now,
             &backends(&now),
             Style::default(),

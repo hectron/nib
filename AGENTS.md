@@ -37,9 +37,10 @@ nib t "Buy groceries"
 
 ## Code layout
 
-- `src/main.rs` — reads the clock and the local time zone once, then hands `now` to `commands::run`. Uses the demo backends when `NIB_DEMO` is set.
+- `src/main.rs` — reads the environment, current directory, layered configuration, clock, and local time zone once, then hands the resolved values to `commands::run`. Uses the demo backends when `NIB_DEMO` is set.
 - `src/demo.rs` — sample notes, reminders, and events for `NIB_DEMO=1`, with dates relative to `now`. Nothing is saved.
-- `src/cli.rs` — `clap` definitions. Every command line resolves to one `Action`. `n` and `t` take the rest of the line as the title; `note`, `task`, and `cal` take only subcommands. `into_action` takes `now` and turns relative input such as `--due today` and `cal --week` into a concrete date or `Range<Zoned>`, so backends never read the clock.
+- `src/config.rs` — discovers and merges the user, parent-directory, local, and environment configuration. Loading takes the starting directory, user configuration path, and environment lookup so tests never depend on the process environment.
+- `src/cli.rs` — `clap` definitions. Every command line resolves to one `Action`. `n` and `t` take the rest of the line as the title; `note`, `task`, and `cal` take only subcommands. `into_action` takes `now` and the resolved configuration, applies command-line overrides, and turns relative input such as `--due today` and `cal --week` into explicit backend values.
 - `src/commands.rs` — dispatches on `Action` and returns the text to print, so tests run commands against fake backends.
 - `src/markdown.rs` — renders reminder snapshots as Markdown, parses edited files, and plans validated reminder changes without touching Apple data.
 - `src/edit.rs` — runs the `task edit` flow: snapshot, editor, validation, preview, confirmation, backup, and apply.
@@ -54,6 +55,7 @@ nib t "Buy groceries"
 - Keep startup overhead under 50 ms. Initialize Apple frameworks lazily, on first use, never in `Backends::system()`.
 - Avoid `jiff::Zoned::now()`, `TimeZone::system()`, and `TimeZone::get()` on the startup path. jiff scans the whole zoneinfo directory on the first lookup by name, which costs 3–8 ms.
 - Only `main` reads the clock. Code that needs the time takes `now` as a parameter, and tests pass a fixed time in a fixed-offset zone, or a POSIX TZ rule when they need daylight saving changes.
+- Only `main` reads the real environment and current directory for configuration. Configuration loading takes those inputs explicitly and applies defaults while building an `Action`, so backends never discover configuration.
 - Every command that prints data must support `--json`.
 - Treat `--json` output as an interface that scripts depend on. Define its fields only in the JSON output types in `src/output.rs`, never by deriving `Serialize` on a domain type. Every object starts with the item's `id`. Adding a field is fine; renaming or removing one breaks scripts, so do it only on purpose and say so in the commit. Every JSON shape has a snapshot in `src/commands.rs`.
 - Don't give one command both a positional argument and subcommands. `clap` can't tell a title from a subcommand name, which is why `n` and `t` are separate commands.

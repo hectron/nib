@@ -3,19 +3,21 @@ use miette::{IntoDiagnostic, Result};
 
 use crate::backend::Backends;
 use crate::cli::{Action, Cli};
+use crate::config::Config;
 use crate::edit;
 use crate::host::Host;
 use crate::output::{self, Style};
 
 pub fn run(
     cli: Cli,
+    config: &Config,
     now: &Zoned,
     backends: &Backends,
     style: Style,
     host: &mut dyn Host,
 ) -> Result<String> {
     let json = cli.json;
-    match cli.command.into_action(now).into_diagnostic()? {
+    match cli.command.into_action(now, config).into_diagnostic()? {
         Action::NewNote(note) => {
             output::single(&backends.notes.create(note)?, "Created note", json)
         }
@@ -77,6 +79,16 @@ mod tests {
 
     impl Reminders for Fake {
         fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError> {
+            if let Some(name) = reminder
+                .list
+                .as_deref()
+                .filter(|name| !matches!(*name, "Reminders" | "Work"))
+            {
+                return Err(BackendError::NotFound {
+                    kind: "writable reminder list",
+                    name: name.into(),
+                });
+            }
             Ok(Reminder {
                 id: "reminder-3".into(),
                 title: reminder.title,
@@ -114,21 +126,58 @@ mod tests {
     impl Calendar for Fake {
         fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
             let events = [
-                ("event-1", "Book club", at(date(2026, 10, 25), 19, 0), false),
-                ("event-2", "Team sync", at(date(2026, 10, 26), 10, 0), false),
-                ("event-5", "Offsite", at(date(2026, 10, 28), 0, 0), true),
+                (
+                    "event-1",
+                    "Book club",
+                    at(date(2026, 10, 25), 19, 0),
+                    false,
+                    "Personal",
+                ),
+                (
+                    "event-2",
+                    "Team sync",
+                    at(date(2026, 10, 26), 10, 0),
+                    false,
+                    "Work",
+                ),
+                (
+                    "event-5",
+                    "Offsite",
+                    at(date(2026, 10, 28), 0, 0),
+                    true,
+                    "Work",
+                ),
                 (
                     "event-3",
                     "Design review",
                     at(date(2026, 10, 29), 14, 30),
                     false,
+                    "Work",
                 ),
-                ("event-4", "Retro", at(date(2026, 11, 2), 9, 0), false),
+                (
+                    "event-4",
+                    "Retro",
+                    at(date(2026, 11, 2), 9, 0),
+                    false,
+                    "Work",
+                ),
             ];
+            for name in &query.calendars {
+                if !events.iter().any(|event| event.4 == name) {
+                    return Err(BackendError::NotFound {
+                        kind: "calendar",
+                        name: name.clone(),
+                    });
+                }
+            }
             Ok(events
                 .into_iter()
-                .filter(|(_, _, start, _)| query.range.contains(start))
-                .map(|(id, title, start, all_day)| Event {
+                .filter(|(_, _, start, _, calendar)| {
+                    query.range.contains(start)
+                        && (query.calendars.is_empty()
+                            || query.calendars.iter().any(|name| name == calendar))
+                })
+                .map(|(id, title, start, all_day, _)| Event {
                     id: id.into(),
                     title: title.into(),
                     start,
@@ -173,6 +222,7 @@ mod tests {
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
         run(
             cli,
+            &Config::default(),
             &now(),
             &backends,
             Style::default(),
@@ -187,6 +237,7 @@ mod tests {
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
         run(
             cli,
+            &Config::default(),
             &now(),
             &backends,
             Style::default(),
@@ -374,5 +425,107 @@ mod tests {
         assert_snapshot!(nib(&["n", "list"]), @r#"Created note "list""#);
         assert_snapshot!(nib(&["note", "new", "list"]), @r#"Created note "list""#);
         assert_snapshot!(nib(&["t", "ls", "-p", "low"]), @r#"Added "ls" (low priority)"#);
+    }
+
+    #[test]
+    fn task_configuration_reaches_the_backend() {
+        struct Recorder(Rc<RefCell<Option<NewReminder>>>);
+
+        impl Reminders for Recorder {
+            fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError> {
+                self.0.replace(Some(reminder.clone()));
+                Ok(Reminder {
+                    id: "recorded".into(),
+                    title: reminder.title,
+                    due: reminder.due,
+                    priority: reminder.priority,
+                })
+            }
+
+            fn list(&self) -> Result<Vec<Reminder>, BackendError> {
+                unreachable!()
+            }
+
+            fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+                unreachable!()
+            }
+
+            fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
+                unreachable!()
+            }
+        }
+
+        let recorded = Rc::new(RefCell::new(None));
+        let backend_recorded = recorded.clone();
+        let backends = Backends::new(
+            || -> Box<dyn Notes> { unreachable!() },
+            move || Box::new(Recorder(backend_recorded)),
+            || -> Box<dyn Calendar> { unreachable!() },
+        );
+        let config = Config {
+            task: crate::config::Task {
+                list: Some("Snowglobe".into()),
+                priority: Some(Priority::Medium),
+            },
+            ..Config::default()
+        };
+        let cli = Cli::try_parse_from(["nib", "t", "Review", "PR"]).unwrap();
+        run(
+            cli,
+            &config,
+            &now(),
+            &backends,
+            Style::default(),
+            &mut Scripted::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            recorded.take(),
+            Some(NewReminder {
+                title: "Review PR".into(),
+                list: Some("Snowglobe".into()),
+                due: None,
+                priority: Some(Priority::Medium),
+            })
+        );
+    }
+
+    #[test]
+    fn calendar_configuration_reaches_the_backend() {
+        struct Recorder(Rc<RefCell<Option<EventQuery>>>);
+
+        impl Calendar for Recorder {
+            fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
+                self.0.replace(Some(query));
+                Ok(Vec::new())
+            }
+        }
+
+        let recorded = Rc::new(RefCell::new(None));
+        let backend_recorded = recorded.clone();
+        let backends = Backends::new(
+            || -> Box<dyn Notes> { unreachable!() },
+            || -> Box<dyn Reminders> { unreachable!() },
+            move || Box::new(Recorder(backend_recorded)),
+        );
+        let config = Config {
+            cal: crate::config::Cal {
+                calendars: vec!["Work".into(), "Birthdays".into()],
+            },
+            ..Config::default()
+        };
+        let cli = Cli::try_parse_from(["nib", "cal"]).unwrap();
+        run(
+            cli,
+            &config,
+            &now(),
+            &backends,
+            Style::default(),
+            &mut Scripted::new(),
+        )
+        .unwrap();
+
+        assert_eq!(recorded.take().unwrap().calendars, ["Work", "Birthdays"]);
     }
 }

@@ -59,6 +59,26 @@ Subtasks, tags, flags, sections, and due times are not shown.
 
 Every command accepts `--json` for piping into other tools. Each JSON object starts with an `id` that identifies the note, reminder, or event, and dates use ISO 8601: `"2026-10-27"` for due dates and `"2026-10-26T10:00:00-04:00"` for event starts. Events also have `all_day`. Every occurrence of a recurring event shares Apple's identifier, so an event's `id` adds the occurrence's start in UTC, such as `"ABC123@2026-10-27T14:00:00Z"`.
 
+## Configuration
+
+Settings come from command-line flags, environment variables, directory configuration, the user configuration, and built-in defaults, in that order. Directory configuration uses `.nib.local.toml`, then `nib.toml` or `.nib.toml`, in the current directory and each parent; nearer directories override farther ones, field by field. The user configuration is `$XDG_CONFIG_HOME/nib/config.toml`, or `~/.config/nib/config.toml` when `XDG_CONFIG_HOME` is unset.
+
+| Key | Environment variable | Command-line flag |
+| --- | --- | --- |
+| `task.list` | `NIB_TASK_LIST` | `-l, --list NAME` on `nib t` and `nib task add`; also defaults `nib task edit --list` |
+| `task.priority` | `NIB_TASK_PRIORITY` | `-p, --priority` on `nib t` and `nib task add` |
+| `cal.calendars` | `NIB_CAL_CALENDARS`, comma-separated | repeatable `--calendar NAME` on `nib cal` |
+| `note.folder` | `NIB_NOTE_FOLDER` | `-f, --folder` on `nib n` and `nib note` |
+
+```toml
+[task]
+list = "Snowglobe"
+priority = "medium"
+
+[cal]
+calendars = ["Work"]
+```
+
 ## Development
 
 ```bash

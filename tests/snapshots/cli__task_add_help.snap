@@ -1,0 +1,17 @@
+---
+source: tests/cli.rs
+expression: "String::from_utf8(out.stdout).unwrap()"
+---
+Add a reminder
+
+Usage: nib task add [OPTIONS] <TITLE>...
+
+Arguments:
+  <TITLE>...  Title; the words are joined with spaces
+
+Options:
+      --json                 Print JSON instead of text
+  -l, --list <NAME>          Reminder list to add to
+  -d, --due <DATE>           Due date: today, tomorrow, or YYYY-MM-DD
+  -p, --priority <PRIORITY>  [possible values: low, medium, high]
+  -h, --help                 Print help

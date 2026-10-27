@@ -35,9 +35,14 @@ impl Calendar for EventKitCalendar {
             let zone = query.range.start.time_zone().clone();
             let start = NSDate::dateWithTimeIntervalSince1970(epoch_seconds(&query.range.start));
             let end = NSDate::dateWithTimeIntervalSince1970(epoch_seconds(&query.range.end));
+            let calendars = event_calendars(&store, &query.calendars)?;
+            let chosen = (!calendars.is_empty()).then(|| NSArray::from_retained_slice(&calendars));
             let found = unsafe {
-                let predicate =
-                    store.predicateForEventsWithStartDate_endDate_calendars(&start, &end, None);
+                let predicate = store.predicateForEventsWithStartDate_endDate_calendars(
+                    &start,
+                    &end,
+                    chosen.as_deref(),
+                );
                 store.eventsMatchingPredicate(&predicate)
             };
             let mut events: Vec<Event> = found.iter().filter_map(|e| to_event(&e, &zone)).collect();
@@ -53,8 +58,12 @@ impl Reminders for EventKitReminders {
     fn add(&self, new: NewReminder) -> Result<Reminder, BackendError> {
         autoreleasepool(|_| {
             let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
-            let list = unsafe { store.defaultCalendarForNewReminders() }
-                .ok_or_else(|| failed(REMINDERS, "there is no default list for new reminders"))?;
+            let list = match new.list.as_deref() {
+                Some(name) => writable_reminder_calendar_named(&store, name)?,
+                None => unsafe { store.defaultCalendarForNewReminders() }.ok_or_else(|| {
+                    failed(REMINDERS, "there is no default list for new reminders")
+                })?,
+            };
             unsafe {
                 let reminder = EKReminder::reminderWithEventStore(&store);
                 reminder.setTitle(Some(&NSString::from_str(&new.title)));
@@ -167,6 +176,60 @@ impl Reminders for EventKitReminders {
                 )
             })
         })
+    }
+}
+
+fn event_calendars(
+    store: &EKEventStore,
+    names: &[String],
+) -> Result<Vec<Retained<EKCalendar>>, BackendError> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let available: Vec<Retained<EKCalendar>> =
+        unsafe { store.calendarsForEntityType(EKEntityType::Event) }
+            .iter()
+            .collect();
+    for name in names {
+        if !available
+            .iter()
+            .any(|calendar| unsafe { calendar.title() }.to_string() == *name)
+        {
+            return Err(BackendError::NotFound {
+                kind: "calendar",
+                name: name.clone(),
+            });
+        }
+    }
+    Ok(available
+        .into_iter()
+        .filter(|calendar| {
+            let title = unsafe { calendar.title() }.to_string();
+            names.contains(&title)
+        })
+        .collect())
+}
+
+fn writable_reminder_calendar_named(
+    store: &EKEventStore,
+    name: &str,
+) -> Result<Retained<EKCalendar>, BackendError> {
+    let mut matches = unsafe { store.calendarsForEntityType(EKEntityType::Reminder) }
+        .iter()
+        .filter(|calendar| unsafe {
+            calendar.allowsContentModifications() && calendar.title().to_string() == name
+        })
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Err(BackendError::NotFound {
+            kind: "writable reminder list",
+            name: name.into(),
+        }),
+        1 => Ok(matches.pop().unwrap()),
+        _ => Err(BackendError::Ambiguous {
+            kind: "writable reminder list",
+            name: name.into(),
+        }),
     }
 }
 
@@ -571,7 +634,10 @@ mod tests {
         let start = now.start_of_day().unwrap();
         let end = start.checked_add(jiff::Span::new().days(7)).unwrap();
         EventKitCalendar
-            .events(EventQuery { range: start..end })
+            .events(EventQuery {
+                range: start..end,
+                calendars: Vec::new(),
+            })
             .unwrap();
     }
 
@@ -610,6 +676,7 @@ mod tests {
         let added = EventKitReminders
             .add(NewReminder {
                 title: "nib live test (safe to delete)".into(),
+                list: None,
                 due: Some(date(2030, 1, 15)),
                 priority: Some(Priority::Low),
             })

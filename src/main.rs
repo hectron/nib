@@ -1,6 +1,7 @@
 mod backend;
 mod cli;
 mod commands;
+mod config;
 mod demo;
 mod edit;
 mod host;
@@ -16,6 +17,11 @@ use miette::IntoDiagnostic;
 
 fn main() -> miette::Result<()> {
     let cli = cli::Cli::parse();
+    let current_dir = std::env::current_dir().into_diagnostic()?;
+    let user_config = user_config_path();
+    let config = config::load(&current_dir, user_config.as_deref(), |name| {
+        std::env::var_os(name)
+    })?;
     let now = Zoned::new(Timestamp::now(), local_zone());
     let backends = if std::env::var_os("NIB_DEMO").is_some_and(|v| !v.is_empty()) {
         demo::backends(&now)
@@ -24,6 +30,7 @@ fn main() -> miette::Result<()> {
     };
     let out = commands::run(
         cli,
+        &config,
         &now,
         &backends,
         output::Style::detect(),
@@ -36,6 +43,18 @@ fn main() -> miette::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         result => result.into_diagnostic(),
     }
+}
+
+fn user_config_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|path| !path.is_empty())
+                .map(|home| std::path::PathBuf::from(home).join(".config"))
+        })
+        .map(|root| root.join("nib/config.toml"))
 }
 
 // TimeZone::system() scans every file in zoneinfo on first use (3-8 ms);
