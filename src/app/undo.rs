@@ -263,6 +263,7 @@ mod tests {
             completed,
             modified: None,
             alarms_present: false,
+            absolute_alarms: Some(Vec::new()),
             recurrence_present: false,
             url: None,
             backup_partial: false,

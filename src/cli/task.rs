@@ -1,14 +1,19 @@
 use jiff::Span;
-use jiff::civil::{Date, Weekday};
+use jiff::civil::{Date, Time, Weekday};
 use thiserror::Error;
 
 use crate::domain::Priority;
 
-const DUE_EXPECTED: &str =
-    "expected today, tomorrow, a weekday, next WEEKDAY, in Nd, in Nw, +Nd, +Nw, eom, or YYYY-MM-DD";
+const DUE_EXPECTED: &str = "expected today, tomorrow, a weekday, next WEEKDAY, in Nd, in Nw, +Nd, +Nw, eom, YYYY-MM-DD, a time, or a date followed by a time";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Due {
+pub(super) struct Due {
+    date: Option<DueDate>,
+    time: Option<Time>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DueDate {
     Today,
     Tomorrow,
     Weekday { weekday: Weekday, next: bool },
@@ -23,7 +28,7 @@ pub(super) enum OffsetUnit {
     Week,
 }
 
-impl Due {
+impl DueDate {
     /// Resolves this expression relative to the injected local date.
     ///
     /// A bare weekday is the nearest matching date on or after `today`, so it
@@ -50,45 +55,89 @@ impl Due {
     }
 }
 
-pub(super) fn due(value: &str) -> Result<Due, String> {
-    let words: Vec<&str> = value.split_whitespace().collect();
-    match words.as_slice() {
-        [word] => parse_single_due(word)?.ok_or_else(|| DUE_EXPECTED.into()),
-        [prefix, weekday] if prefix.eq_ignore_ascii_case("next") => parse_weekday(weekday)
-            .map(|weekday| Due::Weekday {
-                weekday,
-                next: true,
-            })
-            .ok_or_else(|| "expected a weekday after `next`".into()),
-        [prefix, interval] if prefix.eq_ignore_ascii_case("in") => parse_interval(interval)?
-            .ok_or_else(|| "expected a number followed by `d` or `w` after `in`".into()),
-        _ => Err(DUE_EXPECTED.into()),
+impl Due {
+    pub(super) fn on(self, today: Date) -> Result<(Date, Option<Time>), jiff::Error> {
+        Ok((
+            self.date.map_or(Ok(today), |date| date.on(today))?,
+            self.time,
+        ))
     }
 }
 
-fn parse_single_due(value: &str) -> Result<Option<Due>, String> {
+pub(super) fn due(value: &str) -> Result<Due, String> {
+    if let Some((date, time)) = value
+        .split_once('T')
+        .filter(|(date, _)| is_iso_date(date) || looks_like_iso_date(date))
+    {
+        let date = parse_single_due(date)?.ok_or_else(|| DUE_EXPECTED.to_owned())?;
+        let time = parse_time(time)?.ok_or_else(|| "expected a time after `T`".to_owned())?;
+        return Ok(Due {
+            date: Some(date),
+            time: Some(time),
+        });
+    }
+    let words: Vec<&str> = value.split_whitespace().collect();
+    let (date, time) =
+        match words.as_slice() {
+            [word] if let Some(time) = parse_time(word)? => (None, Some(time)),
+            [word] => (
+                Some(parse_single_due(word)?.ok_or_else(|| DUE_EXPECTED.to_owned())?),
+                None,
+            ),
+            [date, time] if let Some(time) = parse_time(time)? => (
+                Some(parse_single_due(date)?.ok_or_else(|| DUE_EXPECTED.to_owned())?),
+                Some(time),
+            ),
+            [prefix, weekday] if prefix.eq_ignore_ascii_case("next") => (
+                Some(
+                    parse_weekday(weekday)
+                        .map(|weekday| DueDate::Weekday {
+                            weekday,
+                            next: true,
+                        })
+                        .ok_or_else(|| "expected a weekday after `next`".to_owned())?,
+                ),
+                None,
+            ),
+            [prefix, interval] if prefix.eq_ignore_ascii_case("in") => (
+                Some(parse_interval(interval)?.ok_or_else(|| {
+                    "expected a number followed by `d` or `w` after `in`".to_owned()
+                })?),
+                None,
+            ),
+            [prefix, value, time] if parse_time(time)?.is_some() => {
+                let phrase = format!("{prefix} {value}");
+                let parsed = due(&phrase)?;
+                (parsed.date, parse_time(time)?)
+            }
+            _ => return Err(DUE_EXPECTED.into()),
+        };
+    Ok(Due { date, time })
+}
+
+fn parse_single_due(value: &str) -> Result<Option<DueDate>, String> {
     let lower = value.to_ascii_lowercase();
     match lower.as_str() {
-        "today" => Ok(Some(Due::Today)),
-        "tomorrow" => Ok(Some(Due::Tomorrow)),
-        "eom" => Ok(Some(Due::EndOfMonth)),
+        "today" => Ok(Some(DueDate::Today)),
+        "tomorrow" => Ok(Some(DueDate::Tomorrow)),
+        "eom" => Ok(Some(DueDate::EndOfMonth)),
         _ if is_iso_date(value) => value
             .parse()
-            .map(Due::On)
+            .map(DueDate::On)
             .map(Some)
             .map_err(|_| "that date doesn't exist".into()),
         _ if looks_like_iso_date(value) => Err("expected YYYY-MM-DD".into()),
         _ if value.starts_with('+') => parse_interval(&value[1..])?
             .map(Some)
             .ok_or_else(|| "expected a number followed by `d` or `w` after `+`".into()),
-        _ => Ok(parse_weekday(&lower).map(|weekday| Due::Weekday {
+        _ => Ok(parse_weekday(&lower).map(|weekday| DueDate::Weekday {
             weekday,
             next: false,
         })),
     }
 }
 
-fn parse_interval(value: &str) -> Result<Option<Due>, String> {
+fn parse_interval(value: &str) -> Result<Option<DueDate>, String> {
     let Some((unit, count)) = value
         .as_bytes()
         .split_last()
@@ -108,7 +157,53 @@ fn parse_interval(value: &str) -> Result<Option<Due>, String> {
         .map_err(|_| "relative date must use ASCII digits".to_owned())?
         .parse()
         .map_err(|_| "relative date is too large".to_owned())?;
-    Ok(Some(Due::Offset { count, unit }))
+    Ok(Some(DueDate::Offset { count, unit }))
+}
+
+fn parse_time(value: &str) -> Result<Option<Time>, String> {
+    let lower = value.to_ascii_lowercase();
+    if let Some(digits) = lower
+        .strip_suffix("am")
+        .or_else(|| lower.strip_suffix("pm"))
+    {
+        let pm = lower.ends_with("pm");
+        let (hour, minute) = match digits.split_once(':') {
+            Some((hour, minute)) => (hour, minute),
+            None => (digits, "0"),
+        };
+        if hour.is_empty()
+            || hour.len() > 2
+            || minute.is_empty()
+            || minute.len() > 2
+            || !hour.bytes().all(|byte| byte.is_ascii_digit())
+            || !minute.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Ok(None);
+        }
+        let hour: i8 = hour.parse().map_err(|_| "invalid hour".to_owned())?;
+        let minute: i8 = minute.parse().map_err(|_| "invalid minute".to_owned())?;
+        if !(1..=12).contains(&hour) || !(0..=59).contains(&minute) {
+            return Err("that time doesn't exist".into());
+        }
+        let hour = if pm { hour % 12 + 12 } else { hour % 12 };
+        return Time::new(hour, minute, 0, 0)
+            .map(Some)
+            .map_err(|_| "that time doesn't exist".into());
+    }
+    if value.len() != 5 || value.as_bytes().get(2) != Some(&b':') {
+        return Ok(None);
+    }
+    if !value
+        .bytes()
+        .enumerate()
+        .all(|(index, byte)| index == 2 || byte.is_ascii_digit())
+    {
+        return Ok(None);
+    }
+    value
+        .parse::<Time>()
+        .map(Some)
+        .map_err(|_| "that time doesn't exist".into())
 }
 
 fn parse_weekday(value: &str) -> Option<Weekday> {
@@ -188,46 +283,6 @@ pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> 
         if words[end - 1].starts_with('\\') {
             break;
         }
-        if end >= 2
-            && words[end - 2].eq_ignore_ascii_case("next")
-            && let Some(weekday) = parse_weekday(&words[end - 1])
-        {
-            set_once(
-                &mut due,
-                Due::Weekday {
-                    weekday,
-                    next: true,
-                },
-                "due date",
-            )?;
-            end -= 2;
-            continue;
-        }
-        if end >= 2 && words[end - 2].eq_ignore_ascii_case("in") {
-            match parse_interval(&words[end - 1]) {
-                Ok(Some(value)) => {
-                    set_once(&mut due, value, "due date")?;
-                    end -= 2;
-                    continue;
-                }
-                Ok(None)
-                    if words[end - 1].starts_with(|character: char| character.is_ascii_digit()) =>
-                {
-                    return Err(InlineError::Due {
-                        value: format!("in {}", words[end - 1]),
-                        reason: "expected a number followed by `d` or `w` after `in`".into(),
-                    });
-                }
-                Ok(None) => {}
-                Err(reason) => {
-                    return Err(InlineError::Due {
-                        value: format!("in {}", words[end - 1]),
-                        reason,
-                    });
-                }
-            }
-        }
-
         let word = &words[end - 1];
         if let Some(value) = word.strip_prefix('!') {
             let value = match value.to_ascii_lowercase().as_str() {
@@ -248,18 +303,13 @@ pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> 
             end -= 1;
             continue;
         }
-        match parse_single_due(word) {
-            Ok(Some(value)) => {
+        match inline_due_suffix(&words[..end]) {
+            Ok(Some((value, count))) => {
                 set_once(&mut due, value, "due date")?;
-                end -= 1;
+                end -= count;
             }
             Ok(None) => break,
-            Err(reason) => {
-                return Err(InlineError::Due {
-                    value: word.clone(),
-                    reason,
-                });
-            }
+            Err((value, reason)) => return Err(InlineError::Due { value, reason }),
         }
     }
 
@@ -273,6 +323,105 @@ pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> 
         due,
         priority,
     })
+}
+
+fn inline_due_suffix(words: &[String]) -> Result<Option<(Due, usize)>, (String, String)> {
+    let last = words
+        .last()
+        .expect("inline parsing only checks a non-empty suffix");
+    if looks_like_iso_datetime(last) {
+        return due(last)
+            .map(|value| Some((value, 1)))
+            .map_err(|reason| (last.clone(), reason));
+    }
+    let time = parse_time(last).map_err(|reason| (last.clone(), reason))?;
+    if time.is_some() {
+        if words.len() >= 3
+            && is_escaped_due_phrase(&words[words.len() - 3], &words[words.len() - 2])
+        {
+            return Ok(None);
+        }
+        if words.len() >= 3 {
+            let phrase = format!(
+                "{} {} {}",
+                words[words.len() - 3],
+                words[words.len() - 2],
+                last
+            );
+            if matches!(
+                words[words.len() - 3].to_ascii_lowercase().as_str(),
+                "next" | "in"
+            ) {
+                match due(&phrase) {
+                    Ok(value) => return Ok(Some((value, 3))),
+                    Err(reason)
+                        if words[words.len() - 3].eq_ignore_ascii_case("in")
+                            && words[words.len() - 2]
+                                .starts_with(|character: char| character.is_ascii_digit()) =>
+                    {
+                        return Err((phrase, reason));
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        if words.len() >= 2 && !words[words.len() - 2].starts_with('\\') {
+            let phrase = format!("{} {last}", words[words.len() - 2]);
+            if matches!(parse_single_due(&words[words.len() - 2]), Ok(Some(_))) {
+                return due(&phrase)
+                    .map(|value| Some((value, 2)))
+                    .map_err(|reason| (phrase, reason));
+            }
+        }
+        return due(last)
+            .map(|value| Some((value, 1)))
+            .map_err(|reason| (last.clone(), reason));
+    }
+    if words.len() >= 2
+        && matches!(
+            words[words.len() - 2].to_ascii_lowercase().as_str(),
+            "next" | "in"
+        )
+    {
+        let phrase = format!("{} {last}", words[words.len() - 2]);
+        return match due(&phrase) {
+            Ok(value) => Ok(Some((value, 2))),
+            Err(reason)
+                if words[words.len() - 2].eq_ignore_ascii_case("in")
+                    && last.starts_with(|character: char| character.is_ascii_digit()) =>
+            {
+                Err((phrase, reason))
+            }
+            Err(_) => match parse_single_due(last) {
+                Ok(Some(date)) => Ok(Some((
+                    Due {
+                        date: Some(date),
+                        time: None,
+                    },
+                    1,
+                ))),
+                Ok(None) => Ok(None),
+                Err(reason) => Err((last.clone(), reason)),
+            },
+        };
+    }
+    match parse_single_due(last) {
+        Ok(Some(date)) => Ok(Some((
+            Due {
+                date: Some(date),
+                time: None,
+            },
+            1,
+        ))),
+        Ok(None) => Ok(None),
+        Err(reason) => Err((last.clone(), reason)),
+    }
+}
+
+fn looks_like_iso_datetime(value: &str) -> bool {
+    value
+        .split_once('T')
+        .is_some_and(|(date, _)| is_iso_date(date) || looks_like_iso_date(date))
 }
 
 fn inline_title(words: &[String]) -> String {
@@ -296,6 +445,8 @@ fn is_escaped_due_phrase(first: &str, second: &str) -> bool {
     };
     (first.eq_ignore_ascii_case("next") && parse_weekday(second).is_some())
         || (first.eq_ignore_ascii_case("in") && matches!(parse_interval(second), Ok(Some(_))))
+        || (matches!(parse_single_due(first), Ok(Some(_)))
+            && matches!(parse_time(second), Ok(Some(_))))
 }
 
 fn is_escaped_inline_word(words: &[String], index: usize) -> bool {
@@ -304,6 +455,8 @@ fn is_escaped_inline_word(words: &[String], index: usize) -> bool {
     };
     word.starts_with(['!', '#'])
         || matches!(parse_single_due(word), Ok(Some(_)) | Err(_))
+        || matches!(parse_time(word), Ok(Some(_)) | Err(_))
+        || word.contains('T') && due(word).is_ok()
         || words
             .get(index + 1)
             .is_some_and(|next| is_escaped_due_phrase(&words[index], next))
@@ -339,7 +492,7 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(
-                due(input).unwrap().on(date(2026, 10, 26)).unwrap(),
+                due(input).unwrap().on(date(2026, 10, 26)).unwrap().0,
                 expected,
                 "{input}"
             );
@@ -347,11 +500,89 @@ mod tests {
     }
 
     #[test]
+    fn due_times_accept_24_hour_and_twelve_hour_forms() {
+        let cases = [
+            (
+                "tomorrow 09:00",
+                date(2026, 10, 27),
+                Time::new(9, 0, 0, 0).unwrap(),
+            ),
+            (
+                "fri 9am",
+                date(2026, 10, 30),
+                Time::new(9, 0, 0, 0).unwrap(),
+            ),
+            (
+                "9:30pm",
+                date(2026, 10, 26),
+                Time::new(21, 30, 0, 0).unwrap(),
+            ),
+            (
+                "2026-11-03T09:00",
+                date(2026, 11, 3),
+                Time::new(9, 0, 0, 0).unwrap(),
+            ),
+            (
+                "2026-11-03 09:00",
+                date(2026, 11, 3),
+                Time::new(9, 0, 0, 0).unwrap(),
+            ),
+        ];
+        for (input, expected_date, time) in cases {
+            assert_eq!(
+                due(input).unwrap().on(date(2026, 10, 26)).unwrap(),
+                (expected_date, Some(time)),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn date_words_stay_case_insensitive_with_times() {
+        let cases = ["Tomorrow", "Thu", "Tuesday", "next Tue"];
+        for input in cases {
+            assert!(due(input).is_ok(), "{input}");
+            assert!(due(&format!("{input} 9am")).is_ok(), "{input} 9am");
+        }
+    }
+
+    #[test]
+    fn inline_times_must_follow_a_date_or_stand_alone() {
+        let cases = [
+            (&["Pay", "fri", "9am"][..], "Pay", date(2026, 10, 30), 9, 0),
+            (&["Call", "9:30pm"][..], "Call", date(2026, 10, 26), 21, 30),
+            (
+                &["Pay", "fri", "later", "09:00"][..],
+                "Pay fri later",
+                date(2026, 10, 26),
+                9,
+                0,
+            ),
+            (
+                &["Deploy", "2026-11-03T09:00"][..],
+                "Deploy",
+                date(2026, 11, 3),
+                9,
+                0,
+            ),
+        ];
+        for (words, title, expected_date, hour, minute) in cases {
+            let words = words.iter().map(ToString::to_string).collect::<Vec<_>>();
+            let parsed = parse_inline(&words).unwrap();
+            assert_eq!(parsed.title, title);
+            assert_eq!(
+                parsed.due.unwrap().on(date(2026, 10, 26)).unwrap(),
+                (expected_date, Some(Time::new(hour, minute, 0, 0).unwrap()))
+            );
+        }
+    }
+
+    #[test]
     fn weekday_and_next_semantics_include_then_skip_today() {
         let friday = date(2026, 10, 30);
-        assert_eq!(due("fri").unwrap().on(friday).unwrap(), friday);
+        assert_eq!(due("fri").unwrap().on(friday).unwrap().0, friday);
         assert_eq!(
-            due("next friday").unwrap().on(friday).unwrap(),
+            due("next friday").unwrap().on(friday).unwrap().0,
             date(2026, 11, 6)
         );
     }
@@ -370,7 +601,7 @@ mod tests {
         for (short, full, expected) in cases {
             for input in [short, full] {
                 assert_eq!(
-                    due(input).unwrap().on(date(2026, 10, 26)).unwrap(),
+                    due(input).unwrap().on(date(2026, 10, 26)).unwrap().0,
                     expected,
                     "{input}"
                 );
@@ -385,9 +616,12 @@ mod tests {
                 &["Pay", "rent", "fri", "!high", "#bills"][..],
                 "Pay rent",
                 Some("bills"),
-                Some(Due::Weekday {
-                    weekday: Weekday::Friday,
-                    next: false,
+                Some(Due {
+                    date: Some(DueDate::Weekday {
+                        weekday: Weekday::Friday,
+                        next: false,
+                    }),
+                    time: None,
                 }),
                 Some(Priority::High),
             ),
@@ -395,9 +629,12 @@ mod tests {
                 &["File", "report", "next", "fri"][..],
                 "File report",
                 None,
-                Some(Due::Weekday {
-                    weekday: Weekday::Friday,
-                    next: true,
+                Some(Due {
+                    date: Some(DueDate::Weekday {
+                        weekday: Weekday::Friday,
+                        next: true,
+                    }),
+                    time: None,
                 }),
                 None,
             ),
@@ -405,9 +642,12 @@ mod tests {
                 &["Check", "in", "3d"][..],
                 "Check",
                 None,
-                Some(Due::Offset {
-                    count: 3,
-                    unit: OffsetUnit::Day,
+                Some(Due {
+                    date: Some(DueDate::Offset {
+                        count: 3,
+                        unit: OffsetUnit::Day,
+                    }),
+                    time: None,
                 }),
                 None,
             ),
@@ -437,6 +677,51 @@ mod tests {
     }
 
     #[test]
+    fn invalid_in_and_next_phrases_fall_back_to_shorter_suffixes() {
+        let cases = [
+            (
+                &["Check", "in", "tomorrow"][..],
+                "Check in",
+                date(2026, 10, 27),
+                None,
+            ),
+            (
+                &["Plan", "next", "tomorrow"][..],
+                "Plan next",
+                date(2026, 10, 27),
+                None,
+            ),
+            (
+                &["Check", "in", "tomorrow", "9am"][..],
+                "Check in",
+                date(2026, 10, 27),
+                Some(Time::new(9, 0, 0, 0).unwrap()),
+            ),
+            (
+                &["Review", "in", "person", "3pm"][..],
+                "Review in person",
+                date(2026, 10, 26),
+                Some(Time::new(15, 0, 0, 0).unwrap()),
+            ),
+            (
+                &["Meeting", "next", "week", "9am"][..],
+                "Meeting next week",
+                date(2026, 10, 26),
+                Some(Time::new(9, 0, 0, 0).unwrap()),
+            ),
+        ];
+        for (words, title, expected_date, time) in cases {
+            let words = words.iter().map(ToString::to_string).collect::<Vec<_>>();
+            let parsed = parse_inline(&words).unwrap();
+            assert_eq!(parsed.title, title);
+            assert_eq!(
+                parsed.due.unwrap().on(date(2026, 10, 26)).unwrap(),
+                (expected_date, time)
+            );
+        }
+    }
+
+    #[test]
     fn backslashes_keep_inline_tokens_in_the_title() {
         let cases = [
             (&["Pay", "\\fri"][..], "Pay fri"),
@@ -456,6 +741,8 @@ mod tests {
         let cases = [
             (&["Discuss", "\\next", "fri"][..], "Discuss next fri"),
             (&["Review", "\\in", "3d"][..], "Review in 3d"),
+            (&["Pay", "\\next", "fri", "9am"][..], "Pay next fri 9am"),
+            (&["Keep", "\\in", "3d", "9am"][..], "Keep in 3d 9am"),
             (&["Copy", "\\server", "docs"][..], "Copy \\server docs"),
             (
                 &["Discuss", "\\next", "fri", "#work"][..],
@@ -466,6 +753,7 @@ mod tests {
             let words: Vec<String> = words.iter().map(ToString::to_string).collect();
             let parsed = parse_inline(&words).unwrap();
             assert_eq!(parsed.title, title, "{words:?}");
+            assert_eq!(parsed.due, None, "{words:?}");
         }
     }
 

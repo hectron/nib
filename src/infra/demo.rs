@@ -1,4 +1,4 @@
-use jiff::civil::Date;
+use jiff::civil::{Date, Time};
 use jiff::{ToSpan, Zoned};
 
 use crate::domain::{
@@ -83,20 +83,51 @@ impl Reminders for Demo {
                 name: name.into(),
             });
         }
+        let due_at = reminder
+            .due
+            .zip(reminder.due_time)
+            .and_then(|(date, time)| {
+                date.to_datetime(time)
+                    .to_zoned(self.0.time_zone().clone())
+                    .ok()
+            })
+            .map(|due| due.timestamp());
         Ok(Reminder {
             id: "reminder-5".into(),
             title: reminder.title,
             due: reminder.due,
+            due_time: reminder.due_time,
+            due_time_zone: reminder.due_time_zone,
+            due_at,
             priority: reminder.priority,
         })
     }
 
     fn list(&self) -> Result<Vec<Reminder>, BackendError> {
-        let reminder = |id: &str, title: &str, due: Option<i32>, priority| {
+        let reminder = |id: &str,
+                        title: &str,
+                        due: Option<i32>,
+                        time: Option<(i8, i8)>,
+                        zone: Option<&str>,
+                        priority| {
+            let due = due.map(|days| self.day(days, "Reminders")).transpose()?;
+            let due_time = time
+                .map(|(hour, minute)| Time::new(hour, minute, 0, 0).expect("demo times are valid"));
+            let due_at = due
+                .zip(due_time)
+                .and_then(|(date, time)| {
+                    date.to_datetime(time)
+                        .to_zoned(self.0.time_zone().clone())
+                        .ok()
+                })
+                .map(|due| due.timestamp());
             Ok(Reminder {
                 id: id.into(),
                 title: title.into(),
-                due: due.map(|days| self.day(days, "Reminders")).transpose()?,
+                due,
+                due_time,
+                due_time_zone: zone.map(ToOwned::to_owned),
+                due_at,
                 priority,
             })
         };
@@ -105,16 +136,27 @@ impl Reminders for Demo {
                 "reminder-1",
                 "Review pull request",
                 Some(0),
+                None,
+                None,
                 Some(Priority::High),
             ),
-            reminder("reminder-2", "Pay rent", Some(-1), Some(Priority::Medium)),
+            reminder(
+                "reminder-2",
+                "Pay rent",
+                Some(-1),
+                None,
+                None,
+                Some(Priority::Medium),
+            ),
             reminder(
                 "reminder-3",
                 "Renew passport",
                 Some(14),
+                Some((9, 0)),
+                self.0.time_zone().iana_name(),
                 Some(Priority::Low),
             ),
-            reminder("reminder-4", "Buy groceries", None, None),
+            reminder("reminder-4", "Buy groceries", None, None, None, None),
         ]
         .into_iter()
         .collect()
@@ -129,20 +171,32 @@ impl Reminders for Demo {
         }
         let reminders = Reminders::list(self)?
             .into_iter()
-            .map(|r| StoredReminder {
-                id: r.id,
-                list_id: DEMO_LIST.into(),
-                title: r.title,
-                notes: None,
-                due: r.due,
-                due_components: None,
-                priority: r.priority,
-                completed: false,
-                modified: None,
-                alarms_present: false,
-                recurrence_present: false,
-                url: None,
-                backup_partial: false,
+            .map(|r| {
+                let due_components = r.due.map(|date| crate::domain::ReminderDueComponents {
+                    year: Some(date.year().into()),
+                    month: Some(date.month().into()),
+                    day: Some(date.day().into()),
+                    hour: r.due_time.map(|time| i64::from(time.hour())),
+                    minute: r.due_time.map(|time| i64::from(time.minute())),
+                    time_zone: r.due_time_zone.clone(),
+                    ..crate::domain::ReminderDueComponents::default()
+                });
+                StoredReminder {
+                    id: r.id,
+                    list_id: DEMO_LIST.into(),
+                    title: r.title,
+                    notes: None,
+                    due: r.due,
+                    due_components,
+                    priority: r.priority,
+                    completed: false,
+                    modified: None,
+                    alarms_present: false,
+                    absolute_alarms: Some(Vec::new()),
+                    recurrence_present: false,
+                    url: None,
+                    backup_partial: false,
+                }
             })
             .collect();
         Ok(ReminderSnapshot {
@@ -174,6 +228,8 @@ fn demo_written(index: usize, change: &ReminderChange) -> Option<StoredReminder>
             title,
             notes,
             due,
+            due_time,
+            due_time_zone,
             priority,
         } => Some(StoredReminder {
             id: format!("demo-added-{index}"),
@@ -181,11 +237,20 @@ fn demo_written(index: usize, change: &ReminderChange) -> Option<StoredReminder>
             title: title.clone(),
             notes: notes.clone(),
             due: *due,
-            due_components: None,
+            due_components: due.map(|date| crate::domain::ReminderDueComponents {
+                year: Some(date.year().into()),
+                month: Some(date.month().into()),
+                day: Some(date.day().into()),
+                hour: due_time.map(|time| i64::from(time.hour())),
+                minute: due_time.map(|time| i64::from(time.minute())),
+                time_zone: due_time_zone.clone(),
+                ..crate::domain::ReminderDueComponents::default()
+            }),
             priority: *priority,
             completed: false,
             modified: None,
             alarms_present: false,
+            absolute_alarms: Some(Vec::new()),
             recurrence_present: false,
             url: None,
             backup_partial: false,
@@ -335,10 +400,10 @@ mod tests {
     #[test]
     fn reminders_are_due_relative_to_today() {
         assert_snapshot!(nib(&["t"]), @r"
-        TITLE                DUE         PRIORITY
-        Review pull request  2026-10-26  high
-        Pay rent             2026-10-25  medium
-        Renew passport       2026-11-09  low
+        TITLE                DUE               PRIORITY
+        Review pull request  2026-10-26        high
+        Pay rent             2026-10-25        medium
+        Renew passport       2026-11-09 09:00  low
         Buy groceries
         ");
     }

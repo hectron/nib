@@ -8,7 +8,7 @@ nib t Pay rent fri !high '#bills'
 
 This creates “Pay rent,” due Friday, with high priority in the existing `bills` list. The same trailing tokens work with `nib task add`.
 
-## Due dates
+## Due dates and times
 
 Use natural dates inline or with `--due`:
 
@@ -21,19 +21,27 @@ Use natural dates inline or with `--due`:
 | `in 2w`, `+2w` | A number of weeks from today |
 | `eom` | The last day of this month |
 | `2027-01-05` | An exact date in `YYYY-MM-DD` form |
+| `tomorrow 09:00` | Tomorrow at 09:00 |
+| `fri 9am` | Friday at 09:00 |
+| `9:30pm` | Today at 21:30 |
+| `2026-11-03T09:00` | An exact date and time |
+| `2026-11-03 09:00` | An exact date followed by a time |
 
 All weekdays accept their three-letter or full English names. For example, on Friday, `fri` means today and `next fri` means the following Friday.
 
 ```bash
 nib t Submit expenses --due "next fri"
 nib task add Renew passport --due +2w
+nib t Call London --due "tomorrow 09:00"
 ```
+
+Times accept `HH:MM`, `Ham`, or `H:MMam` forms, case-insensitively. A time token is recognized only immediately after a date token or by itself at the end, where it means today. Times supplied by quick-add or `--due` use the local time zone.
 
 ## Trailing tokens
 
 Quick-add reads these fields only from the end of the title:
 
-- A due date in any form above.
+- A due date or time in any form above.
 - `!low`, `!medium`, or `!high` for priority.
 - `#NAME` for a reminder list.
 
@@ -51,7 +59,10 @@ To keep a recognized trailing token in the title, prefix it with a backslash. Qu
 nib t Discuss '\fri'
 nib t Choose '\!high'
 nib t Label '\#bills'
-nib t Discuss '\next' fri
+nib t Pay '\next' fri 9am
+nib t Keep '\tomorrow' 09:00
+nib t Keep '\9:30pm'
+nib t Keep '\2026-11-03T09:00'
 ```
 
-These titles end in `fri`, `!high`, `#bills`, and `next fri`; none of those tokens sets a field. Escape the first word of a two-word date. A backslash before any other word, such as `'\server'`, stays in the title. Inline parsing is enabled by default and can be disabled in [configuration](configuration.md).
+These titles end in `fri`, `!high`, `#bills`, `next fri 9am`, `tomorrow 09:00`, `9:30pm`, and `2026-11-03T09:00`; none of those tokens sets a field. Escape the first word of a multi-token date or date-time, and escape a standalone time or `T` form directly. A backslash before any other word, such as `'\server'`, stays in the title. Inline parsing is enabled by default and can be disabled in [configuration](configuration.md).

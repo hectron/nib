@@ -5,7 +5,7 @@ use miette::{IntoDiagnostic, Result, miette};
 use serde_json::json;
 
 use crate::app::journal;
-use crate::app::markdown::{self, Plan, Session};
+use crate::app::markdown::{self, ParseError, Plan, Session};
 use crate::cli::output::{clean, clean_lines};
 use crate::domain::{Backends, ReminderChange};
 use crate::infra::host::Host;
@@ -19,7 +19,7 @@ pub fn tasks(
     host: &mut dyn Host,
 ) -> Result<String> {
     let snapshot = backends.reminders.snapshot(list)?;
-    let session = Session::new(&snapshot);
+    let session = Session::new_at(&snapshot, now);
     if session.skipped > 0 {
         host.say(&format!(
             "Skipping {} with line breaks or control characters in the text; nib won't show or change {}.",
@@ -42,7 +42,10 @@ pub fn tasks(
         }
         let plan = match markdown::parse(&edited)
             .and_then(|document| markdown::plan(&snapshot, &session, &document))
-        {
+            .and_then(|plan| {
+                validate_time_zones(&plan, backends)?;
+                Ok(plan)
+            }) {
             Ok(plan) => plan,
             Err(e) => {
                 host.say(&clean(&e.to_string()));
@@ -95,6 +98,19 @@ pub fn tasks(
         file.remove_on_drop();
         return Ok(summary(&plan));
     }
+}
+
+fn validate_time_zones(plan: &Plan, backends: &Backends) -> std::result::Result<(), ParseError> {
+    for (line, zone) in &plan.time_zones {
+        backends
+            .reminders
+            .validate_time_zone(zone)
+            .map_err(|error| ParseError {
+                line: *line,
+                message: error.to_string(),
+            })?;
+    }
+    Ok(())
 }
 
 fn edit_again(host: &mut dyn Host) -> Result<bool> {
@@ -187,6 +203,7 @@ pub(crate) fn backup_changes(changes: &[ReminderChange]) -> Result<Option<String
                 "completed": before.completed,
                 "modified": before.modified.map(|t| t.to_string()),
                 "alarms_present": before.alarms_present,
+                "absolute_alarms": before.absolute_alarms,
                 "recurrence_present": before.recurrence_present,
                 "url": before.url,
                 "partial": before.backup_partial,
@@ -301,6 +318,7 @@ mod tests {
             completed: false,
             modified: None,
             alarms_present: false,
+            absolute_alarms: Some(Vec::new()),
             recurrence_present: false,
             url: None,
             backup_partial: false,
@@ -314,6 +332,8 @@ mod tests {
                 title,
                 notes,
                 due,
+                due_time,
+                due_time_zone,
                 priority,
             } => Some(StoredReminder {
                 id: format!("added-{title}"),
@@ -321,11 +341,20 @@ mod tests {
                 title: title.clone(),
                 notes: notes.clone(),
                 due: *due,
-                due_components: None,
+                due_components: due.map(|date| crate::domain::ReminderDueComponents {
+                    year: Some(date.year().into()),
+                    month: Some(date.month().into()),
+                    day: Some(date.day().into()),
+                    hour: due_time.map(|time| i64::from(time.hour())),
+                    minute: due_time.map(|time| i64::from(time.minute())),
+                    time_zone: due_time_zone.clone(),
+                    ..crate::domain::ReminderDueComponents::default()
+                }),
                 priority: *priority,
                 completed: false,
                 modified: None,
                 alarms_present: false,
+                absolute_alarms: Some(Vec::new()),
                 recurrence_present: false,
                 url: None,
                 backup_partial: false,
@@ -512,6 +541,92 @@ mod tests {
         assert_eq!(result.unwrap(), "No changes.");
         assert_eq!(applied, Vec::<ReminderChange>::new());
         assert_eq!(host.backups, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn unavailable_zones_use_the_line_numbered_re_edit_flow() {
+        struct RejectZone(ReminderSnapshot);
+
+        impl Reminders for RejectZone {
+            fn add(&self, _: NewReminder) -> Result<Reminder, BackendError> {
+                unreachable!()
+            }
+
+            fn list(&self) -> Result<Vec<Reminder>, BackendError> {
+                unreachable!()
+            }
+
+            fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+                Ok(self.0.clone())
+            }
+
+            fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
+                panic!("validation must happen before apply")
+            }
+
+            fn validate_time_zone(&self, name: &str) -> Result<(), BackendError> {
+                Err(BackendError::Failed {
+                    app: "Reminders",
+                    message: format!("time zone {name:?} isn't available"),
+                })
+            }
+        }
+
+        let mut dated = stored("rem-0000", "File report");
+        dated.due = Some(date(2026, 10, 27));
+        dated.due_components = Some(ReminderDueComponents {
+            year: Some(2026),
+            month: Some(10),
+            day: Some(27),
+            ..ReminderDueComponents::default()
+        });
+        let snapshot = ReminderSnapshot {
+            lists: snapshot(&[]).lists,
+            reminders: vec![dated],
+        };
+        let retry_snapshot = snapshot.clone();
+        let backends = Backends::new(
+            || -> Box<dyn Notes> { unreachable!() },
+            move || Box::new(RejectZone(snapshot)),
+            || -> Box<dyn Calendar> { unreachable!() },
+        );
+        let now = date(2026, 10, 26)
+            .at(9, 0, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-4)))
+            .unwrap();
+        let mut host = Scripted::new()
+            .edit(|text| text.replace("2026-10-27", "2026-10-27 09:00"))
+            .answer("n");
+        let error = tasks(None, &now, &backends, &mut host).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("Nothing was changed. Your edits are in")
+        );
+        assert!(
+            host.said
+                .iter()
+                .any(|line| line.starts_with("line ") && line.contains("isn't available"))
+        );
+        assert!(host.said.iter().any(|line| line == "Edit again? [Y/n] "));
+        assert!(!host.said.iter().any(|line| line.contains("~ update")));
+
+        let backends = Backends::new(
+            || -> Box<dyn Notes> { unreachable!() },
+            move || Box::new(RejectZone(retry_snapshot)),
+            || -> Box<dyn Calendar> { unreachable!() },
+        );
+        let mut host = Scripted::new()
+            .edit(|text| text.replace("2026-10-27", "2026-10-27 09:00"))
+            .answer("")
+            .edit(|text| {
+                assert!(text.contains("2026-10-27 09:00"));
+                text.replace("2026-10-27 09:00", "2026-10-27")
+            });
+        assert_eq!(
+            tasks(None, &now, &backends, &mut host).unwrap(),
+            "No changes."
+        );
     }
 
     #[test]

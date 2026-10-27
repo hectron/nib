@@ -1,9 +1,10 @@
+use std::cmp::Ordering;
 use std::ffi::c_void;
 use std::sync::mpsc;
 use std::time::Duration;
 
 use block2::RcBlock;
-use jiff::civil::Date;
+use jiff::civil::{Date, Time};
 use jiff::tz::TimeZone;
 use jiff::{Timestamp, Zoned};
 use objc2::rc::{Retained, autoreleasepool};
@@ -103,9 +104,7 @@ impl Reminders for EventKitReminders {
             let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
             let predicate = incomplete_reminders_predicate(&store, None);
             let mut reminders = fetch_reminders(&store, &predicate, to_reminder)?;
-            reminders.sort_by(|a, b| {
-                (a.due.is_none(), a.due, &a.title).cmp(&(b.due.is_none(), b.due, &b.title))
-            });
+            reminders.sort_by(compare_reminders);
             Ok(reminders)
         })
     }
@@ -135,9 +134,7 @@ impl Reminders for EventKitReminders {
             let chosen = NSArray::from_retained_slice(&calendars);
             let predicate = incomplete_reminders_predicate(&store, Some(&chosen));
             let mut reminders = fetch_reminders(&store, &predicate, to_stored)?;
-            reminders.sort_by(|a, b| {
-                (a.due.is_none(), a.due, &a.title).cmp(&(b.due.is_none(), b.due, &b.title))
-            });
+            reminders.sort_by(compare_stored_reminders);
             Ok(ReminderSnapshot { lists, reminders })
         })
     }
@@ -171,6 +168,62 @@ impl Reminders for EventKitReminders {
             })
         })
     }
+
+    fn validate_time_zone(&self, name: &str) -> Result<(), BackendError> {
+        autoreleasepool(|_| {
+            NSTimeZone::timeZoneWithName(&NSString::from_str(name))
+                .map(|_| ())
+                .ok_or_else(|| failed(REMINDERS, &format!("time zone {name:?} isn't available")))
+        })
+    }
+}
+
+fn compare_reminders(a: &Reminder, b: &Reminder) -> Ordering {
+    compare_due(
+        a.due, a.due_time, &a.title, &a.id, b.due, b.due_time, &b.title, &b.id,
+    )
+}
+
+fn compare_stored_reminders(a: &StoredReminder, b: &StoredReminder) -> Ordering {
+    compare_due(
+        a.due,
+        a.due_components.as_ref().and_then(stored_due_time),
+        &a.title,
+        &a.id,
+        b.due,
+        b.due_components.as_ref().and_then(stored_due_time),
+        &b.title,
+        &b.id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compare_due(
+    a_date: Option<Date>,
+    a_time: Option<Time>,
+    a_title: &str,
+    a_id: &str,
+    b_date: Option<Date>,
+    b_time: Option<Time>,
+    b_title: &str,
+    b_id: &str,
+) -> Ordering {
+    (
+        a_date.is_none(),
+        a_date,
+        a_date.is_some() && a_time.is_some(),
+        a_date.and(a_time),
+        a_title,
+        a_id,
+    )
+        .cmp(&(
+            b_date.is_none(),
+            b_date,
+            b_date.is_some() && b_time.is_some(),
+            b_date.and(b_time),
+            b_title,
+            b_id,
+        ))
 }
 
 fn stored_after_commit(reminder: &EKReminder) -> (StoredReminder, bool) {
@@ -212,7 +265,12 @@ fn add_reminder(
         reminder.setTitle(Some(&NSString::from_str(&new.title)));
         reminder.setCalendar(Some(list));
         reminder.setPriority(priority_to_eventkit(new.priority));
-        set_due(&reminder, new.due);
+        set_due(
+            &reminder,
+            new.due,
+            new.due_time,
+            new.due_time_zone.as_deref(),
+        )?;
         store
             .saveReminder_commit_error(&reminder, true)
             .map_err(|error| failed(REMINDERS, &error.localizedDescription().to_string()))?;
@@ -371,7 +429,7 @@ fn stage(
             }
             ReminderChange::Update { before, .. } | ReminderChange::Delete { before } => {
                 match find_reminder(store, &before.id) {
-                    Some(reminder) if to_stored(&reminder) == *before => {
+                    Some(reminder) if stored_matches(&to_stored(&reminder), before) => {
                         current.push(Some(reminder));
                     }
                     _ => {
@@ -394,20 +452,26 @@ fn stage(
                     title,
                     notes,
                     due,
+                    due_time,
+                    due_time_zone,
                     priority,
                 },
                 _,
             ) => Some(stage_add(
                 store,
                 list_id,
-                title,
-                notes.as_deref(),
-                *due,
-                *priority,
+                AddFields {
+                    title,
+                    notes: notes.as_deref(),
+                    due: *due,
+                    due_time: *due_time,
+                    due_time_zone: due_time_zone.as_deref(),
+                    priority: *priority,
+                },
             )?),
             (ReminderChange::Restore { before }, _) => Some(stage_restore(store, before)?),
             (ReminderChange::Update { before, edit }, Some(reminder)) => {
-                update(store, &reminder, edit)?;
+                update(store, &reminder, before, edit)?;
                 save(store, &reminder, &before.title)?;
                 Some(reminder)
             }
@@ -430,13 +494,28 @@ fn stage(
     Ok(written)
 }
 
+fn stored_matches(current: &StoredReminder, before: &StoredReminder) -> bool {
+    let mut current = current.clone();
+    if before.absolute_alarms.is_none() {
+        current.absolute_alarms = None;
+    }
+    current == *before
+}
+
+#[derive(Clone, Copy)]
+struct AddFields<'a> {
+    title: &'a str,
+    notes: Option<&'a str>,
+    due: Option<Date>,
+    due_time: Option<Time>,
+    due_time_zone: Option<&'a str>,
+    priority: Option<Priority>,
+}
+
 fn stage_add(
     store: &EKEventStore,
     list_id: &str,
-    title: &str,
-    notes: Option<&str>,
-    due: Option<Date>,
-    priority: Option<Priority>,
+    fields: AddFields<'_>,
 ) -> Result<Retained<EKReminder>, BackendError> {
     let list = writable_calendar(store, list_id)?;
     // SAFETY: The retained EventKit store and calendar are valid, temporary NSString values live
@@ -444,11 +523,11 @@ fn stage_add(
     unsafe {
         let reminder = EKReminder::reminderWithEventStore(store);
         reminder.setCalendar(Some(&list));
-        reminder.setTitle(Some(&NSString::from_str(title)));
-        reminder.setNotes(notes.map(NSString::from_str).as_deref());
-        reminder.setPriority(priority_to_eventkit(priority));
-        set_due(&reminder, due);
-        save(store, &reminder, title)?;
+        reminder.setTitle(Some(&NSString::from_str(fields.title)));
+        reminder.setNotes(fields.notes.map(NSString::from_str).as_deref());
+        reminder.setPriority(priority_to_eventkit(fields.priority));
+        set_due(&reminder, fields.due, fields.due_time, fields.due_time_zone)?;
+        save(store, &reminder, fields.title)?;
         Ok(reminder)
     }
 }
@@ -470,7 +549,7 @@ fn stage_restore(
             let restored = restore_due_components(parts)?;
             reminder.setDueDateComponents(Some(&restored));
         } else {
-            set_due(&reminder, before.due);
+            set_due(&reminder, before.due, None, None)?;
         }
         let url = before
             .url
@@ -486,10 +565,12 @@ fn stage_restore(
 fn update(
     store: &EKEventStore,
     reminder: &EKReminder,
+    before: &StoredReminder,
     edit: &ReminderEdit,
 ) -> Result<(), BackendError> {
-    // SAFETY: The typed reminder and store are retained for every setter call, temporary NSString
-    // values outlive their calls, and any destination calendar is retained before assignment.
+    // SAFETY: The typed reminder and store are retained for every getter and setter call, an
+    // existing due-components object remains alive while its scalar fields are updated, temporary
+    // NSString values outlive their calls, and any destination calendar is retained before use.
     unsafe {
         if let Some(title) = &edit.title {
             reminder.setTitle(Some(&NSString::from_str(title)));
@@ -500,12 +581,21 @@ fn update(
             FieldEdit::Unchanged => {}
         }
         if let Some(parts) = &edit.due_components {
-            let restored = restore_due_components(parts)?;
-            reminder.setDueDateComponents(Some(&restored));
+            let component_objects_unchanged =
+                before.due_components.as_ref().is_some_and(|before| {
+                    before.calendar == parts.calendar && before.time_zone == parts.time_zone
+                });
+            if component_objects_unchanged && let Some(existing) = reminder.dueDateComponents() {
+                set_due_component_values(&existing, parts);
+                reminder.setDueDateComponents(Some(&existing));
+            } else {
+                let restored = restore_due_components(parts)?;
+                reminder.setDueDateComponents(Some(&restored));
+            }
         } else {
             match edit.due {
-                FieldEdit::Set(due) => set_due(reminder, Some(due)),
-                FieldEdit::Remove => set_due(reminder, None),
+                FieldEdit::Set(due) => set_due(reminder, Some(due), None, None)?,
+                FieldEdit::Remove => set_due(reminder, None, None, None)?,
                 FieldEdit::Unchanged => {}
             }
         }
@@ -555,62 +645,101 @@ fn restore_due_components(
         })
         .transpose()?;
     parts.setTimeZone(time_zone.as_deref());
-    if let Some(value) = value.era {
-        parts.setEra(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.year {
-        parts.setYear(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.month {
-        parts.setMonth(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.day {
-        parts.setDay(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.hour {
-        parts.setHour(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.minute {
-        parts.setMinute(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.second {
-        parts.setSecond(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.nanosecond {
-        parts.setNanosecond(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.weekday {
-        parts.setWeekday(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.weekday_ordinal {
-        parts.setWeekdayOrdinal(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.quarter {
-        parts.setQuarter(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.week_of_month {
-        parts.setWeekOfMonth(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.week_of_year {
-        parts.setWeekOfYear(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.year_for_week_of_year {
-        parts.setYearForWeekOfYear(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    if let Some(value) = value.day_of_year {
-        parts.setDayOfYear(value.try_into().unwrap_or(NSDateComponentUndefined));
-    }
-    parts.setLeapMonth(value.is_leap_month);
+    set_due_component_values(&parts, value);
     Ok(parts)
 }
 
-fn set_due(reminder: &EKReminder, due: Option<Date>) {
+fn set_due_component_values(parts: &NSDateComponents, value: &ReminderDueComponents) {
+    if let Some(value) = value.era {
+        parts.setEra(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setEra(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.year {
+        parts.setYear(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setYear(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.month {
+        parts.setMonth(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setMonth(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.day {
+        parts.setDay(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setDay(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.hour {
+        parts.setHour(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setHour(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.minute {
+        parts.setMinute(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setMinute(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.second {
+        parts.setSecond(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setSecond(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.nanosecond {
+        parts.setNanosecond(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setNanosecond(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.weekday {
+        parts.setWeekday(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setWeekday(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.weekday_ordinal {
+        parts.setWeekdayOrdinal(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setWeekdayOrdinal(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.quarter {
+        parts.setQuarter(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setQuarter(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.week_of_month {
+        parts.setWeekOfMonth(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setWeekOfMonth(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.week_of_year {
+        parts.setWeekOfYear(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setWeekOfYear(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.year_for_week_of_year {
+        parts.setYearForWeekOfYear(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setYearForWeekOfYear(NSDateComponentUndefined);
+    }
+    if let Some(value) = value.day_of_year {
+        parts.setDayOfYear(value.try_into().unwrap_or(NSDateComponentUndefined));
+    } else {
+        parts.setDayOfYear(NSDateComponentUndefined);
+    }
+    parts.setLeapMonth(value.is_leap_month);
+}
+
+fn set_due(
+    reminder: &EKReminder,
+    due: Option<Date>,
+    time: Option<Time>,
+    time_zone: Option<&str>,
+) -> Result<(), BackendError> {
     // SAFETY: The typed reminder is retained for all accesses, and the newly built or retained
     // NSDateComponents object remains alive through assignment back to the reminder.
     unsafe {
         let Some(date) = due else {
             reminder.setDueDateComponents(None);
-            return;
+            return Ok(());
         };
         let parts = reminder
             .dueDateComponents()
@@ -621,8 +750,23 @@ fn set_due(reminder: &EKReminder, due: Option<Date>) {
         parts.setYear(date.year().into());
         parts.setMonth(date.month().into());
         parts.setDay(date.day().into());
+        if let Some(time) = time {
+            parts.setHour(time.hour().into());
+            parts.setMinute(time.minute().into());
+            parts.setSecond(0);
+            parts.setNanosecond(0);
+            let zone = time_zone
+                .map(|name| {
+                    NSTimeZone::timeZoneWithName(&NSString::from_str(name)).ok_or_else(|| {
+                        failed(REMINDERS, &format!("time zone {name:?} isn't available"))
+                    })
+                })
+                .transpose()?;
+            parts.setTimeZone(zone.as_deref());
+        }
         reminder.setDueDateComponents(Some(&parts));
     }
+    Ok(())
 }
 
 fn save(store: &EKEventStore, reminder: &EKReminder, title: &str) -> Result<(), BackendError> {
@@ -678,10 +822,21 @@ fn remove_reminder(
 }
 
 fn to_stored(reminder: &EKReminder) -> StoredReminder {
-    // SAFETY: Every selector is invoked on a typed retained EKReminder and all Objective-C values
+    // SAFETY: Reminder selectors are invoked on a typed retained EKReminder. The alarm array's
+    // typed EKAlarm elements stay retained while absoluteDate is called, and all Objective-C values
     // are copied into owned Rust values before this function returns.
     unsafe {
         let due = reminder.dueDateComponents();
+        let absolute_alarms = reminder
+            .alarms()
+            .map(|alarms| {
+                alarms
+                    .iter()
+                    .filter_map(|alarm| alarm.absoluteDate())
+                    .filter_map(|date| timestamp_from_epoch(date.timeIntervalSince1970()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let url_object = reminder.URL();
         let url = url_object
             .as_ref()
@@ -705,6 +860,7 @@ fn to_stored(reminder: &EKReminder) -> StoredReminder {
                 .lastModifiedDate()
                 .and_then(|d| timestamp_from_epoch(d.timeIntervalSince1970())),
             alarms_present: reminder.hasAlarms(),
+            absolute_alarms: Some(absolute_alarms),
             recurrence_present: reminder.hasRecurrenceRules(),
             backup_partial: reminder.hasAlarms()
                 || reminder.hasRecurrenceRules()
@@ -712,6 +868,10 @@ fn to_stored(reminder: &EKReminder) -> StoredReminder {
             url,
         }
     }
+}
+
+fn stored_due_time(parts: &ReminderDueComponents) -> Option<Time> {
+    time_from_parts(parts.hour?.try_into().ok()?, parts.minute?.try_into().ok()?)
 }
 
 fn reminder_due_components(parts: &NSDateComponents) -> ReminderDueComponents {
@@ -895,14 +1055,35 @@ fn to_reminder(reminder: &EKReminder) -> Reminder {
     // SAFETY: Every selector is invoked on a typed retained EKReminder and all returned values are
     // converted to owned Rust data before this function returns.
     unsafe {
+        let due = reminder.dueDateComponents();
         Reminder {
             id: reminder.calendarItemIdentifier().to_string(),
             title: reminder.title().to_string(),
-            due: reminder
-                .dueDateComponents()
+            due: due
+                .as_ref()
                 .and_then(|parts| date_from_parts(parts.year(), parts.month(), parts.day())),
+            due_time: due
+                .as_ref()
+                .and_then(|parts| time_from_parts(parts.hour(), parts.minute())),
+            due_time_zone: due
+                .as_ref()
+                .and_then(|parts| parts.timeZone())
+                .map(|zone| zone.name().to_string()),
+            due_at: due.as_ref().and_then(|_| due_timestamp(reminder)),
             priority: priority_from_eventkit(reminder.priority()),
         }
+    }
+}
+
+fn due_timestamp(reminder: &EKReminder) -> Option<Timestamp> {
+    // SAFETY: The typed retained EKReminder and its returned NSDateComponents, NSCalendar, and
+    // NSDate stay alive through the synchronous conversion; the timestamp is copied into Rust.
+    unsafe {
+        let parts = reminder.dueDateComponents()?;
+        time_from_parts(parts.hour(), parts.minute())?;
+        let calendar = parts.calendar().or_else(gregorian_calendar)?;
+        let date = calendar.dateFromComponents(&parts)?;
+        timestamp_from_epoch(date.timeIntervalSince1970())
     }
 }
 
@@ -951,6 +1132,13 @@ fn date_from_parts(year: NSInteger, month: NSInteger, day: NSInteger) -> Option<
     .ok()
 }
 
+fn time_from_parts(hour: NSInteger, minute: NSInteger) -> Option<Time> {
+    if [hour, minute].contains(&NSDateComponentUndefined) {
+        return None;
+    }
+    Time::new(hour.try_into().ok()?, minute.try_into().ok()?, 0, 0).ok()
+}
+
 fn failed(app: &'static str, message: &str) -> BackendError {
     BackendError::Failed {
         app,
@@ -961,6 +1149,8 @@ fn failed(app: &'static str, message: &str) -> BackendError {
 #[cfg(test)]
 mod tests {
     use jiff::civil::date;
+    use jiff::tz::offset;
+    use proptest::prelude::*;
 
     use super::*;
     use crate::app::markdown;
@@ -1013,6 +1203,129 @@ mod tests {
         assert_eq!(priority_from_eventkit(6), Some(Priority::Low));
         assert_eq!(priority_from_eventkit(9), Some(Priority::Low));
         assert_eq!(priority_from_eventkit(10), None);
+    }
+
+    #[test]
+    fn reminders_sort_by_displayed_due_fields_title_and_id() {
+        let mut reminders = [
+            Reminder {
+                id: "undated".into(),
+                title: "First alphabetically".into(),
+                due: None,
+                due_time: None,
+                due_time_zone: None,
+                due_at: None,
+                priority: None,
+            },
+            Reminder {
+                id: "date-only".into(),
+                title: "Z date only".into(),
+                due: Some(date(2026, 11, 3)),
+                due_time: None,
+                due_time_zone: None,
+                due_at: None,
+                priority: None,
+            },
+            sort_reminder("b", "Same", 3, Some(9), -5),
+            sort_reminder("a", "Same", 3, Some(9), 9),
+            sort_reminder("later-time", "A", 3, Some(10), 0),
+            sort_reminder("later-date", "A", 4, Some(1), 9),
+        ];
+        reminders.sort_by(compare_reminders);
+        assert_eq!(
+            reminders
+                .iter()
+                .map(|reminder| reminder.id.as_str())
+                .collect::<Vec<_>>(),
+            ["date-only", "a", "b", "later-time", "later-date", "undated"]
+        );
+    }
+
+    fn sort_reminder(
+        id: &str,
+        title: &str,
+        day: i8,
+        hour: Option<i8>,
+        offset_hours: i8,
+    ) -> Reminder {
+        let due = date(2026, 11, day);
+        let due_time = hour.map(|hour| jiff::civil::Time::new(hour, 0, 0, 0).unwrap());
+        let zone = TimeZone::fixed(offset(offset_hours));
+        let due_at = due_time.map(|time| due.to_datetime(time).to_zoned(zone).unwrap().timestamp());
+        Reminder {
+            id: id.into(),
+            title: title.into(),
+            due: Some(due),
+            due_time,
+            due_time_zone: due_time.map(|_| format!("zone-{offset_hours}")),
+            due_at,
+            priority: None,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn sorting_randomized_mixed_zones_never_panics_and_is_deterministic(
+            rows in proptest::collection::vec(
+                (1_i8..=28, proptest::option::of(0_i8..24), 0_usize..4, "[A-Z]{0,8}"),
+                18..80,
+            )
+        ) {
+            let offsets = [-10, -5, 0, 9];
+            let mut reminders = rows
+                .into_iter()
+                .enumerate()
+                .map(|(index, (day, hour, zone, title))| {
+                    sort_reminder(
+                        &format!("random-{index:03}"),
+                        &title,
+                        day,
+                        hour,
+                        offsets[zone],
+                    )
+                })
+                .collect::<Vec<_>>();
+            reminders.extend([
+                sort_reminder("tokyo", "A", 4, Some(1), 9),
+                sort_reminder("new-york", "C", 3, Some(20), -5),
+                sort_reminder("date-only", "B", 4, None, 0),
+            ]);
+            let mut first = reminders.clone();
+            let mut second = reminders;
+            first.sort_by(compare_reminders);
+            second.sort_by(compare_reminders);
+            prop_assert_eq!(
+                first.iter().map(|reminder| &reminder.id).collect::<Vec<_>>(),
+                second.iter().map(|reminder| &reminder.id).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn unrecorded_alarm_data_is_ignored_during_conflict_checks() {
+        let mut current = StoredReminder {
+            id: "r1".into(),
+            list_id: "l1".into(),
+            title: "Wake up".into(),
+            notes: None,
+            due: None,
+            due_components: None,
+            priority: None,
+            completed: false,
+            modified: None,
+            alarms_present: true,
+            absolute_alarms: Some(vec!["2026-11-03T14:00:00Z".parse().unwrap()]),
+            recurrence_present: false,
+            url: None,
+            backup_partial: true,
+        };
+        let mut old_record = current.clone();
+        old_record.absolute_alarms = None;
+        assert!(stored_matches(&current, &old_record));
+        old_record.absolute_alarms = Some(Vec::new());
+        assert!(!stored_matches(&current, &old_record));
+        current.absolute_alarms = Some(Vec::new());
+        assert!(stored_matches(&current, &old_record));
     }
 
     #[test]
@@ -1161,6 +1474,8 @@ mod tests {
                 title: "nib live test (safe to delete)".into(),
                 list: None,
                 due: Some(date(2030, 1, 15)),
+                due_time: None,
+                due_time_zone: None,
                 priority: Some(Priority::Low),
             })
             .unwrap();
@@ -1196,6 +1511,8 @@ mod tests {
                 title: title.clone(),
                 notes: None,
                 due: None,
+                due_time: None,
+                due_time_zone: None,
                 priority: None,
             }])
             .unwrap()
@@ -1267,6 +1584,8 @@ mod tests {
                 title: title.clone(),
                 notes: Some(notes.into()),
                 due: None,
+                due_time: None,
+                due_time_zone: None,
                 priority: None,
             }])
             .unwrap();

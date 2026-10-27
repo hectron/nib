@@ -24,32 +24,34 @@ pub fn run(
             let reminders = backends.reminders.list()?;
             let (overdue, remaining): (Vec<_>, Vec<_>) = reminders
                 .into_iter()
-                .partition(|reminder| reminder.due.is_some_and(|due| due < date));
+                .partition(|reminder| output::reminder_is_overdue(reminder, now));
             let due_today = remaining
                 .into_iter()
-                .filter(|reminder| reminder.due == Some(date))
+                .filter(|reminder| output::reminder_is_due_today(reminder, date, now))
                 .collect::<Vec<_>>();
             let events = backends.calendar.events(query)?;
-            output::today(&overdue, &due_today, &events, date, json, style)
+            output::today(&overdue, &due_today, &events, now, json, style)
         }
         Action::NewNote(note) => {
             output::single(&backends.notes.create(note)?, "Created note", json, style)
         }
-        Action::ListNotes(query) => {
-            output::list(&backends.notes.list(query)?, json, now.date(), style)
-        }
-        Action::AddTask(reminder) => {
-            output::single(&backends.reminders.add(reminder)?, "Added", json, style)
-        }
-        Action::ListTasks => output::list(&backends.reminders.list()?, json, now.date(), style),
+        Action::ListNotes(query) => output::list(&backends.notes.list(query)?, json, now, style),
+        Action::AddTask(reminder) => output::single_at(
+            &backends.reminders.add(reminder)?,
+            "Added",
+            json,
+            style,
+            now,
+        ),
+        Action::ListTasks => output::list(&backends.reminders.list()?, json, now, style),
         Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
         Action::ListEvents(query) => {
-            output::list(&backends.calendar.events(query)?, json, now.date(), style)
+            output::list(&backends.calendar.events(query)?, json, now, style)
         }
         Action::Log => output::journal(
             &journal::summaries(now.timestamp(), host)?,
             json,
-            now.date(),
+            now,
             style,
         ),
         Action::Undo {
@@ -183,6 +185,9 @@ mod tests {
                 id: "reminder-3".into(),
                 title: reminder.title,
                 due: reminder.due,
+                due_time: reminder.due_time,
+                due_time_zone: reminder.due_time_zone,
+                due_at: None,
                 priority: reminder.priority,
             })
         }
@@ -193,12 +198,18 @@ mod tests {
                     id: "reminder-1".into(),
                     title: "Review pull request".into(),
                     due: Some(date(2026, 10, 27)),
+                    due_time: None,
+                    due_time_zone: None,
+                    due_at: None,
                     priority: Some(Priority::High),
                 },
                 Reminder {
                     id: "reminder-2".into(),
                     title: "Buy groceries".into(),
                     due: None,
+                    due_time: None,
+                    due_time_zone: None,
+                    due_at: None,
                     priority: None,
                 },
             ])
@@ -377,6 +388,9 @@ mod tests {
             id: id.into(),
             title: title.into(),
             due,
+            due_time: None,
+            due_time_zone: None,
+            due_at: None,
             priority: None,
         }
     }
@@ -633,6 +647,23 @@ mod tests {
     }
 
     #[test]
+    fn today_splits_timed_reminders_at_the_current_time() {
+        let mut past = reminder("past", "Morning task", Some(now().date()));
+        past.due_time = Some(jiff::civil::time(9, 0, 0, 0));
+        let mut future = reminder("future", "Afternoon task", Some(now().date()));
+        future.due_time = Some(jiff::civil::time(15, 0, 0, 0));
+        assert_snapshot!(agenda(&["today"], vec![past, future], Vec::new()), @r"
+        Overdue
+        TITLE         DUE               PRIORITY
+        Morning task  2026-10-26 09:00
+
+        Due today
+        TITLE           DUE               PRIORITY
+        Afternoon task  2026-10-26 15:00
+        ");
+    }
+
+    #[test]
     fn today_json_has_one_array_per_section() {
         let reminders = vec![
             reminder(
@@ -659,6 +690,8 @@ mod tests {
               "id": "reminder-overdue",
               "title": "Submit expense report",
               "due": "2026-10-24",
+              "due_time": null,
+              "due_time_zone": null,
               "priority": null
             }
           ],
@@ -667,6 +700,8 @@ mod tests {
               "id": "reminder-today",
               "title": "Review pull request",
               "due": "2026-10-26",
+              "due_time": null,
+              "due_time_zone": null,
               "priority": null
             }
           ],
@@ -734,6 +769,14 @@ mod tests {
             nib(&["t", "Pay", "rent", "-d", "tomorrow"]),
             @r#"Added "Pay rent" (due 2026-10-27)"#
         );
+        assert_snapshot!(
+            nib(&["t", "Call", "London", "tomorrow", "09:00"]),
+            @r#"Added "Call London" (due 2026-10-27 09:00)"#
+        );
+        assert_snapshot!(
+            nib(&["task", "add", "Call London", "--due", "9:30pm"]),
+            @r#"Added "Call London" (due 2026-10-26 21:30)"#
+        );
     }
 
     #[test]
@@ -745,6 +788,8 @@ mod tests {
           "id": "reminder-3",
           "title": "Review pull request",
           "due": "2026-11-03",
+          "due_time": null,
+          "due_time_zone": null,
           "priority": "high"
         }
         "#
@@ -768,12 +813,16 @@ mod tests {
             "id": "reminder-1",
             "title": "Review pull request",
             "due": "2026-10-27",
+            "due_time": null,
+            "due_time_zone": null,
             "priority": "high"
           },
           {
             "id": "reminder-2",
             "title": "Buy groceries",
             "due": null,
+            "due_time": null,
+            "due_time_zone": null,
             "priority": null
           }
         ]
@@ -870,6 +919,9 @@ mod tests {
                     id: "recorded".into(),
                     title: reminder.title,
                     due: reminder.due,
+                    due_time: reminder.due_time,
+                    due_time_zone: reminder.due_time_zone,
+                    due_at: None,
                     priority: reminder.priority,
                 })
             }
@@ -919,6 +971,8 @@ mod tests {
                 title: "Review PR".into(),
                 list: Some("Snowglobe".into()),
                 due: None,
+                due_time: None,
+                due_time_zone: None,
                 priority: Some(Priority::Medium),
             })
         );

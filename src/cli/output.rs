@@ -7,18 +7,23 @@ use miette::{IntoDiagnostic, Result};
 use serde::{Serialize, Serializer};
 
 use crate::app::doctor::{Check, CheckStatus};
-use crate::domain::{ChangeCounts, Event, JournalSummary, Note, Priority, Reminder};
+use crate::domain::{
+    ChangeCounts, Event, JournalSummary, Note, Priority, Reminder, time_zone_is_local_at,
+};
 
 pub trait Tabular: Serialize {
     const HEADER: &'static [&'static str];
     const TITLE_COLUMN: usize;
-    fn row(&self) -> Vec<String>;
-    fn cell_style(&self, column: usize, today: Date) -> Option<CellStyle>;
+    fn row(&self, now: &Zoned) -> Vec<String>;
+    fn cell_style(&self, column: usize, now: &Zoned) -> Option<CellStyle>;
 }
 
 pub trait Summary: Serialize {
     fn title(&self) -> &str;
     fn detail(&self) -> Option<String>;
+    fn detail_at(&self, _now: Option<&Zoned>) -> Option<String> {
+        self.detail()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -47,7 +52,7 @@ pub enum CellStyle {
     Dim,
 }
 
-pub fn list<T: Tabular>(items: &[T], json: bool, today: Date, style: Style) -> Result<String> {
+pub fn list<T: Tabular>(items: &[T], json: bool, now: &Zoned, style: Style) -> Result<String> {
     if json {
         return to_json(items, style);
     }
@@ -75,10 +80,10 @@ pub fn list<T: Tabular>(items: &[T], json: bool, today: Date, style: Style) -> R
     header.max_height(1);
     table.set_header(header);
     for item in items {
-        let mut row = Row::from(item.row().iter().enumerate().map(|(column, text)| {
+        let mut row = Row::from(item.row(now).iter().enumerate().map(|(column, text)| {
             let cell = Cell::new(clean(text));
             if style.color {
-                marked_cell(cell, item.cell_style(column, today))
+                marked_cell(cell, item.cell_style(column, now))
             } else {
                 cell
             }
@@ -96,10 +101,33 @@ pub fn list<T: Tabular>(items: &[T], json: bool, today: Date, style: Style) -> R
 }
 
 pub fn single<T: Summary>(item: &T, verb: &str, json: bool, style: Style) -> Result<String> {
+    single_with_now(item, verb, json, style, None)
+}
+
+pub fn single_at<T: Summary>(
+    item: &T,
+    verb: &str,
+    json: bool,
+    style: Style,
+    now: &Zoned,
+) -> Result<String> {
+    single_with_now(item, verb, json, style, Some(now))
+}
+
+fn single_with_now<T: Summary>(
+    item: &T,
+    verb: &str,
+    json: bool,
+    style: Style,
+    now: Option<&Zoned>,
+) -> Result<String> {
     if json {
         to_json(item, style)
     } else {
-        let detail = item.detail().map(|d| format!(" {d}")).unwrap_or_default();
+        let detail = item
+            .detail_at(now)
+            .map(|d| format!(" {d}"))
+            .unwrap_or_default();
         Ok(clean(&format!("{verb} \"{}\"{detail}", item.title())))
     }
 }
@@ -108,7 +136,7 @@ pub fn today(
     overdue: &[Reminder],
     due_today: &[Reminder],
     events: &[Event],
-    today: Date,
+    now: &Zoned,
     json: bool,
     style: Style,
 ) -> Result<String> {
@@ -123,9 +151,9 @@ pub fn today(
         );
     }
     let sections = [
-        ("Overdue", list(overdue, false, today, style)?),
-        ("Due today", list(due_today, false, today, style)?),
-        ("Events", list(events, false, today, style)?),
+        ("Overdue", list(overdue, false, now, style)?),
+        ("Due today", list(due_today, false, now, style)?),
+        ("Events", list(events, false, now, style)?),
     ];
     let rendered = sections
         .into_iter()
@@ -142,10 +170,10 @@ pub fn today(
 pub fn journal(
     entries: &[JournalSummary],
     json: bool,
-    today: Date,
+    now: &Zoned,
     style: Style,
 ) -> Result<String> {
-    list(entries, json, today, style)
+    list(entries, json, now, style)
 }
 
 pub fn undo(
@@ -388,7 +416,7 @@ impl Tabular for Note {
     const HEADER: &'static [&'static str] = &["TITLE", "FOLDER", "LOCKED"];
     const TITLE_COLUMN: usize = 0;
 
-    fn row(&self) -> Vec<String> {
+    fn row(&self, _: &Zoned) -> Vec<String> {
         vec![
             self.title.clone(),
             self.folder.clone().unwrap_or_default(),
@@ -400,7 +428,7 @@ impl Tabular for Note {
         ]
     }
 
-    fn cell_style(&self, column: usize, _: Date) -> Option<CellStyle> {
+    fn cell_style(&self, column: usize, _: &Zoned) -> Option<CellStyle> {
         match column {
             1 if self.folder.is_some() => Some(CellStyle::Cyan),
             2 if self.locked => Some(CellStyle::Yellow),
@@ -423,20 +451,20 @@ impl Tabular for Reminder {
     const HEADER: &'static [&'static str] = &["TITLE", "DUE", "PRIORITY"];
     const TITLE_COLUMN: usize = 0;
 
-    fn row(&self) -> Vec<String> {
+    fn row(&self, now: &Zoned) -> Vec<String> {
         vec![
             self.title.clone(),
-            self.due.map(|d| d.to_string()).unwrap_or_default(),
+            format_reminder_due(self, Some(now)),
             self.priority
                 .map(|p| p.as_str().to_owned())
                 .unwrap_or_default(),
         ]
     }
 
-    fn cell_style(&self, column: usize, today: Date) -> Option<CellStyle> {
+    fn cell_style(&self, column: usize, now: &Zoned) -> Option<CellStyle> {
         match column {
-            1 if self.due.is_some_and(|due| due < today) => Some(CellStyle::Red),
-            1 if self.due == Some(today) => Some(CellStyle::Yellow),
+            1 if reminder_is_overdue(self, now) => Some(CellStyle::Red),
+            1 if reminder_is_due_today(self, now.date(), now) => Some(CellStyle::Yellow),
             2 => match self.priority {
                 Some(Priority::High) => Some(CellStyle::Red),
                 Some(Priority::Medium) => Some(CellStyle::Yellow),
@@ -454,26 +482,93 @@ impl Summary for Reminder {
     }
 
     fn detail(&self) -> Option<String> {
-        let details: Vec<String> = [
-            self.due.map(|d| format!("due {d}")),
-            self.priority.map(|p| format!("{} priority", p.as_str())),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        if details.is_empty() {
-            None
-        } else {
-            Some(format!("({})", details.join(", ")))
+        reminder_detail(self, None)
+    }
+
+    fn detail_at(&self, now: Option<&Zoned>) -> Option<String> {
+        reminder_detail(self, now)
+    }
+}
+
+fn reminder_detail(reminder: &Reminder, now: Option<&Zoned>) -> Option<String> {
+    let details: Vec<String> = [
+        reminder
+            .due
+            .map(|_| format!("due {}", format_reminder_due(reminder, now))),
+        reminder
+            .priority
+            .map(|p| format!("{} priority", p.as_str())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if details.is_empty() {
+        None
+    } else {
+        Some(format!("({})", details.join(", ")))
+    }
+}
+
+fn format_reminder_due(reminder: &Reminder, now: Option<&Zoned>) -> String {
+    let Some(date) = reminder.due else {
+        return String::new();
+    };
+    let Some(time) = reminder.due_time else {
+        return date.to_string();
+    };
+    let mut due = format!("{date} {}", time.strftime("%H:%M"));
+    if let Some(zone) = reminder.due_time_zone.as_deref() {
+        let is_local = now.is_some_and(|now| {
+            time_zone_is_local_at(zone, now.time_zone(), date, time).is_ok_and(|local| local)
+        });
+        if !is_local {
+            due.push(' ');
+            due.push_str(zone);
         }
     }
+    due
+}
+
+pub(crate) fn reminder_is_overdue(reminder: &Reminder, now: &Zoned) -> bool {
+    let Some(date) = reminder.due else {
+        return false;
+    };
+    let Some(time) = reminder.due_time else {
+        return date < now.date();
+    };
+    if let Some(due_at) = reminder.due_at {
+        return due_at < now.timestamp();
+    }
+    let civil = date.at(time.hour(), time.minute(), 0, 0);
+    civil < now.datetime()
+}
+
+pub(crate) fn reminder_is_due_today(reminder: &Reminder, date: Date, now: &Zoned) -> bool {
+    if reminder.due_time.is_some()
+        && let Some(due_at) = reminder.due_at
+    {
+        return due_at.to_zoned(now.time_zone().clone()).date() == date;
+    }
+    reminder.due == Some(date)
+}
+
+#[cfg(test)]
+fn zoned_due_is_overdue(
+    civil: jiff::civil::DateTime,
+    zone: &jiff::tz::TimeZone,
+    now: &Zoned,
+) -> Option<bool> {
+    civil
+        .to_zoned(zone.clone())
+        .ok()
+        .map(|due| due.timestamp() < now.timestamp())
 }
 
 impl Tabular for Event {
     const HEADER: &'static [&'static str] = &["START", "TITLE"];
     const TITLE_COLUMN: usize = 1;
 
-    fn row(&self) -> Vec<String> {
+    fn row(&self, _: &Zoned) -> Vec<String> {
         let start = if self.all_day {
             self.start.strftime("%Y-%m-%d all day")
         } else {
@@ -482,7 +577,7 @@ impl Tabular for Event {
         vec![start.to_string(), self.title.clone()]
     }
 
-    fn cell_style(&self, column: usize, _: Date) -> Option<CellStyle> {
+    fn cell_style(&self, column: usize, _: &Zoned) -> Option<CellStyle> {
         (column == 0).then_some(CellStyle::Dim)
     }
 }
@@ -514,6 +609,8 @@ struct ReminderJson<'a> {
     id: &'a str,
     title: &'a str,
     due: Option<Date>,
+    due_time: Option<String>,
+    due_time_zone: Option<&'a str>,
     priority: Option<&'static str>,
 }
 
@@ -523,6 +620,14 @@ impl Serialize for Reminder {
             id: &self.id,
             title: &self.title,
             due: self.due,
+            due_time: self
+                .due
+                .and(self.due_time)
+                .map(|time| time.strftime("%H:%M").to_string()),
+            due_time_zone: self
+                .due
+                .and(self.due_time)
+                .and(self.due_time_zone.as_deref()),
             priority: self.priority.map(Priority::as_str),
         }
         .serialize(serializer)
@@ -612,7 +717,7 @@ impl Tabular for JournalSummary {
     ];
     const TITLE_COLUMN: usize = 0;
 
-    fn row(&self) -> Vec<String> {
+    fn row(&self, _: &Zoned) -> Vec<String> {
         vec![
             self.id.clone(),
             self.written_at.to_string(),
@@ -631,7 +736,7 @@ impl Tabular for JournalSummary {
         ]
     }
 
-    fn cell_style(&self, _: usize, _: Date) -> Option<CellStyle> {
+    fn cell_style(&self, _: usize, _: &Zoned) -> Option<CellStyle> {
         None
     }
 }
@@ -692,6 +797,13 @@ mod tests {
         date(2026, 10, 26)
     }
 
+    fn test_now() -> Zoned {
+        test_today()
+            .at(9, 0, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-4)))
+            .unwrap()
+    }
+
     fn style(color: bool) -> Style {
         Style { color, width: None }
     }
@@ -742,12 +854,18 @@ mod tests {
                 id: "reminder-1".into(),
                 title: "Book flights to Lisbon for the November offsite".into(),
                 due: Some(date(2026, 10, 27)),
+                due_time: None,
+                due_time_zone: None,
+                due_at: None,
                 priority: Some(Priority::High),
             },
             Reminder {
                 id: "reminder-2".into(),
                 title: "Buy groceries".into(),
                 due: None,
+                due_time: None,
+                due_time_zone: None,
+                due_at: None,
                 priority: None,
             },
         ]
@@ -755,7 +873,7 @@ mod tests {
 
     #[test]
     fn rows_stay_whole_without_a_width() {
-        assert_snapshot!(list(&reminders(), false, test_today(), Style::default()).unwrap(), @r"
+        assert_snapshot!(list(&reminders(), false, &test_now(), Style::default()).unwrap(), @r"
         TITLE                                            DUE         PRIORITY
         Book flights to Lisbon for the November offsite  2026-10-27  high
         Buy groceries
@@ -768,11 +886,178 @@ mod tests {
             color: false,
             width: Some(40),
         };
-        assert_snapshot!(list(&reminders(), false, test_today(), style).unwrap(), @r"
+        assert_snapshot!(list(&reminders(), false, &test_now(), style).unwrap(), @r"
         TITLE             DUE         PRIORITY
         Book flights to…  2026-10-27  high
         Buy groceries
         ");
+    }
+
+    #[test]
+    fn reminder_tables_show_times_and_only_foreign_zone_names() {
+        let reminders = [
+            Reminder {
+                id: "local".into(),
+                title: "Local call".into(),
+                due: Some(test_today()),
+                due_time: Some(jiff::civil::time(10, 0, 0, 0)),
+                due_time_zone: Some("GMT-0400".into()),
+                due_at: None,
+                priority: None,
+            },
+            Reminder {
+                id: "foreign".into(),
+                title: "East coast call".into(),
+                due: Some(test_today()),
+                due_time: Some(jiff::civil::time(11, 0, 0, 0)),
+                due_time_zone: Some("America/New_York".into()),
+                due_at: None,
+                priority: None,
+            },
+        ];
+        let now = test_today()
+            .at(9, 0, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-4)))
+            .unwrap();
+        assert_snapshot!(list(&reminders, false, &now, Style::default()).unwrap(), @r"
+        TITLE            DUE                                PRIORITY
+        Local call       2026-10-26 10:00
+        East coast call  2026-10-26 11:00 America/New_York
+        ");
+    }
+
+    #[test]
+    fn offset_zone_visibility_uses_the_offset_at_the_due_time() {
+        let reminder = |id: &str, zone: &str| Reminder {
+            id: id.into(),
+            title: id.into(),
+            due: Some(date(2026, 12, 1)),
+            due_time: Some(jiff::civil::time(9, 0, 0, 0)),
+            due_time_zone: Some(zone.into()),
+            due_at: None,
+            priority: None,
+        };
+        let now = date(2026, 10, 26)
+            .at(9, 0, 0, 0)
+            .to_zoned(TimeZone::posix("CST6CDT,M3.2.0,M11.1.0").unwrap())
+            .unwrap();
+        let reminders = [
+            reminder("local", "GMT-0600"),
+            reminder("foreign", "GMT-0500"),
+        ];
+        assert_snapshot!(list(&reminders, false, &now, Style::default()).unwrap(), @r"
+        TITLE    DUE                        PRIORITY
+        local    2026-12-01 09:00
+        foreign  2026-12-01 09:00 GMT-0500
+        ");
+        assert_eq!(
+            single_at(&reminders[0], "Added", false, Style::default(), &now).unwrap(),
+            "Added \"local\" (due 2026-12-01 09:00)"
+        );
+        assert_eq!(
+            single_at(&reminders[1], "Added", false, Style::default(), &now).unwrap(),
+            "Added \"foreign\" (due 2026-12-01 09:00 GMT-0500)"
+        );
+    }
+
+    #[test]
+    fn reminder_json_has_separate_time_and_zone_fields() {
+        let reminder = Reminder {
+            id: "timed".into(),
+            title: "Call team".into(),
+            due: Some(test_today()),
+            due_time: Some(jiff::civil::time(9, 30, 0, 0)),
+            due_time_zone: Some("America/New_York".into()),
+            due_at: None,
+            priority: None,
+        };
+        assert_snapshot!(single(&reminder, "Added", true, Style::default()).unwrap(), @r#"
+        {
+          "id": "timed",
+          "title": "Call team",
+          "due": "2026-10-26",
+          "due_time": "09:30",
+          "due_time_zone": "America/New_York",
+          "priority": null
+        }
+        "#);
+    }
+
+    #[test]
+    fn undated_reminder_json_hides_orphaned_time_fields() {
+        let reminder = Reminder {
+            id: "undated".into(),
+            title: "Odd components".into(),
+            due: None,
+            due_time: Some(jiff::civil::time(9, 30, 0, 0)),
+            due_time_zone: Some("America/New_York".into()),
+            due_at: None,
+            priority: None,
+        };
+        let value = serde_json::to_value(reminder).unwrap();
+        assert_eq!(value["due_time"], Value::Null);
+        assert_eq!(value["due_time_zone"], Value::Null);
+    }
+
+    #[test]
+    fn overdue_comparison_has_defined_gap_and_fold_behavior() {
+        let zone = TimeZone::posix("EST5EDT,M3.2.0,M11.1.0").unwrap();
+        let gap = date(2027, 3, 14).at(2, 30, 0, 0);
+        let before_gap_due = date(2027, 3, 14)
+            .at(3, 15, 0, 0)
+            .to_zoned(zone.clone())
+            .unwrap();
+        let after_gap_due = date(2027, 3, 14)
+            .at(3, 45, 0, 0)
+            .to_zoned(zone.clone())
+            .unwrap();
+        assert_eq!(
+            zoned_due_is_overdue(gap, &zone, &before_gap_due),
+            Some(false)
+        );
+        assert_eq!(zoned_due_is_overdue(gap, &zone, &after_gap_due), Some(true));
+
+        let fold = date(2026, 11, 1).at(1, 30, 0, 0);
+        let later_fold = zone.to_ambiguous_zoned(fold).later().unwrap();
+        assert_eq!(zoned_due_is_overdue(fold, &zone, &later_fold), Some(true));
+    }
+
+    #[test]
+    fn timed_today_and_overdue_checks_use_the_due_instant_in_the_local_zone() {
+        let local = TimeZone::posix("CST6CDT,M3.2.0,M11.1.0").unwrap();
+        let now = date(2026, 10, 26).at(20, 0, 0, 0).to_zoned(local).unwrap();
+        let tokyo_at = date(2026, 10, 27)
+            .at(11, 0, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(9)))
+            .unwrap()
+            .timestamp();
+        let honolulu_at = date(2026, 10, 26)
+            .at(23, 0, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-10)))
+            .unwrap()
+            .timestamp();
+        let tokyo = Reminder {
+            id: "tokyo".into(),
+            title: "Tokyo".into(),
+            due: Some(date(2026, 10, 27)),
+            due_time: Some(jiff::civil::time(11, 0, 0, 0)),
+            due_time_zone: Some("Asia/Tokyo".into()),
+            due_at: Some(tokyo_at),
+            priority: None,
+        };
+        let honolulu = Reminder {
+            id: "honolulu".into(),
+            title: "Honolulu".into(),
+            due: Some(date(2026, 10, 26)),
+            due_time: Some(jiff::civil::time(23, 0, 0, 0)),
+            due_time_zone: Some("Pacific/Honolulu".into()),
+            due_at: Some(honolulu_at),
+            priority: None,
+        };
+        assert!(reminder_is_due_today(&tokyo, now.date(), &now));
+        assert!(!reminder_is_due_today(&honolulu, now.date(), &now));
+        assert!(!reminder_is_overdue(&tokyo, &now));
+        assert!(!reminder_is_overdue(&honolulu, &now));
     }
 
     #[test]
@@ -782,22 +1067,31 @@ mod tests {
                 id: "overdue".into(),
                 title: "Submit expense report".into(),
                 due: Some(date(2026, 10, 24)),
+                due_time: None,
+                due_time_zone: None,
+                due_at: None,
                 priority: Some(Priority::High),
             },
             Reminder {
                 id: "today".into(),
                 title: "Review pull request".into(),
                 due: Some(test_today()),
+                due_time: None,
+                due_time_zone: None,
+                due_at: None,
                 priority: Some(Priority::Medium),
             },
             Reminder {
                 id: "future".into(),
                 title: "Plan team retreat".into(),
                 due: Some(date(2026, 11, 2)),
+                due_time: None,
+                due_time_zone: None,
+                due_at: None,
                 priority: Some(Priority::Low),
             },
         ];
-        let colored = list(&reminders, false, test_today(), style(true)).unwrap();
+        let colored = list(&reminders, false, &test_now(), style(true)).unwrap();
         assert_snapshot!(visible_escapes(&colored), @r"
         \x1b[1mTITLE\x1b[0m                  \x1b[1mDUE\x1b[0m         \x1b[1mPRIORITY\x1b[0m
         Submit expense report  \x1b[31m2026-10-24\x1b[0m  \x1b[31mhigh\x1b[0m
@@ -812,7 +1106,7 @@ mod tests {
         let colored = list(
             &reminders(),
             false,
-            test_today(),
+            &test_now(),
             Style {
                 color: true,
                 width: Some(40),
@@ -822,7 +1116,7 @@ mod tests {
         let plain = list(
             &reminders(),
             false,
-            test_today(),
+            &test_now(),
             Style {
                 color: false,
                 width: Some(40),
@@ -841,7 +1135,7 @@ mod tests {
             modified: None,
             locked: true,
         };
-        let note_table = list(&[note], false, test_today(), style(true)).unwrap();
+        let note_table = list(&[note], false, &test_now(), style(true)).unwrap();
         assert!(note_table.contains("\u{1b}[36mWork\u{1b}[0m"));
         assert!(note_table.contains("\u{1b}[33myes\u{1b}[0m"));
 
@@ -854,7 +1148,7 @@ mod tests {
                 .unwrap(),
             all_day: false,
         };
-        let event_table = list(&[event], false, test_today(), style(true)).unwrap();
+        let event_table = list(&[event], false, &test_now(), style(true)).unwrap();
         assert!(event_table.contains("\u{1b}[2m2026-10-26 14:00\u{1b}[0m"));
         assert_eq!(
             styled_heading("Events", style(true)),
@@ -875,7 +1169,7 @@ mod tests {
             single(&note, "Created note", false, Style::default()).unwrap(),
             @r#"Created note "Hi�]0;pwned� there""#
         );
-        assert_snapshot!(list(std::slice::from_ref(&note), false, test_today(), Style::default()).unwrap(), @r"
+        assert_snapshot!(list(std::slice::from_ref(&note), false, &test_now(), Style::default()).unwrap(), @r"
         TITLE               FOLDER  LOCKED
         Hi�]0;pwned� there
         ");
@@ -899,6 +1193,9 @@ mod tests {
             id: "reminder-1".into(),
             title: "Review pull request".into(),
             due: Some(date(2026, 10, 27)),
+            due_time: None,
+            due_time_zone: None,
+            due_at: None,
             priority: Some(Priority::High),
         };
         assert_snapshot!(

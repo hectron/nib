@@ -161,8 +161,8 @@ struct TaskOpts {
     /// Reminder list to add to
     #[arg(short, long, value_name = "NAME", requires = "words")]
     list: Option<String>,
-    /// Due date: natural date or YYYY-MM-DD
-    #[arg(short, long, value_name = "DATE", value_parser = due, requires = "words")]
+    /// Due date and optional time
+    #[arg(short, long, value_name = "DUE", value_parser = due, requires = "words")]
     due: Option<Due>,
     #[arg(short, long, value_enum, requires = "words")]
     priority: Option<Priority>,
@@ -220,13 +220,23 @@ impl TaskOpts {
             }
         };
         let due = self.due.or(inline.due);
+        let (due, due_time) = due
+            .map(|due| due.on(now.date()))
+            .transpose()?
+            .map_or((None, None), |(date, time)| (Some(date), time));
+        let due_time_zone = due
+            .zip(due_time)
+            .map(|(date, time)| crate::domain::local_time_zone_name_at(now.time_zone(), date, time))
+            .transpose()?;
         Ok(Action::AddTask(NewReminder {
             title: inline.title,
             list: self
                 .list
                 .or(inline.list)
                 .or_else(|| config.task.list.clone()),
-            due: due.map(|due| due.on(now.date())).transpose()?,
+            due,
+            due_time,
+            due_time_zone,
             priority: self.priority.or(inline.priority).or(config.task.priority),
         }))
     }
@@ -337,6 +347,15 @@ mod tests {
             .unwrap()
     }
 
+    fn named_fixed_zone(name: &str) -> TimeZone {
+        let mut data = vec![0; 54];
+        data[..4].copy_from_slice(b"TZif");
+        data[36..40].copy_from_slice(&1_u32.to_be_bytes());
+        data[40..44].copy_from_slice(&4_u32.to_be_bytes());
+        data[50..].copy_from_slice(b"UTC\0");
+        TimeZone::tzif(name, &data).unwrap()
+    }
+
     fn parse_at(now: &Zoned, args: &[&str]) -> Result<Action, clap::Error> {
         Cli::try_parse_from(["nib"].iter().chain(args))
             .map(|cli| cli.command.into_action(now, &Config::default()).unwrap())
@@ -381,6 +400,8 @@ mod tests {
             title: title.into(),
             list: None,
             due,
+            due_time: None,
+            due_time_zone: None,
             priority,
         })
     }
@@ -588,21 +609,29 @@ mod tests {
     }
 
     #[test]
-    fn due_must_be_a_date() {
-        let errors: Vec<String> = ["banana", "", "2026-1-5", "2026-11-03T10:00", "2026-02-30"]
-            .into_iter()
-            .map(|due| {
-                let err = parse(&["t", "Pay", "rent", "--due", due]).unwrap_err();
-                assert_eq!(err.kind(), ErrorKind::ValueValidation, "--due {due:?}");
-                err.to_string().lines().next().unwrap().to_owned()
-            })
-            .collect();
+    fn due_must_be_a_valid_date_or_time() {
+        let errors: Vec<String> = [
+            "banana",
+            "",
+            "2026-1-5",
+            "25:00",
+            "2026-11-03T25:00",
+            "2026-02-30",
+        ]
+        .into_iter()
+        .map(|due| {
+            let err = parse(&["t", "Pay", "rent", "--due", due]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "--due {due:?}");
+            err.to_string().lines().next().unwrap().to_owned()
+        })
+        .collect();
         assert_snapshot!(errors.join("\n"), @"
-        error: invalid value 'banana' for '--due <DATE>': expected today, tomorrow, a weekday, next WEEKDAY, in Nd, in Nw, +Nd, +Nw, eom, or YYYY-MM-DD
-        error: invalid value '' for '--due <DATE>': expected today, tomorrow, a weekday, next WEEKDAY, in Nd, in Nw, +Nd, +Nw, eom, or YYYY-MM-DD
-        error: invalid value '2026-1-5' for '--due <DATE>': expected YYYY-MM-DD
-        error: invalid value '2026-11-03T10:00' for '--due <DATE>': expected YYYY-MM-DD
-        error: invalid value '2026-02-30' for '--due <DATE>': that date doesn't exist
+        error: invalid value 'banana' for '--due <DUE>': expected today, tomorrow, a weekday, next WEEKDAY, in Nd, in Nw, +Nd, +Nw, eom, YYYY-MM-DD, a time, or a date followed by a time
+        error: invalid value '' for '--due <DUE>': expected today, tomorrow, a weekday, next WEEKDAY, in Nd, in Nw, +Nd, +Nw, eom, YYYY-MM-DD, a time, or a date followed by a time
+        error: invalid value '2026-1-5' for '--due <DUE>': expected YYYY-MM-DD
+        error: invalid value '25:00' for '--due <DUE>': that time doesn't exist
+        error: invalid value '2026-11-03T25:00' for '--due <DUE>': that time doesn't exist
+        error: invalid value '2026-02-30' for '--due <DUE>': that date doesn't exist
         ");
     }
 
@@ -620,6 +649,8 @@ mod tests {
                     title: "Pay rent".into(),
                     list: Some("bills".into()),
                     due: Some(date(2026, 10, 30)),
+                    due_time: None,
+                    due_time_zone: None,
                     priority: Some(Priority::High),
                 }),
                 "nib {}",
@@ -651,6 +682,53 @@ mod tests {
                 args.join(" ")
             );
         }
+    }
+
+    #[test]
+    fn timed_quick_add_pins_to_the_local_zone() {
+        let named_now = date(2026, 10, 26)
+            .at(9, 30, 0, 0)
+            .to_zoned(named_fixed_zone("America/Chicago"))
+            .unwrap();
+        let named = action_with_config(
+            &named_now,
+            &["t", "Call", "team", "9am"],
+            &Config::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            named,
+            Action::AddTask(NewReminder { due_time_zone: Some(zone), .. })
+                if zone == "America/Chicago"
+        ));
+
+        let posix_now = date(2026, 10, 26)
+            .at(9, 30, 0, 0)
+            .to_zoned(TimeZone::posix("CST6CDT,M3.2.0,M11.1.0").unwrap())
+            .unwrap();
+        let fixed = action_with_config(
+            &posix_now,
+            &["t", "Call", "team", "9am"],
+            &Config::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            fixed,
+            Action::AddTask(NewReminder { due_time_zone: Some(zone), .. })
+                if zone == "GMT-0500"
+        ));
+
+        let winter = action_with_config(
+            &posix_now,
+            &["t", "Call", "2026-12-01", "9am"],
+            &Config::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            winter,
+            Action::AddTask(NewReminder { due_time_zone: Some(zone), .. })
+                if zone == "GMT-0600"
+        ));
     }
 
     #[test]
@@ -694,6 +772,8 @@ mod tests {
                     title: "Pay rent".into(),
                     list: Some("home".into()),
                     due: Some(date(2026, 10, 27)),
+                    due_time: None,
+                    due_time_zone: None,
                     priority: Some(Priority::High),
                 }),
                 "nib {}",
@@ -723,6 +803,8 @@ mod tests {
                 title: "Pay rent \\fri !high #bills".into(),
                 list: None,
                 due: None,
+                due_time: None,
+                due_time_zone: None,
                 priority: None,
             })
         );
@@ -771,6 +853,8 @@ mod tests {
                 title: "Review PR".into(),
                 list: Some("Snowglobe".into()),
                 due: None,
+                due_time: None,
+                due_time_zone: None,
                 priority: Some(Priority::Medium),
             })
         );

@@ -32,11 +32,13 @@ Note objects contain `id`, `title`, `folder`, `modified`, and `locked`. `modifie
   "id": "reminder-3",
   "title": "Review pull request",
   "due": "2026-11-03",
+  "due_time": "09:00",
+  "due_time_zone": "America/New_York",
   "priority": "high"
 }
 ```
 
-Reminder objects contain `id`, `title`, `due`, and `priority`. Due dates use `YYYY-MM-DD`. Priority is `low`, `medium`, `high`, or `null`.
+Reminder objects contain `id`, `title`, `due`, `due_time`, `due_time_zone`, and `priority`. `due` keeps its `YYYY-MM-DD` shape. `due_time` uses `HH:MM`, or is `null` for a date-only or undated reminder. `due_time_zone` is an IANA name for a zoned time and is `null` for a floating time or a reminder with no time. Priority is `low`, `medium`, `high`, or `null`.
 
 ## Calendar events
 
@@ -62,6 +64,8 @@ Apple can reuse one identifier for every occurrence of a recurring event. nib ap
       "id": "reminder-1",
       "title": "Pay rent",
       "due": "2026-10-25",
+      "due_time": null,
+      "due_time_zone": null,
       "priority": "high"
     }
   ],

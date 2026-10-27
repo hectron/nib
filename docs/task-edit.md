@@ -19,7 +19,7 @@ nib uses `$VISUAL`, then `$EDITOR`, and falls back to `vi`. GUI editors must wai
 ```markdown
 ## Work 🆔 a1b2c3d4
 
-- [ ] Review pull request ⏫ 📅 2026-11-03 🆔 e5f6a7b8
+- [ ] Review pull request ⏫ 📅 2026-11-03 09:00 🆔 e5f6a7b8
     Check the release notes.
 - [ ] Draft announcement 🔼
 ```
@@ -27,12 +27,15 @@ nib uses `$VISUAL`, then `$EDITOR`, and falls back to `vi`. GUI editors must wai
 - `##` starts an existing reminder list. Keep its `🆔` value.
 - `- [ ]` is an incomplete reminder. Change it to `- [x]` to complete it.
 - `⏫`, `🔼`, and `🔽` mean high, medium, and low priority.
-- `📅 YYYY-MM-DD` is the due date.
+- `📅 YYYY-MM-DD` is the due date. Add a 24-hour time as `📅 YYYY-MM-DD HH:MM`.
+- A time in another zone includes its IANA name, such as `📅 2026-11-03 09:00 America/New_York`. Local, floating, and multi-token system zone names render without a zone; nib still preserves a hidden zone when you change the date or time.
 - Indent notes with four spaces or a tab beneath their reminder.
 - A reminder without an `🆔` is new.
 - HTML comments are ignored.
 
 Edit a title or note in place. Remove the priority or due-date marker to clear that field. Delete an existing reminder line to delete it. Move a line beneath another list heading to move the reminder.
+
+Due edits are component-wise: changing only the date keeps the time and zone, changing only the time keeps the date and zone, and removing the time keeps the date. An untouched marker is never written. Removing a visible foreign-zone suffix pins that time to the local zone. Adding a time to a date-only reminder also uses the local zone; when the local zone has no IANA name, nib pins it to the fixed offset in effect at the due time and shows that offset in the preview. If a due-date or due-time edit leaves an absolute alarm at its old instant, the preview warns `has an alarm that stays at …` in local time; relative alarms move with the due value and need no warning.
 
 nib cannot create or rename lists in this file. Changes that touch a read-only list are rejected.
 
@@ -81,4 +84,4 @@ nib lists what Reminders shows if the undo was applied, such as `"Oat milk" is r
 - Parse errors can be reopened in the editor. If you stop or decline the preview, the edited file is kept and its path is printed.
 - A failed apply keeps the edited file and leaves the EventKit batch uncommitted.
 
-The Markdown format represents titles, notes, due dates, priorities, completion, and list placement. Alarms, repeats, and links are not rendered. Ordinary edits preserve them; a deletion loses them, and nib shows that loss in the preview. Removing an existing reminder's `🆔` turns it into a delete plus an add, which also loses that metadata.
+The Markdown format represents titles, notes, due dates and times, priorities, completion, and list placement. Alarms, repeats, and links are not rendered. Ordinary edits preserve them; a deletion loses them, and nib shows that loss in the preview. Removing an existing reminder's `🆔` turns it into a delete plus an add, which also loses that metadata.
