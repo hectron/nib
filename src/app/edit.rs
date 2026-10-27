@@ -4,8 +4,9 @@ use jiff::Zoned;
 use miette::{IntoDiagnostic, Result, miette};
 use serde_json::json;
 
+use crate::app::journal;
 use crate::app::markdown::{self, Plan, Session};
-use crate::cli::output::clean;
+use crate::cli::output::{clean, clean_lines};
 use crate::domain::{Backends, ReminderChange};
 use crate::infra::host::Host;
 
@@ -61,14 +62,14 @@ pub fn tasks(
             file.remove_on_drop();
             return Ok("No changes.".into());
         }
-        host.say(&clean(&markdown::describe(&plan, &snapshot)));
+        host.say(&clean_lines(&markdown::describe(&plan, &snapshot)));
         if !confirmed(host, &plan)? {
             return Ok(format!(
                 "Nothing was changed. Your edits are in {}",
                 file.path().display()
             ));
         }
-        if let Some(contents) = backup(&plan)? {
+        if let Some(contents) = backup_changes(&plan.changes)? {
             let name = format!("{}-tasks.json", now.strftime("%Y%m%dT%H%M%S"));
             let saved = host.save_backup(&name, &contents).into_diagnostic()?;
             host.say(&format!(
@@ -76,12 +77,20 @@ pub fn tasks(
                 saved.display()
             ));
         }
-        if let Err(e) = backends.reminders.apply(&plan.changes) {
-            host.say(&format!(
-                "Your edits are still in {}",
-                file.path().display()
-            ));
-            return Err(e.into());
+        let applied = match backends.reminders.apply(&plan.changes) {
+            Ok(applied) => applied,
+            Err(e) => {
+                host.say(&format!(
+                    "Your edits are still in {}",
+                    file.path().display()
+                ));
+                return Err(e.into());
+            }
+        };
+        if let Err(error) = journal::record_edit(now, &plan.changes, &applied, host) {
+            host.say("The changes were applied, but nib couldn't record the journal entry.");
+            file.remove_on_drop();
+            return Err(error);
         }
         file.remove_on_drop();
         return Ok(summary(&plan));
@@ -119,6 +128,7 @@ fn backup_warning(plan: &Plan) -> String {
         .iter()
         .filter_map(|change| match change {
             ReminderChange::Add { .. } => None,
+            ReminderChange::Restore { before } => before.backup_partial.then_some(()),
             ReminderChange::Update { before, .. } | ReminderChange::Delete { before } => {
                 before.backup_partial.then_some(())
             }
@@ -134,12 +144,11 @@ fn backup_warning(plan: &Plan) -> String {
     }
 }
 
-fn backup(plan: &Plan) -> Result<Option<String>> {
-    let items: Vec<_> = plan
-        .changes
+pub(crate) fn backup_changes(changes: &[ReminderChange]) -> Result<Option<String>> {
+    let items: Vec<_> = changes
         .iter()
         .filter_map(|change| match change {
-            ReminderChange::Add { .. } => None,
+            ReminderChange::Add { .. } | ReminderChange::Restore { .. } => None,
             ReminderChange::Update { before, .. } => Some(("update", before)),
             ReminderChange::Delete { before } => Some(("delete", before)),
         })
@@ -175,6 +184,7 @@ fn backup(plan: &Plan) -> Result<Option<String>> {
                 "due": before.due.map(|d| d.to_string()),
                 "due_components": due_components,
                 "priority": before.priority.map(crate::domain::Priority::as_str),
+                "completed": before.completed,
                 "modified": before.modified.map(|t| t.to_string()),
                 "alarms_present": before.alarms_present,
                 "recurrence_present": before.recurrence_present,
@@ -196,8 +206,8 @@ fn summary(plan: &Plan) -> String {
     let (mut added, mut updated, mut completed, mut deleted) = (0, 0, 0, 0);
     for change in &plan.changes {
         match change {
-            ReminderChange::Add { .. } => added += 1,
-            ReminderChange::Update { edit, .. } if edit.complete => completed += 1,
+            ReminderChange::Add { .. } | ReminderChange::Restore { .. } => added += 1,
+            ReminderChange::Update { edit, .. } if edit.completed == Some(true) => completed += 1,
             ReminderChange::Update { .. } => updated += 1,
             ReminderChange::Delete { .. } => deleted += 1,
         }
@@ -238,8 +248,8 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        BackendError, Calendar, NewReminder, Notes, Reminder, ReminderDueComponents, ReminderList,
-        ReminderSnapshot, Reminders, StoredReminder,
+        ApplyResult, BackendError, Calendar, FieldEdit, NewReminder, Notes, Reminder,
+        ReminderDueComponents, ReminderList, ReminderSnapshot, Reminders, StoredReminder,
     };
     use crate::infra::host::Scripted;
 
@@ -249,6 +259,7 @@ mod tests {
         snapshot: ReminderSnapshot,
         applied: Applied,
         conflict: bool,
+        unrecorded: bool,
     }
 
     impl Reminders for Recorder {
@@ -264,14 +275,17 @@ mod tests {
             Ok(self.snapshot.clone())
         }
 
-        fn apply(&self, changes: &[ReminderChange]) -> Result<(), BackendError> {
+        fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
             if self.conflict {
                 return Err(BackendError::Conflict {
                     titles: vec!["\"Oat milk\"".into()],
                 });
             }
             self.applied.borrow_mut().extend_from_slice(changes);
-            Ok(())
+            Ok(ApplyResult {
+                written: changes.iter().map(fake_written).collect(),
+                unrecorded: vec![self.unrecorded; changes.len()],
+            })
         }
     }
 
@@ -284,11 +298,68 @@ mod tests {
             due: None,
             due_components: None,
             priority: None,
+            completed: false,
             modified: None,
             alarms_present: false,
             recurrence_present: false,
             url: None,
             backup_partial: false,
+        }
+    }
+
+    fn fake_written(change: &ReminderChange) -> Option<StoredReminder> {
+        match change {
+            ReminderChange::Add {
+                list_id,
+                title,
+                notes,
+                due,
+                priority,
+            } => Some(StoredReminder {
+                id: format!("added-{title}"),
+                list_id: list_id.clone(),
+                title: title.clone(),
+                notes: notes.clone(),
+                due: *due,
+                due_components: None,
+                priority: *priority,
+                completed: false,
+                modified: None,
+                alarms_present: false,
+                recurrence_present: false,
+                url: None,
+                backup_partial: false,
+            }),
+            ReminderChange::Restore { before } => {
+                let mut written = before.clone();
+                written.id = format!("restored-{}", before.id);
+                Some(written)
+            }
+            ReminderChange::Update { before, edit } => {
+                let mut written = before.clone();
+                if let Some(title) = &edit.title {
+                    written.title.clone_from(title);
+                }
+                apply_field(&mut written.notes, &edit.notes);
+                apply_field(&mut written.due, &edit.due);
+                apply_field(&mut written.priority, &edit.priority);
+                if let Some(list_id) = &edit.list_id {
+                    written.list_id.clone_from(list_id);
+                }
+                if let Some(completed) = edit.completed {
+                    written.completed = completed;
+                }
+                Some(written)
+            }
+            ReminderChange::Delete { .. } => None,
+        }
+    }
+
+    fn apply_field<T: Clone>(value: &mut Option<T>, edit: &FieldEdit<T>) {
+        match edit {
+            FieldEdit::Unchanged => {}
+            FieldEdit::Set(new) => *value = Some(new.clone()),
+            FieldEdit::Remove => *value = None,
         }
     }
 
@@ -320,11 +391,21 @@ mod tests {
         conflict: bool,
         host: &mut Scripted,
     ) -> (Result<String>, Vec<ReminderChange>) {
+        run_snapshot_with_recording(snapshot, conflict, false, host)
+    }
+
+    fn run_snapshot_with_recording(
+        snapshot: ReminderSnapshot,
+        conflict: bool,
+        unrecorded: bool,
+        host: &mut Scripted,
+    ) -> (Result<String>, Vec<ReminderChange>) {
         let applied = Applied::default();
         let recorder = Recorder {
             snapshot,
             applied: applied.clone(),
             conflict,
+            unrecorded,
         };
         let backends = Backends::new(
             || -> Box<dyn Notes> { unreachable!() },
@@ -350,15 +431,34 @@ mod tests {
         let mut host = Scripted::new().edit(check("Oat milk")).answer("y");
         let (result, applied) = run(&["Oat milk", "Eggs"], false, &mut host);
         assert_eq!(result.unwrap(), "Applied 1 change: 1 completed.");
-        assert!(matches!(&applied[..], [ReminderChange::Update { edit, .. }] if edit.complete));
+        assert!(
+            matches!(&applied[..], [ReminderChange::Update { edit, .. }] if edit.completed == Some(true))
+        );
         assert_eq!(host.backups.len(), 1);
         assert_eq!(host.backups[0].0, "20261026T090000-tasks.json");
         assert!(host.backups[0].1.contains("\"Oat milk\""));
+        assert_eq!(host.journals.len(), 1);
+        assert_eq!(host.journals[0].0, "20261026T090000-journal.json");
+        assert!(host.journals[0].1.contains("\"change\": \"completed\""));
         assert!(
             host.said
                 .iter()
                 .any(|s| s.contains("✓ complete  \"Oat milk\""))
         );
+    }
+
+    #[test]
+    fn post_commit_recording_problem_still_writes_the_edit_journal() {
+        let mut host = Scripted::new().edit(check("Oat milk")).answer("y");
+
+        let (result, applied) =
+            run_snapshot_with_recording(snapshot(&["Oat milk"]), false, true, &mut host);
+
+        assert_eq!(result.unwrap(), "Applied 1 change: 1 completed.");
+        assert_eq!(applied.len(), 1);
+        assert_eq!(host.journals.len(), 1);
+        assert!(host.journals[0].1.contains("\"unrecorded\": true"));
+        assert!(!host.said.iter().any(|line| line.contains("still in")));
     }
 
     #[test]
@@ -500,7 +600,7 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("changed in Reminders while you were editing")
+                .contains("changed in Reminders since nib last read them")
         );
         assert_eq!(applied, Vec::<ReminderChange>::new());
         assert!(

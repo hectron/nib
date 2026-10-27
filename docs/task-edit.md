@@ -50,6 +50,27 @@ Before updating, completing, moving, or deleting an existing reminder, nib write
 
 Backup names start with a local timestamp, include `-tasks-`, and end with a random suffix plus `.json` to avoid overwriting another backup. New reminders do not need a backup. nib warns when EventKit returned only enough data for a partial backup.
 
+## Undo history
+
+Every applied edit also writes a journal entry in the backups folder. List the history or undo the latest active edit with:
+
+```bash
+nib log
+nib undo
+```
+
+Pass an entry from `nib log` to choose an older edit. Plain `nib undo` skips entries that are themselves undos; pass an undo entry's ID explicitly to reverse it.
+
+Undoing a deletion re-creates the reminder with a new ID. It may lose alarms, repeats, or other metadata that EventKit does not expose. Keep the journal files in the backups folder: removing one changes the history nib can undo.
+
+If an undo is interrupted, `nib log` shows its status as `pending` and later undo commands stop rather than risk applying it twice. Inspect the listed reminders, then run:
+
+```bash
+nib undo --resolve <ID>
+```
+
+nib lists what Reminders shows if the undo was applied, such as `"Oat milk" is re-created`. Type `applied` if Reminders matches, and nib marks the undo applied. Type `absent` only if none of it happened; nib then removes the pending record so the edit can be undone again. Any other answer, including pressing Return, changes nothing.
+
 ## Safety rules
 
 - The edit file is created with owner-only permissions.

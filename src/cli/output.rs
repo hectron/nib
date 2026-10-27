@@ -7,7 +7,7 @@ use miette::{IntoDiagnostic, Result};
 use serde::{Serialize, Serializer};
 
 use crate::app::doctor::{Check, CheckStatus};
-use crate::domain::{Event, Note, Priority, Reminder};
+use crate::domain::{ChangeCounts, Event, JournalSummary, Note, Priority, Reminder};
 
 pub trait Tabular: Serialize {
     const HEADER: &'static [&'static str];
@@ -136,6 +136,91 @@ pub fn today(
         Ok("Nothing due today.".into())
     } else {
         Ok(rendered.join("\n\n"))
+    }
+}
+
+pub fn journal(
+    entries: &[JournalSummary],
+    json: bool,
+    today: Date,
+    style: Style,
+) -> Result<String> {
+    list(entries, json, today, style)
+}
+
+pub fn undo(
+    id: &str,
+    undo_id: &str,
+    counts: ChangeCounts,
+    json: bool,
+    style: Style,
+) -> Result<String> {
+    if json {
+        return to_json(
+            &UndoJson {
+                id,
+                undo_id: Some(undo_id),
+                applied: true,
+                added: counts.added,
+                updated: counts.updated,
+                completed: counts.completed,
+                deleted: counts.deleted,
+            },
+            style,
+        );
+    }
+    Ok(format!(
+        "Undid {} from {id}.",
+        count(counts.total(), "change")
+    ))
+}
+
+pub fn undo_cancelled(id: &str, json: bool, style: Style) -> Result<String> {
+    if json {
+        return to_json(
+            &UndoJson {
+                id,
+                undo_id: None,
+                applied: false,
+                added: 0,
+                updated: 0,
+                completed: 0,
+                deleted: 0,
+            },
+            style,
+        );
+    }
+    Ok("Nothing was changed.".into())
+}
+
+pub fn undo_resolution(
+    id: &str,
+    applied: Option<bool>,
+    json: bool,
+    style: Style,
+) -> Result<String> {
+    if json {
+        return to_json(
+            &UndoResolutionJson {
+                id,
+                resolved: applied.is_some(),
+                applied: applied == Some(true),
+            },
+            style,
+        );
+    }
+    Ok(match applied {
+        Some(true) => format!("Marked pending undo {id} as applied."),
+        Some(false) => format!("Removed pending undo {id}."),
+        None => format!("Nothing was changed. Undo {id} is still pending."),
+    })
+}
+
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -293,6 +378,10 @@ pub fn clean(text: &str) -> String {
             c => c,
         })
         .collect()
+}
+
+pub fn clean_lines(text: &str) -> String {
+    text.lines().map(clean).collect::<Vec<_>>().join("\n")
 }
 
 impl Tabular for Note {
@@ -454,6 +543,97 @@ struct TodayJson<'a> {
     overdue: &'a [Reminder],
     due_today: &'a [Reminder],
     events: &'a [Event],
+}
+
+#[derive(Serialize)]
+struct JournalJson<'a> {
+    id: &'a str,
+    time: Timestamp,
+    written_at: Timestamp,
+    action: &'static str,
+    status: &'static str,
+    undo_of: Option<&'a str>,
+    undone: bool,
+    added: usize,
+    updated: usize,
+    completed: usize,
+    deleted: usize,
+}
+
+#[derive(Serialize)]
+struct UndoResolutionJson<'a> {
+    id: &'a str,
+    resolved: bool,
+    applied: bool,
+}
+
+#[derive(Serialize)]
+struct UndoJson<'a> {
+    id: &'a str,
+    undo_id: Option<&'a str>,
+    applied: bool,
+    added: usize,
+    updated: usize,
+    completed: usize,
+    deleted: usize,
+}
+
+impl Serialize for JournalSummary {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        JournalJson {
+            id: &self.id,
+            time: self.time,
+            written_at: self.written_at,
+            action: self.action.as_str(),
+            status: self.status.as_str(),
+            undo_of: self.undo_of.as_deref(),
+            undone: self.undone,
+            added: self.counts.added,
+            updated: self.counts.updated,
+            completed: self.counts.completed,
+            deleted: self.counts.deleted,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl Tabular for JournalSummary {
+    const HEADER: &'static [&'static str] = &[
+        "ENTRY",
+        "WRITTEN",
+        "ACTION",
+        "STATUS",
+        "UNDO OF",
+        "UNDONE",
+        "ADDED",
+        "UPDATED",
+        "COMPLETED",
+        "DELETED",
+    ];
+    const TITLE_COLUMN: usize = 0;
+
+    fn row(&self) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            self.written_at.to_string(),
+            self.action.as_str().into(),
+            self.status.as_str().into(),
+            self.undo_of.clone().unwrap_or_default(),
+            if self.undone {
+                "yes".into()
+            } else {
+                String::new()
+            },
+            self.counts.added.to_string(),
+            self.counts.updated.to_string(),
+            self.counts.completed.to_string(),
+            self.counts.deleted.to_string(),
+        ]
+    }
+
+    fn cell_style(&self, _: usize, _: Date) -> Option<CellStyle> {
+        None
+    }
 }
 
 #[derive(Serialize)]
