@@ -17,6 +17,18 @@ pub fn run(
 ) -> Result<String> {
     let json = cli.json;
     match cli.command.into_action(now, config).into_diagnostic()? {
+        Action::Today { date, query } => {
+            let reminders = backends.reminders.list()?;
+            let (overdue, remaining): (Vec<_>, Vec<_>) = reminders
+                .into_iter()
+                .partition(|reminder| reminder.due.is_some_and(|due| due < date));
+            let due_today = remaining
+                .into_iter()
+                .filter(|reminder| reminder.due == Some(date))
+                .collect::<Vec<_>>();
+            let events = backends.calendar.events(query)?;
+            output::today(&overdue, &due_today, &events, json, style)
+        }
         Action::NewNote(note) => {
             output::single(&backends.notes.create(note)?, "Created note", json)
         }
@@ -186,6 +198,39 @@ mod tests {
         }
     }
 
+    struct AgendaReminders(Vec<Reminder>);
+
+    impl Reminders for AgendaReminders {
+        fn add(&self, _: NewReminder) -> Result<Reminder, BackendError> {
+            unreachable!()
+        }
+
+        fn list(&self) -> Result<Vec<Reminder>, BackendError> {
+            Ok(self.0.clone())
+        }
+
+        fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+            unreachable!()
+        }
+
+        fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
+            unreachable!()
+        }
+    }
+
+    struct AgendaCalendar(Vec<Event>);
+
+    impl Calendar for AgendaCalendar {
+        fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|event| query.range.contains(&event.start))
+                .cloned()
+                .collect())
+        }
+    }
+
     type Built = Rc<RefCell<Vec<&'static str>>>;
 
     fn fake_backends(built: &Built) -> Backends {
@@ -230,6 +275,42 @@ mod tests {
         .unwrap()
     }
 
+    fn agenda(args: &[&str], reminders: Vec<Reminder>, events: Vec<Event>) -> String {
+        let backends = Backends::new(
+            || -> Box<dyn Notes> { unreachable!() },
+            move || Box::new(AgendaReminders(reminders)),
+            move || Box::new(AgendaCalendar(events)),
+        );
+        let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        run(
+            cli,
+            &Config::default(),
+            &now(),
+            &backends,
+            Style::default(),
+            &mut Scripted::new(),
+        )
+        .unwrap()
+    }
+
+    fn reminder(id: &str, title: &str, due: Option<Date>) -> Reminder {
+        Reminder {
+            id: id.into(),
+            title: title.into(),
+            due,
+            priority: None,
+        }
+    }
+
+    fn event(id: &str, title: &str, day: Date, hour: i8) -> Event {
+        Event {
+            id: id.into(),
+            title: title.into(),
+            start: at(day, hour, 0),
+            all_day: false,
+        }
+    }
+
     fn built_by(args: &[&str]) -> Vec<&'static str> {
         let built = Built::default();
         let backends = fake_backends(&built);
@@ -248,11 +329,115 @@ mod tests {
 
     #[test]
     fn each_command_builds_only_its_backend() {
+        assert_eq!(built_by(&["today"]), ["reminders", "calendar"]);
         assert_eq!(built_by(&["n", "Quick thought"]), ["notes"]);
         assert_eq!(built_by(&["note", "ls", "-f", "Work"]), ["notes"]);
         assert_eq!(built_by(&["t", "Buy groceries"]), ["reminders"]);
         assert_eq!(built_by(&["task"]), ["reminders"]);
         assert_eq!(built_by(&["cal", "--week"]), ["calendar"]);
+    }
+
+    #[test]
+    fn today_groups_each_agenda_section() {
+        let reminders = vec![
+            reminder(
+                "reminder-overdue",
+                "Submit expense report",
+                Some(date(2026, 10, 24)),
+            ),
+            reminder(
+                "reminder-today",
+                "Review pull request",
+                Some(date(2026, 10, 26)),
+            ),
+            reminder("reminder-future", "Renew passport", Some(date(2026, 11, 9))),
+            reminder("reminder-undated", "Buy groceries", None),
+        ];
+        let events = vec![event(
+            "event-today",
+            "Design review",
+            date(2026, 10, 26),
+            14,
+        )];
+        assert_snapshot!(agenda(&["today"], reminders, events), @r"
+        Overdue
+        TITLE                  DUE         PRIORITY
+        Submit expense report  2026-10-24
+
+        Due today
+        TITLE                DUE         PRIORITY
+        Review pull request  2026-10-26
+
+        Events
+        START             TITLE
+        2026-10-26 14:00  Design review
+        ");
+    }
+
+    #[test]
+    fn today_omits_empty_sections() {
+        let events = vec![event(
+            "event-today",
+            "Design review",
+            date(2026, 10, 26),
+            14,
+        )];
+        assert_snapshot!(agenda(&["today"], Vec::new(), events), @r"
+        Events
+        START             TITLE
+        2026-10-26 14:00  Design review
+        ");
+        assert_snapshot!(agenda(&["today"], Vec::new(), Vec::new()), @"Nothing due today.");
+    }
+
+    #[test]
+    fn today_json_has_one_array_per_section() {
+        let reminders = vec![
+            reminder(
+                "reminder-overdue",
+                "Submit expense report",
+                Some(date(2026, 10, 24)),
+            ),
+            reminder(
+                "reminder-today",
+                "Review pull request",
+                Some(date(2026, 10, 26)),
+            ),
+        ];
+        let events = vec![event(
+            "event-today",
+            "Design review",
+            date(2026, 10, 26),
+            14,
+        )];
+        assert_snapshot!(agenda(&["today", "--json"], reminders, events), @r#"
+        {
+          "overdue": [
+            {
+              "id": "reminder-overdue",
+              "title": "Submit expense report",
+              "due": "2026-10-24",
+              "priority": null
+            }
+          ],
+          "due_today": [
+            {
+              "id": "reminder-today",
+              "title": "Review pull request",
+              "due": "2026-10-26",
+              "priority": null
+            }
+          ],
+          "events": [
+            {
+              "id": "event-today",
+              "title": "Design review",
+              "start": "2026-10-26T14:00:00-04:00",
+              "all_day": false
+            }
+          ]
+        }
+        "#);
     }
 
     #[test]

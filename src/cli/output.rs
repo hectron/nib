@@ -86,6 +86,45 @@ pub fn single<T: Summary>(item: &T, verb: &str, json: bool) -> Result<String> {
     }
 }
 
+pub fn today(
+    overdue: &[Reminder],
+    due_today: &[Reminder],
+    events: &[Event],
+    json: bool,
+    style: Style,
+) -> Result<String> {
+    if json {
+        return to_json(&TodayJson {
+            overdue,
+            due_today,
+            events,
+        });
+    }
+    let sections = [
+        ("Overdue", list(overdue, false, style)?),
+        ("Due today", list(due_today, false, style)?),
+        ("Events", list(events, false, style)?),
+    ];
+    let rendered = sections
+        .into_iter()
+        .filter(|(_, table)| !table.is_empty())
+        .map(|(heading, table)| format!("{}\n{table}", styled_heading(heading, style)))
+        .collect::<Vec<_>>();
+    if rendered.is_empty() {
+        Ok("Nothing due today.".into())
+    } else {
+        Ok(rendered.join("\n\n"))
+    }
+}
+
+fn styled_heading(heading: &str, style: Style) -> String {
+    if style.color {
+        format!("\u{1b}[1m{heading}\u{1b}[0m")
+    } else {
+        heading.into()
+    }
+}
+
 fn to_json<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     serde_json::to_string_pretty(value).into_diagnostic()
 }
@@ -214,6 +253,13 @@ struct EventJson<'a> {
     #[serde(serialize_with = "rfc3339")]
     start: &'a Zoned,
     all_day: bool,
+}
+
+#[derive(Serialize)]
+struct TodayJson<'a> {
+    overdue: &'a [Reminder],
+    due_today: &'a [Reminder],
+    events: &'a [Event],
 }
 
 impl Serialize for Event {

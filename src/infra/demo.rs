@@ -103,7 +103,7 @@ impl Reminders for Demo {
                 Some(0),
                 Some(Priority::High),
             ),
-            reminder("reminder-2", "Pay rent", Some(3), Some(Priority::Medium)),
+            reminder("reminder-2", "Pay rent", Some(-1), Some(Priority::Medium)),
             reminder(
                 "reminder-3",
                 "Renew passport",
@@ -266,9 +266,27 @@ mod tests {
         assert_snapshot!(nib(&["t"]), @r"
         TITLE                DUE         PRIORITY
         Review pull request  2026-10-26  high
-        Pay rent             2026-10-29  medium
+        Pay rent             2026-10-25  medium
         Renew passport       2026-11-09  low
         Buy groceries
+        ");
+    }
+
+    #[test]
+    fn today_is_a_useful_agenda() {
+        assert_snapshot!(nib(&["today"]), @r"
+        Overdue
+        TITLE     DUE         PRIORITY
+        Pay rent  2026-10-25  medium
+
+        Due today
+        TITLE                DUE         PRIORITY
+        Review pull request  2026-10-26  high
+
+        Events
+        START             TITLE
+        2026-10-26 09:30  Standup
+        2026-10-26 14:00  Design review
         ");
     }
 

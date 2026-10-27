@@ -22,6 +22,7 @@ pub struct Cli {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    Today { date: Date, query: EventQuery },
     NewNote(NewNote),
     ListNotes(NoteQuery),
     AddTask(NewReminder),
@@ -32,6 +33,8 @@ pub enum Action {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Show today's reminders and events
+    Today(TodayArgs),
     /// Create and list notes
     Note(NoteArgs),
     /// Add and list reminders
@@ -44,6 +47,13 @@ pub enum Command {
     N(NoteCapture),
     /// Add a reminder from the rest of the line, or list reminders
     T(TaskCapture),
+}
+
+#[derive(Debug, Args)]
+pub struct TodayArgs {
+    /// Only show events from this calendar
+    #[arg(long, value_name = "NAME")]
+    calendar: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -216,6 +226,17 @@ impl TaskOpts {
 impl Command {
     pub fn into_action(self, now: &Zoned, config: &Config) -> Result<Action, jiff::Error> {
         Ok(match self {
+            Command::Today(TodayArgs { calendar }) => Action::Today {
+                date: now.date(),
+                query: EventQuery {
+                    range: days_from_today(now, 1)?,
+                    calendars: if calendar.is_empty() {
+                        config.cal.calendars.clone()
+                    } else {
+                        calendar
+                    },
+                },
+            },
             Command::Note(NoteArgs {
                 action,
                 folder: Folder { folder },
@@ -334,9 +355,31 @@ mod tests {
         })
     }
 
+    fn today(calendars: &[&str]) -> Action {
+        Action::Today {
+            date: date(2026, 10, 26),
+            query: EventQuery {
+                range: at(date(2026, 10, 26), 0, 0)..at(date(2026, 10, 27), 0, 0),
+                calendars: calendars.iter().map(|name| (*name).into()).collect(),
+            },
+        }
+    }
+
     #[test]
     fn definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn today_command() {
+        assert_parses(&[
+            (&["today"], today(&[])),
+            (
+                &["today", "--calendar", "Work", "--calendar", "Personal"],
+                today(&["Work", "Personal"]),
+            ),
+            (&["--json", "today"], today(&[])),
+        ]);
     }
 
     #[test]
@@ -541,6 +584,14 @@ mod tests {
         assert!(matches!(
             action(&["cal"]),
             Action::ListEvents(EventQuery { calendars, .. }) if calendars == ["Work"]
+        ));
+        assert!(matches!(
+            action(&["today"]),
+            Action::Today { query: EventQuery { calendars, .. }, .. } if calendars == ["Work"]
+        ));
+        assert!(matches!(
+            action(&["today", "--calendar", "Personal"]),
+            Action::Today { query: EventQuery { calendars, .. }, .. } if calendars == ["Personal"]
         ));
     }
 }

@@ -87,6 +87,26 @@ fn demo_backend_shows_sample_data() {
 }
 
 #[test]
+fn demo_backend_shows_today_agenda() {
+    let out = command()
+        .arg("today")
+        .env("NIB_DEMO", "1")
+        .env("TZ", "UTC0")
+        .output()
+        .expect("the nib test process should start");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("Due today"), "{stdout}");
+    assert!(stdout.contains("Events"), "{stdout}");
+    assert!(stdout.contains("Review pull request"), "{stdout}");
+    assert!(stdout.contains("Design review"), "{stdout}");
+}
+
+#[test]
 fn stub_backend_error_has_a_code() {
     let out = nib(&["n"]);
     assert_eq!(out.status.code(), Some(1));
