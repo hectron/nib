@@ -1,6 +1,7 @@
 use std::ops::Range;
 
 use clap::{Args, Parser, Subcommand};
+use jiff::civil::Date;
 use jiff::{ToSpan, Zoned};
 use thiserror::Error;
 
