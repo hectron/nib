@@ -11,6 +11,8 @@ pub struct Note {
     pub id: String,
     pub title: String,
     pub folder: Option<String>,
+    pub modified: Option<Timestamp>,
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -210,6 +212,15 @@ pub enum BackendError {
     )]
     PermissionDenied { app: &'static str, terminal: String },
 
+    #[error("{terminal} doesn't have permission to control {app}")]
+    #[diagnostic(
+        code(nib::backend::permission_denied),
+        help(
+            "turn on {terminal} under System Settings > Privacy & Security > Automation, then run the command again"
+        )
+    )]
+    AutomationDenied { app: &'static str, terminal: String },
+
     #[error("{kind} \"{name}\" not found")]
     #[diagnostic(
         code(nib::backend::not_found),
@@ -224,6 +235,7 @@ pub enum BackendError {
     )]
     Ambiguous { kind: &'static str, name: String },
 
+    #[cfg(any(not(target_os = "macos"), test))]
     #[error("{app} integration is not implemented yet")]
     #[diagnostic(
         code(nib::backend::not_implemented),
@@ -308,6 +320,10 @@ mod tests {
                 app: "Reminders",
                 terminal: "WezTerm".into(),
             },
+            BackendError::AutomationDenied {
+                app: "Apple Notes",
+                terminal: "WezTerm".into(),
+            },
             BackendError::NotFound {
                 kind: "folder",
                 name: "Archive".into(),
@@ -335,6 +351,8 @@ mod tests {
         assert_snapshot!(rendered.join("\n"), @r#"
         nib::backend::permission_denied: WezTerm doesn't have access to Reminders
           help: turn on WezTerm under System Settings > Privacy & Security > Reminders, then run the command again; the VS Code terminal, ssh sessions, and cron jobs can't show the permission prompt
+        nib::backend::permission_denied: WezTerm doesn't have permission to control Apple Notes
+          help: turn on WezTerm under System Settings > Privacy & Security > Automation, then run the command again
         nib::backend::not_found: folder "Archive" not found
           help: check the spelling and try again
         nib::backend::ambiguous: more than one writable reminder list is named "Work"

@@ -67,6 +67,8 @@ mod tests {
                 id: "note-4".into(),
                 title: note.title,
                 folder: note.folder,
+                modified: Some("2026-10-26T14:00:00Z".parse().unwrap()),
+                locked: false,
             })
         }
 
@@ -83,6 +85,16 @@ mod tests {
                     id: id.into(),
                     title: title.into(),
                     folder: Some(f.into()),
+                    modified: Some(
+                        match id {
+                            "note-1" => "2026-10-26T11:00:00Z",
+                            "note-2" => "2026-10-26T13:00:00Z",
+                            _ => "2026-10-26T12:00:00Z",
+                        }
+                        .parse()
+                        .unwrap(),
+                    ),
+                    locked: id == "note-3",
                 })
                 .collect())
         }
@@ -452,9 +464,9 @@ mod tests {
     #[test]
     fn note_list_filters_by_folder() {
         assert_snapshot!(nib(&["note", "ls", "-f", "Work"]), @r"
-        TITLE        FOLDER
+        TITLE        FOLDER  LOCKED
         Q4 planning  Work
-        Standup      Work
+        Standup      Work    yes
         ");
         assert_snapshot!(nib(&["note", "list", "-f", "Archive"]), @"");
     }
@@ -466,12 +478,16 @@ mod tests {
           {
             "id": "note-2",
             "title": "Q4 planning",
-            "folder": "Work"
+            "folder": "Work",
+            "modified": "2026-10-26T13:00:00Z",
+            "locked": false
           },
           {
             "id": "note-3",
             "title": "Standup",
-            "folder": "Work"
+            "folder": "Work",
+            "modified": "2026-10-26T12:00:00Z",
+            "locked": true
           }
         ]
         "#);
@@ -540,7 +556,9 @@ mod tests {
         {
           "id": "note-4",
           "title": "Idea",
-          "folder": "Inbox"
+          "folder": "Inbox",
+          "modified": "2026-10-26T14:00:00Z",
+          "locked": false
         }
         "#);
     }
@@ -588,9 +606,9 @@ mod tests {
     #[test]
     fn options_before_subcommand() {
         assert_snapshot!(nib(&["note", "-f", "Work", "list"]), @r"
-        TITLE        FOLDER
+        TITLE        FOLDER  LOCKED
         Q4 planning  Work
-        Standup      Work
+        Standup      Work    yes
         ");
         assert_eq!(
             nib(&["task", "--json", "ls"]),

@@ -49,6 +49,8 @@ impl Notes for Demo {
             id: "note-5".into(),
             title: note.title,
             folder: note.folder,
+            modified: Some(self.0.timestamp()),
+            locked: false,
         })
     }
 
@@ -66,6 +68,8 @@ impl Notes for Demo {
                 id: id.into(),
                 title: title.into(),
                 folder: Some(folder.into()),
+                modified: Some(self.0.timestamp()),
+                locked: false,
             })
             .collect())
     }
@@ -293,7 +297,7 @@ mod tests {
     #[test]
     fn notes_filter_by_folder() {
         assert_snapshot!(nib(&["n", "-f", "Personal"]), @r"
-        TITLE       FOLDER
+        TITLE       FOLDER    LOCKED
         Groceries   Personal
         Book ideas  Personal
         ");
