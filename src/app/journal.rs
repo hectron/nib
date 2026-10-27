@@ -103,6 +103,8 @@ struct ReminderRecord {
     completed: bool,
     modified: Option<Timestamp>,
     alarms_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    absolute_alarms: Option<Vec<Timestamp>>,
     recurrence_present: bool,
     url: Option<String>,
     partial: bool,
@@ -173,6 +175,7 @@ impl From<&StoredReminder> for ReminderRecord {
             completed: value.completed,
             modified: value.modified,
             alarms_present: value.alarms_present,
+            absolute_alarms: value.absolute_alarms.clone(),
             recurrence_present: value.recurrence_present,
             url: value.url.clone(),
             partial: value.backup_partial,
@@ -194,6 +197,7 @@ impl From<ReminderRecord> for StoredReminder {
             completed: value.completed,
             modified: value.modified,
             alarms_present: value.alarms_present,
+            absolute_alarms: value.absolute_alarms,
             recurrence_present: value.recurrence_present,
             url: value.url,
             backup_partial: value.partial,
@@ -848,6 +852,7 @@ mod tests {
             completed: false,
             modified: None,
             alarms_present: false,
+            absolute_alarms: Some(Vec::new()),
             recurrence_present: false,
             url: None,
             backup_partial: false,
@@ -870,6 +875,8 @@ mod tests {
                 title: "New reminder".into(),
                 notes: None,
                 due: None,
+                due_time: None,
+                due_time_zone: None,
                 priority: None,
             },
             ReminderChange::Update {
@@ -995,6 +1002,8 @@ mod tests {
                 title: "New reminder".into(),
                 notes: None,
                 due: None,
+                due_time: None,
+                due_time_zone: None,
                 priority: None,
             }],
             &mut host,
@@ -1019,6 +1028,8 @@ mod tests {
                 title: added.title.clone(),
                 notes: None,
                 due: None,
+                due_time: None,
+                due_time_zone: None,
                 priority: None,
             },
             ReminderChange::Update {
@@ -1131,6 +1142,62 @@ mod tests {
             edit.due_components.as_deref(),
             original.due_components.as_ref()
         );
+    }
+
+    #[test]
+    fn journal_undo_restores_due_time_and_zone_exactly() {
+        let mut original = reminder("reminder-1", "Call Chicago");
+        original.due = Some(date(2026, 11, 3));
+        original.due_components = Some(ReminderDueComponents {
+            calendar: Some("gregorian".into()),
+            time_zone: Some("America/New_York".into()),
+            year: Some(2026),
+            month: Some(11),
+            day: Some(3),
+            hour: Some(9),
+            minute: Some(30),
+            second: Some(15),
+            nanosecond: Some(123),
+            ..ReminderDueComponents::default()
+        });
+        let mut written = original.clone();
+        written.due_components.as_mut().unwrap().hour = Some(10);
+        let change = ReminderChange::Update {
+            before: original.clone(),
+            edit: ReminderEdit {
+                due_components: written.due_components.clone().map(Box::new),
+                ..ReminderEdit::default()
+            },
+        };
+        let mut host = Scripted::new();
+        record_edit(
+            &now(),
+            &[change],
+            &ApplyResult {
+                written: vec![Some(written.clone())],
+                unrecorded: vec![false],
+            },
+            &mut host,
+        )
+        .unwrap();
+        let plan = undo_changes(None, now().timestamp(), &mut host).unwrap();
+        assert!(matches!(
+            plan.changes.as_slice(),
+            [ReminderChange::Update { before, edit }]
+                if before == &written
+                    && edit.due == FieldEdit::Unchanged
+                    && edit.due_components.as_deref() == original.due_components.as_ref()
+        ));
+    }
+
+    #[test]
+    fn older_records_distinguish_unrecorded_alarms_from_no_alarms() {
+        let record = ReminderRecord::from(&reminder("r1", "Wake up"));
+        assert_eq!(record.absolute_alarms, Some(Vec::new()));
+        let mut value = serde_json::to_value(record).unwrap();
+        value.as_object_mut().unwrap().remove("absolute_alarms");
+        let old: ReminderRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(old.absolute_alarms, None);
     }
 
     #[test]

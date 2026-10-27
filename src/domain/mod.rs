@@ -2,7 +2,8 @@ use std::cell::LazyCell;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use jiff::civil::Date;
+use jiff::civil::{Date, Time};
+use jiff::tz::TimeZone;
 use jiff::{Timestamp, Zoned};
 use miette::Diagnostic;
 use thiserror::Error;
@@ -29,6 +30,9 @@ pub struct Reminder {
     pub id: String,
     pub title: String,
     pub due: Option<Date>,
+    pub due_time: Option<Time>,
+    pub due_time_zone: Option<String>,
+    pub due_at: Option<Timestamp>,
     pub priority: Option<Priority>,
 }
 
@@ -183,6 +187,8 @@ pub struct NewReminder {
     pub title: String,
     pub list: Option<String>,
     pub due: Option<Date>,
+    pub due_time: Option<Time>,
+    pub due_time_zone: Option<String>,
     pub priority: Option<Priority>,
 }
 
@@ -234,6 +240,7 @@ pub struct StoredReminder {
     pub completed: bool,
     pub modified: Option<Timestamp>,
     pub alarms_present: bool,
+    pub absolute_alarms: Option<Vec<Timestamp>>,
     pub recurrence_present: bool,
     pub url: Option<String>,
     pub backup_partial: bool,
@@ -277,6 +284,8 @@ pub enum ReminderChange {
         title: String,
         notes: Option<String>,
         due: Option<Date>,
+        due_time: Option<Time>,
+        due_time_zone: Option<String>,
         priority: Option<Priority>,
     },
     Restore {
@@ -482,6 +491,44 @@ pub trait Reminders {
     fn list(&self) -> Result<Vec<Reminder>, BackendError>;
     fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError>;
     fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError>;
+    fn validate_time_zone(&self, _name: &str) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+pub fn local_time_zone_name_at(
+    time_zone: &TimeZone,
+    date: Date,
+    time: Time,
+) -> Result<String, jiff::Error> {
+    if let Some(name) = time_zone.iana_name() {
+        return Ok(name.to_owned());
+    }
+    fixed_offset_name_at(time_zone, date, time)
+}
+
+pub fn time_zone_is_local_at(
+    name: &str,
+    time_zone: &TimeZone,
+    date: Date,
+    time: Time,
+) -> Result<bool, jiff::Error> {
+    if time_zone.iana_name() == Some(name) {
+        return Ok(true);
+    }
+    fixed_offset_name_at(time_zone, date, time).map(|offset| name == offset)
+}
+
+fn fixed_offset_name_at(
+    time_zone: &TimeZone,
+    date: Date,
+    time: Time,
+) -> Result<String, jiff::Error> {
+    let due = date.to_datetime(time).to_zoned(time_zone.clone())?;
+    let seconds = due.offset().seconds();
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let minutes = seconds.unsigned_abs() / 60;
+    Ok(format!("GMT{sign}{:02}{:02}", minutes / 60, minutes % 60))
 }
 
 pub trait Calendar {
