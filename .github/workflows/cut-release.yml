@@ -2,15 +2,10 @@ name: Cut release
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release, such as 0.2.0. Leave empty to let git-cliff pick it from the commits."
-        required: false
-        type: string
 
 permissions:
-  contents: write
   actions: write
+  contents: write
 
 concurrency:
   group: cut-release
@@ -30,87 +25,50 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: git-cliff
-
-      - name: Require passing CI on this commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          conclusion=$(gh run list --workflow ci.yml --branch main --commit "$GITHUB_SHA" --limit 1 --json conclusion --jq '.[0].conclusion')
-          if [ "$conclusion" != "success" ]; then
-            echo "CI hasn't passed on $GITHUB_SHA (latest result: ${conclusion:-none})." >&2
-            exit 1
-          fi
-
-      - name: Pick the version
+      - name: Validate the release commit
         id: version
-        env:
-          REQUESTED: ${{ inputs.version }}
         run: |
-          last=$(git describe --tags --abbrev=0 2>/dev/null || true)
-          if [ -n "$last" ] && [ -z "$(git log "$last..HEAD" --oneline)" ]; then
-            echo "Nothing to release: no commits since $last." >&2
-            exit 1
-          fi
-          version="${REQUESTED#v}"
-          if [ -z "$version" ]; then
-            version=$(git cliff --bumped-version)
-            version="${version#v}"
-          fi
+          version=$(awk '
+            $0 == "[package]" { in_package = 1; next }
+            in_package && /^\[/ { exit }
+            in_package && /^version = "[^"]+"/ {
+              sub(/^version = "/, "")
+              sub(/".*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
           if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Not a version: $version" >&2
+            echo "Cargo.toml does not contain a releasable version: ${version:-none}" >&2
             exit 1
           fi
-          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            echo "v$version already exists." >&2
+
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists." >&2
             exit 1
+          fi
+
+          subject=$(git log -1 --format=%s)
+          expected="chore(release): $tag"
+          if [ "$subject" != "$expected" ]; then
+            escaped_version=${version//./\\.}
+            if ! grep -Eq "^## \\[$escaped_version\\]( - .+)?$" CHANGELOG.md; then
+              echo "HEAD is not '$expected', and CHANGELOG.md has no section for $version." >&2
+              exit 1
+            fi
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Bump the version and changelog
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          sed -i -E '0,/^version = ".*"/s//version = "'"$VERSION"'"/' Cargo.toml
-          cargo update --workspace
-          git cliff --tag "v$VERSION" -o CHANGELOG.md
-          git diff --stat
-
-      - name: Commit through the API and tag
+      - name: Tag the release
         env:
           VERSION: ${{ steps.version.outputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          for file in Cargo.toml Cargo.lock CHANGELOG.md; do
-            base64 -w0 "$file" > "$RUNNER_TEMP/$file.b64"
-          done
-          jq -n \
-            --arg repo "$GITHUB_REPOSITORY" \
-            --arg head "$GITHUB_SHA" \
-            --arg message "chore(release): v$VERSION" \
-            --rawfile cargo "$RUNNER_TEMP/Cargo.toml.b64" \
-            --rawfile lock "$RUNNER_TEMP/Cargo.lock.b64" \
-            --rawfile changelog "$RUNNER_TEMP/CHANGELOG.md.b64" \
-            '{
-              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
-              variables: { input: {
-                branch: { repositoryNameWithOwner: $repo, branchName: "main" },
-                expectedHeadOid: $head,
-                message: { headline: $message },
-                fileChanges: { additions: [
-                  { path: "Cargo.toml", contents: $cargo },
-                  { path: "Cargo.lock", contents: $lock },
-                  { path: "CHANGELOG.md", contents: $changelog }
-                ] }
-              } }
-            }' > "$RUNNER_TEMP/commit.json"
-          commit=$(gh api graphql --input "$RUNNER_TEMP/commit.json" --jq '.data.createCommitOnBranch.commit.oid')
-          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$commit" > /dev/null
-          echo "Tagged v$VERSION at $commit"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/v$VERSION" \
+            -f sha="$GITHUB_SHA" > /dev/null
+          echo "Tagged v$VERSION at $GITHUB_SHA"
 
       - name: Start the release build
         env:

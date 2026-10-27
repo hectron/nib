@@ -1,0 +1,152 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, such as 0.2.0. Leave empty to let git-cliff pick it from the commits."
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "Run this workflow from main." >&2
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
+
+      - name: Require passing CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion=$(gh run list --workflow ci.yml --branch main --commit "$GITHUB_SHA" --limit 1 --json conclusion --jq '.[0].conclusion')
+          if [ "$conclusion" != "success" ]; then
+            echo "CI hasn't passed on $GITHUB_SHA (latest result: ${conclusion:-none})." >&2
+            exit 1
+          fi
+
+      - name: Pick the version
+        id: version
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          last=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$last" ] && [ -z "$(git log "$last..HEAD" --oneline)" ]; then
+            echo "Nothing to release: no commits since $last." >&2
+            exit 1
+          fi
+          version="${REQUESTED#v}"
+          if [ -z "$version" ]; then
+            version=$(git cliff --bumped-version)
+            version="${version#v}"
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Not a version: $version" >&2
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version already exists." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Bump the version and changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          sed -i -E '0,/^version = ".*"/s//version = "'"$VERSION"'"/' Cargo.toml
+          cargo update --workspace
+          git cliff --tag "v$VERSION" -o CHANGELOG.md
+          git diff --stat
+
+      - name: Create the release branch and commit
+        id: commit
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="release/v$VERSION"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/heads/$branch" \
+            -f sha="$GITHUB_SHA" > /dev/null
+
+          for file in Cargo.toml Cargo.lock CHANGELOG.md; do
+            base64 -w0 "$file" > "$RUNNER_TEMP/$file.b64"
+          done
+          jq -n \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg branch "$branch" \
+            --arg head "$GITHUB_SHA" \
+            --arg message "chore(release): v$VERSION" \
+            --rawfile cargo "$RUNNER_TEMP/Cargo.toml.b64" \
+            --rawfile lock "$RUNNER_TEMP/Cargo.lock.b64" \
+            --rawfile changelog "$RUNNER_TEMP/CHANGELOG.md.b64" \
+            '{
+              query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+              variables: { input: {
+                branch: { repositoryNameWithOwner: $repo, branchName: $branch },
+                expectedHeadOid: $head,
+                message: { headline: $message },
+                fileChanges: { additions: [
+                  { path: "Cargo.toml", contents: $cargo },
+                  { path: "Cargo.lock", contents: $lock },
+                  { path: "CHANGELOG.md", contents: $changelog }
+                ] }
+              } }
+            }' > "$RUNNER_TEMP/commit.json"
+          commit=$(gh api graphql --input "$RUNNER_TEMP/commit.json" --jq '.data.createCommitOnBranch.commit.oid')
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "Created $commit on $branch"
+
+      - name: Open the release pull request
+        id: pull-request
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BRANCH: ${{ steps.commit.outputs.branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(
+            --base main
+            --head "$BRANCH"
+            --title "chore(release): v$VERSION"
+            --body "Bump the workspace version and update the changelog for v$VERSION."
+          )
+          release_label=$(gh api --paginate "repos/$GITHUB_REPOSITORY/labels?per_page=100" \
+            --jq '.[] | select(.name == "release") | .name')
+          if [ "$release_label" = "release" ]; then
+            args+=(--label release)
+          fi
+          pull_request=$(gh pr create "${args[@]}")
+          echo "url=$pull_request" >> "$GITHUB_OUTPUT"
+
+      - name: Start CI and enable auto-merge
+        env:
+          BRANCH: ${{ steps.commit.outputs.branch }}
+          PULL_REQUEST: ${{ steps.pull-request.outputs.url }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run ci.yml --ref "$BRANCH"
+          gh pr merge --auto --merge "$PULL_REQUEST"
+          echo "CI started and auto-merge enabled for $PULL_REQUEST"
