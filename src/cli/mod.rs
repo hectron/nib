@@ -27,6 +27,7 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Doctor,
+    Config(ConfigAction),
     Today { date: Date, query: EventQuery },
     NewNote(NewNote),
     ListNotes(NoteQuery),
@@ -40,6 +41,8 @@ pub enum Action {
 pub enum Command {
     /// Check system access and configuration without prompting
     Doctor,
+    /// Inspect and edit configuration
+    Config(ConfigArgs),
     /// Show today's reminders and events
     Today(TodayArgs),
     /// Create and list notes
@@ -54,6 +57,50 @@ pub enum Command {
     N(NoteCapture),
     /// Add a reminder from the rest of the line, or list reminders
     T(TaskCapture),
+}
+
+#[derive(Debug, Args)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    action: ConfigAction,
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum ConfigAction {
+    /// List effective settings
+    List {
+        /// Show where each value came from
+        #[arg(long)]
+        origin: bool,
+    },
+    /// Print one effective setting
+    Get { key: String },
+    /// Set a value in a configuration file
+    Set {
+        key: String,
+        value: String,
+        #[command(flatten)]
+        target: ConfigTargetArgs,
+    },
+    /// Remove a value from a configuration file
+    Unset {
+        key: String,
+        #[command(flatten)]
+        target: ConfigTargetArgs,
+    },
+    /// Print the user configuration path
+    Path,
+}
+
+#[derive(Debug, Clone, Copy, Default, Args, PartialEq, Eq)]
+#[group(multiple = false)]
+pub struct ConfigTargetArgs {
+    /// Write .nib.local.toml in the current directory
+    #[arg(long)]
+    pub local: bool,
+    /// Write nib.toml in the current directory
+    #[arg(long)]
+    pub project: bool,
 }
 
 #[derive(Debug, Args)]
@@ -219,6 +266,7 @@ impl Command {
     pub(crate) fn into_action(self, now: &Zoned, config: &Config) -> Result<Action, ActionError> {
         Ok(match self {
             Command::Doctor => Action::Doctor,
+            Command::Config(ConfigArgs { action }) => Action::Config(action),
             Command::Today(TodayArgs { calendar }) => Action::Today {
                 date: now.date(),
                 query: EventQuery {
@@ -291,6 +339,17 @@ impl Command {
 impl Cli {
     pub fn is_doctor(&self) -> bool {
         matches!(self.command, Command::Doctor)
+    }
+
+    pub fn is_config(&self) -> bool {
+        matches!(self.command, Command::Config(_))
+    }
+
+    pub(crate) fn into_config(self) -> Option<(bool, ConfigAction)> {
+        match self.command {
+            Command::Config(ConfigArgs { action }) => Some((self.json, action)),
+            _ => None,
+        }
     }
 }
 
@@ -395,6 +454,56 @@ mod tests {
     #[test]
     fn doctor_command() {
         assert_eq!(parse(&["doctor"]).unwrap(), Action::Doctor);
+    }
+
+    #[test]
+    fn config_commands() {
+        assert_parses(&[
+            (
+                &["config", "list", "--origin"],
+                Action::Config(ConfigAction::List { origin: true }),
+            ),
+            (
+                &["config", "get", "task.list"],
+                Action::Config(ConfigAction::Get {
+                    key: "task.list".into(),
+                }),
+            ),
+            (
+                &["config", "set", "task.list", "Work", "--local"],
+                Action::Config(ConfigAction::Set {
+                    key: "task.list".into(),
+                    value: "Work".into(),
+                    target: ConfigTargetArgs {
+                        local: true,
+                        project: false,
+                    },
+                }),
+            ),
+            (
+                &["config", "unset", "note.folder", "--project"],
+                Action::Config(ConfigAction::Unset {
+                    key: "note.folder".into(),
+                    target: ConfigTargetArgs {
+                        local: false,
+                        project: true,
+                    },
+                }),
+            ),
+            (&["config", "path"], Action::Config(ConfigAction::Path)),
+        ]);
+
+        let error = Cli::try_parse_from([
+            "nib",
+            "config",
+            "set",
+            "task.list",
+            "Work",
+            "--local",
+            "--project",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

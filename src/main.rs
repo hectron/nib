@@ -27,6 +27,23 @@ fn main() -> miette::Result<()> {
         }
         return Ok(());
     }
+    if cli.is_config() {
+        let result = nib::run_config(
+            cli,
+            inspection,
+            &current_dir,
+            user_config.as_deref(),
+            nib::Style::detect(),
+        )?;
+        print_output(&result.text)?;
+        if let Some(warning) = result.warning {
+            writeln!(io::stderr().lock(), "warning: {warning}").into_diagnostic()?;
+        }
+        if result.failed {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let config = inspection.into_config()?;
     let now = Zoned::new(Timestamp::now(), local_zone());
     let demo = std::env::var_os("NIB_DEMO").is_some_and(|value| !value.is_empty());
