@@ -3,6 +3,8 @@ Output docs/demo.gif
 Require nib
 
 Set Shell "bash"
+Set Theme "rose-pine-dawn"
+Set FontFamily "TX-02"
 Set FontSize 16
 Set Width 1100
 Set Height 700
