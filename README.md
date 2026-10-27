@@ -64,6 +64,36 @@ A `nib.toml` in a project directory overrides these field by field, and `.nib.lo
 
 Run `nib config list --origin` to see every effective value and where it came from.
 
+## Shell completions
+
+Load completions for your shell with one line in its startup file:
+
+```bash
+# zsh: ~/.zshrc
+autoload -U compinit && compinit
+source <(nib completions zsh)
+
+# bash: ~/.bashrc
+source <(nib completions bash)
+
+# fish: ~/.config/fish/config.fish
+nib completions fish | source
+```
+
+You can instead install zsh completions on `fpath`:
+
+```bash
+mkdir -p ~/.zsh/completions
+nib completions zsh > ~/.zsh/completions/_nib
+fpath=(~/.zsh/completions $fpath)
+autoload -U compinit && compinit
+```
+
+Completions include current reminder list and calendar names, recently seen Notes folders, and reminder priorities.
+Live names require `nib` to be on `PATH` under that name. Aliases and relative paths still receive static completions.
+
+After you use completions, nib stores reminder list, calendar, and Notes folder names in plain text at `~/Library/Caches/nib/completions.json` with mode `0600`. The file remains after access is revoked. Delete it to clear the cached names; nib recreates it the next time you use completions.
+
 ## Why nib
 
 - Fast, focused commands with short aliases and useful defaults.

@@ -1051,6 +1051,7 @@ mod tests {
         .unwrap()
         .command
         .into_action(&now, &config)
+        .unwrap()
         .unwrap();
         assert!(matches!(
             task,
@@ -1069,6 +1070,7 @@ mod tests {
         .unwrap()
         .command
         .into_action(&now, &config)
+        .unwrap()
         .unwrap();
         assert!(matches!(
             events,

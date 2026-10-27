@@ -304,9 +304,15 @@ mod tests {
             .to_zoned(TimeZone::fixed(offset(-4)))
             .unwrap();
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        let json = cli.json;
+        let action = cli
+            .command
+            .into_action(&now, &crate::domain::Config::default())
+            .unwrap()
+            .unwrap();
         run(
-            cli,
-            &crate::domain::Config::default(),
+            action,
+            json,
             &now,
             &backends(&now),
             Style::default(),
