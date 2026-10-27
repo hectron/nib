@@ -290,6 +290,7 @@ fn writable_reminder_calendar_named(
         _ => Err(BackendError::Ambiguous {
             kind: "writable reminder list",
             name: name.into(),
+            matches: Vec::new(),
         }),
     }
 }

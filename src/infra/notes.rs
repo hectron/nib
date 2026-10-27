@@ -6,22 +6,26 @@ use serde::Deserialize;
 use crate::domain::{BackendError, NewNote, Note, NoteQuery, Notes, terminal_name};
 
 const APP: &str = "Apple Notes";
+const FOLDER_AMBIGUOUS: &str = "NIB_FOLDER_AMBIGUOUS:";
 const FOLDER_NOT_FOUND: &str = "NIB_FOLDER_NOT_FOUND";
 const CREATE_SCRIPT: &str = r#"
-function folderFor(notes, argv) {
-    if (argv.length === 1) {
-        return notes.defaultAccount().defaultFolder();
-    }
-    const folders = notes.folders.whose({name: argv[1]})();
+function folderNamed(notes, name) {
+    const folders = notes.folders.whose({name: name})();
     if (folders.length === 0) {
         throw new Error("NIB_FOLDER_NOT_FOUND");
+    }
+    if (folders.length > 1) {
+        const accounts = notes.accounts()
+            .filter(account => account.folders.whose({name: name})().length > 0)
+            .map(account => account.name());
+        throw new Error("NIB_FOLDER_AMBIGUOUS:" + JSON.stringify(accounts));
     }
     return folders[0];
 }
 
 function run(argv) {
     const notes = Application("Notes");
-    const folder = folderFor(notes, argv);
+    const folder = argv.length === 1 ? notes.defaultAccount().defaultFolder() : folderNamed(notes, argv[1]);
     const created = notes.Note({body: argv[0]});
     folder.notes.push(created);
     const modified = created.modificationDate();
@@ -35,36 +39,48 @@ function run(argv) {
 }
 "#;
 const LIST_SCRIPT: &str = r#"
-function selectedFolders(notes, argv) {
-    if (argv.length === 0) {
-        return notes.folders();
-    }
-    const folders = notes.folders.whose({name: argv[0]})();
+function folderNamed(notes, name) {
+    const folders = notes.folders.whose({name: name})();
     if (folders.length === 0) {
         throw new Error("NIB_FOLDER_NOT_FOUND");
     }
-    return folders;
+    if (folders.length > 1) {
+        const accounts = notes.accounts()
+            .filter(account => account.folders.whose({name: name})().length > 0)
+            .map(account => account.name());
+        throw new Error("NIB_FOLDER_AMBIGUOUS:" + JSON.stringify(accounts));
+    }
+    return folders[0];
+}
+
+function append(result, folder, ids, names, dates, locked) {
+    for (let index = 0; index < ids.length; index += 1) {
+        result.push({
+            id: ids[index],
+            title: names[index],
+            folder: folder,
+            modified: dates[index] === null ? null : dates[index].toISOString(),
+            locked: locked[index]
+        });
+    }
 }
 
 function run(argv) {
     const notes = Application("Notes");
-    const folders = selectedFolders(notes, argv);
     const result = [];
-    for (const folder of folders) {
-        const folderName = folder.name();
-        const names = folder.notes.name();
-        const ids = folder.notes.id();
-        const dates = folder.notes.modificationDate();
-        const locked = folder.notes.passwordProtected();
-        for (let index = 0; index < ids.length; index += 1) {
-            result.push({
-                id: ids[index],
-                title: names[index],
-                folder: folderName,
-                modified: dates[index] === null ? null : dates[index].toISOString(),
-                locked: locked[index]
-            });
+    if (argv.length === 0) {
+        const folders = notes.folders.name();
+        const ids = notes.folders.notes.id();
+        const names = notes.folders.notes.name();
+        const dates = notes.folders.notes.modificationDate();
+        const locked = notes.folders.notes.passwordProtected();
+        for (let index = 0; index < folders.length; index += 1) {
+            append(result, folders[index], ids[index], names[index], dates[index], locked[index]);
         }
+    } else {
+        const folder = folderNamed(notes, argv[0]);
+        const selected = folder.notes;
+        append(result, folder.name(), selected.id(), selected.name(), selected.modificationDate(), selected.passwordProtected());
     }
     return JSON.stringify(result);
 }
@@ -114,7 +130,7 @@ impl AppleNotes {
 
 impl Notes for AppleNotes {
     fn create(&self, note: NewNote) -> Result<Note, BackendError> {
-        let args = create_arguments(&note);
+        let args = create_arguments(&note)?;
         let created: ScriptNote = self.execute(CREATE_SCRIPT, &args, note.folder.as_deref())?;
         Ok(created.into())
     }
@@ -130,12 +146,12 @@ impl Notes for AppleNotes {
     }
 }
 
-fn create_arguments(note: &NewNote) -> Vec<String> {
-    let mut args = vec![html_body(&note.title)];
+fn create_arguments(note: &NewNote) -> Result<Vec<String>, BackendError> {
+    let mut args = vec![html_body(&note.title)?];
     if let Some(folder) = &note.folder {
         args.push(folder.clone());
     }
-    args
+    Ok(args)
 }
 
 struct ScriptOutput {
@@ -192,12 +208,36 @@ fn script_error(stderr: &[u8], folder: Option<&str>, terminal: &str) -> BackendE
             kind: "folder",
             name: folder.unwrap_or_default().into(),
         }
+    } else if let Some(accounts) = ambiguous_accounts(&message) {
+        BackendError::Ambiguous {
+            kind: "folder",
+            name: folder.unwrap_or_default().into(),
+            matches: accounts
+                .into_iter()
+                .map(|account| format!("account \"{account}\""))
+                .collect(),
+        }
     } else {
         BackendError::Failed { app: APP, message }
     }
 }
 
-fn html_body(title: &str) -> String {
+fn ambiguous_accounts(message: &str) -> Option<Vec<String>> {
+    let (_, encoded) = message.split_once(FOLDER_AMBIGUOUS)?;
+    let mut deserializer = serde_json::Deserializer::from_str(encoded);
+    Vec::deserialize(&mut deserializer).ok()
+}
+
+fn html_body(title: &str) -> Result<String, BackendError> {
+    if title.starts_with(' ')
+        || title.ends_with(' ')
+        || title.contains("  ")
+        || title
+            .chars()
+            .any(|character| character.is_whitespace() && character != ' ')
+    {
+        return Err(BackendError::UnsupportedNoteWhitespace);
+    }
     let mut escaped = String::with_capacity(title.len() + 11);
     for character in title.chars() {
         match character {
@@ -209,7 +249,7 @@ fn html_body(title: &str) -> String {
             _ => escaped.push(character),
         }
     }
-    format!("<div>{escaped}</div>")
+    Ok(format!("<div>{escaped}</div>"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,9 +304,22 @@ mod tests {
     #[test]
     fn html_escapes_note_titles() {
         assert_eq!(
-            html_body(r#"R&D <plan> "quoted" 'draft' \\ path"#),
+            html_body(r#"R&D <plan> "quoted" 'draft' \\ path"#).unwrap(),
             r"<div>R&amp;D &lt;plan&gt; &quot;quoted&quot; &#39;draft&#39; \\ path</div>"
         );
+    }
+
+    #[test]
+    fn rejects_title_whitespace_that_notes_would_normalize() {
+        for title in [" A", "A ", "A  B", "A\tB", "A\nB"] {
+            assert!(
+                matches!(
+                    html_body(title),
+                    Err(BackendError::UnsupportedNoteWhitespace)
+                ),
+                "{title:?}"
+            );
+        }
     }
 
     #[test]
@@ -275,7 +328,7 @@ mod tests {
             title: r#"A "quote" and \\ path <tag>"#.into(),
             folder: Some(r#"Folder "one" \\"#.into()),
         };
-        let args = create_arguments(&note);
+        let args = create_arguments(&note).unwrap();
         assert_eq!(
             args,
             [
@@ -350,13 +403,26 @@ mod tests {
 
     #[test]
     fn list_script_batches_properties_and_never_reads_bodies() {
-        for property in ["name", "id", "modificationDate", "passwordProtected"] {
+        for property in ["id", "name", "modificationDate", "passwordProtected"] {
             assert!(
-                LIST_SCRIPT.contains(&format!("folder.notes.{property}()")),
+                LIST_SCRIPT.contains(&format!("notes.folders.notes.{property}()")),
+                "{property}"
+            );
+            assert!(
+                LIST_SCRIPT.contains(&format!("selected.{property}()")),
                 "{property}"
             );
         }
-        assert!(!LIST_SCRIPT.contains("folder.notes.body"));
+        assert!(!LIST_SCRIPT.contains("body"));
+    }
+
+    #[test]
+    fn folder_selection_detects_ambiguity_before_use() {
+        for script in [CREATE_SCRIPT, LIST_SCRIPT] {
+            let ambiguity = script.find("if (folders.length > 1)").unwrap();
+            let selection = script.find("return folders[0]").unwrap();
+            assert!(ambiguity < selection);
+        }
     }
 
     #[test]
@@ -379,6 +445,26 @@ mod tests {
         assert!(matches!(
             missing,
             Err(BackendError::NotFound { kind: "folder", name }) if name == "Archive"
+        ));
+
+        let ambiguous: Result<Vec<ScriptNote>, _> = parse(
+            &output(
+                false,
+                "",
+                "Error: NIB_FOLDER_AMBIGUOUS:[\"iCloud\",\"On My Mac\"] (-2700)",
+            ),
+            Some("Work"),
+            "Ghostty",
+        );
+        assert_eq!(
+            ambiguous.as_ref().unwrap_err().to_string(),
+            "more than one folder is named \"Work\" (matches: account \"iCloud\", account \"On My Mac\")"
+        );
+        assert!(matches!(
+            ambiguous,
+            Err(BackendError::Ambiguous { kind: "folder", name, matches })
+                if name == "Work"
+                    && matches == ["account \"iCloud\"", "account \"On My Mac\""]
         ));
     }
 
