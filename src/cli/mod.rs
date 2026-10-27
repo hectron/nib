@@ -26,15 +26,23 @@ pub struct Cli {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    Today { date: Date, query: EventQuery },
+    Today {
+        date: Date,
+        query: EventQuery,
+    },
     NewNote(NewNote),
     ListNotes(NoteQuery),
     AddTask(NewReminder),
     ListTasks,
-    EditTasks { list: Option<String> },
+    EditTasks {
+        list: Option<String>,
+    },
     ListEvents(EventQuery),
     Log,
-    Undo { entry: Option<String> },
+    Undo {
+        entry: Option<String>,
+        resolve: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -62,8 +70,12 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct UndoArgs {
     /// Journal entry identifier from `nib log`
-    #[arg(value_name = "ENTRY")]
+    #[arg(value_name = "ENTRY", conflicts_with = "resolve")]
     entry: Option<String>,
+
+    /// Resolve an interrupted undo journal entry
+    #[arg(long, value_name = "ID")]
+    resolve: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -294,7 +306,7 @@ impl Command {
                 }),
             },
             Command::Log => Action::Log,
-            Command::Undo(UndoArgs { entry }) => Action::Undo { entry },
+            Command::Undo(UndoArgs { entry, resolve }) => Action::Undo { entry, resolve },
         })
     }
 }
@@ -449,11 +461,25 @@ mod tests {
         assert_parses(&[
             (&["log"], Action::Log),
             (&["--json", "log"], Action::Log),
-            (&["undo"], Action::Undo { entry: None }),
+            (
+                &["undo"],
+                Action::Undo {
+                    entry: None,
+                    resolve: None,
+                },
+            ),
             (
                 &["undo", "20261026T090000-journal-abcd"],
                 Action::Undo {
                     entry: Some("20261026T090000-journal-abcd".into()),
+                    resolve: None,
+                },
+            ),
+            (
+                &["undo", "--resolve", "20261026T090100-journal-efgh"],
+                Action::Undo {
+                    entry: None,
+                    resolve: Some("20261026T090100-journal-efgh".into()),
                 },
             ),
         ]);

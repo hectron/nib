@@ -18,6 +18,12 @@ pub enum Outcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    Applied,
+    Removed,
+}
+
 pub fn run(
     entry: Option<&str>,
     now: &Zoned,
@@ -25,7 +31,7 @@ pub fn run(
     host: &mut dyn Host,
 ) -> Result<Outcome> {
     let _lock = host.lock_journal().into_diagnostic()?;
-    let (id, changes, counts, partial) = journal::undo_changes(entry, host)?;
+    let (id, changes, counts, partial) = journal::undo_changes(entry, now.timestamp(), host)?;
     host.say(&clean_lines(&describe(&id, &changes, partial)));
     if !confirmed(host, &changes)? {
         return Ok(Outcome::Cancelled { id });
@@ -41,7 +47,11 @@ pub fn run(
     let applied = match backends.reminders.apply(&changes) {
         Ok(applied) => applied,
         Err(error) => {
-            host.remove_journal(&pending_id).into_diagnostic()?;
+            if let Err(removal_error) = host.remove_journal(&pending_id) {
+                return Err(miette::miette!(
+                    "{error}; additionally, nib couldn't remove pending journal entry {pending_id:?}: {removal_error}"
+                ));
+            }
             return Err(error.into());
         }
     };
@@ -53,6 +63,28 @@ pub fn run(
         id,
         undo_id: pending_id,
         counts,
+    })
+}
+
+pub fn resolve(id: &str, now: &Zoned, host: &mut dyn Host) -> Result<Resolution> {
+    let _lock = host.lock_journal().into_diagnostic()?;
+    let titles = journal::pending_undo(id, now.timestamp(), host)?;
+    let mut lines = vec![format!("Pending undo {id} would have changed:")];
+    lines.extend(
+        titles
+            .iter()
+            .map(|title| format!("  - \"{}\"", markdown::normalize_title(title))),
+    );
+    host.say(&clean_lines(&lines.join("\n")));
+    let answer = host
+        .ask("Are these undo changes visible in Reminders? [y/N] ")
+        .into_diagnostic()?;
+    let applied = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
+    journal::resolve_pending(id, applied, now.timestamp(), host)?;
+    Ok(if applied {
+        Resolution::Applied
+    } else {
+        Resolution::Removed
     })
 }
 
@@ -176,6 +208,7 @@ mod tests {
 
     struct State {
         reminder: Rc<RefCell<StoredReminder>>,
+        unrecorded: bool,
     }
 
     impl Reminders for State {
@@ -207,6 +240,7 @@ mod tests {
             self.reminder.replace(written.clone());
             Ok(ApplyResult {
                 written: vec![Some(written)],
+                unrecorded: vec![self.unrecorded],
             })
         }
     }
@@ -236,7 +270,10 @@ mod tests {
         }
     }
 
-    fn setup(conflict: bool) -> (Backends, Rc<RefCell<StoredReminder>>, Scripted) {
+    fn setup(
+        conflict: bool,
+        unrecorded: bool,
+    ) -> (Backends, Rc<RefCell<StoredReminder>>, Scripted) {
         let before = reminder(false);
         let written = reminder(true);
         let change = ReminderChange::Update {
@@ -252,6 +289,7 @@ mod tests {
             &[change],
             &ApplyResult {
                 written: vec![Some(written.clone())],
+                unrecorded: Vec::new(),
             },
             &mut host,
         )
@@ -266,6 +304,7 @@ mod tests {
             move || {
                 Box::new(State {
                     reminder: backend_state,
+                    unrecorded,
                 })
             },
             || -> Box<dyn Calendar> { unreachable!() },
@@ -275,7 +314,7 @@ mod tests {
 
     #[test]
     fn undo_confirms_backs_up_applies_and_journals() {
-        let (backends, state, mut host) = setup(false);
+        let (backends, state, mut host) = setup(false, false);
         let Outcome::Applied { id, .. } = run(None, &now(), &backends, &mut host).unwrap() else {
             panic!("undo should be applied");
         };
@@ -290,7 +329,7 @@ mod tests {
 
     #[test]
     fn undo_stops_all_changes_on_a_conflict() {
-        let (backends, state, mut host) = setup(true);
+        let (backends, state, mut host) = setup(true, false);
         let result = run(None, &now(), &backends, &mut host);
         assert!(result.unwrap_err().to_string().contains("Finish report"));
         assert!(state.borrow().completed);
@@ -299,7 +338,7 @@ mod tests {
 
     #[test]
     fn failed_final_journal_save_leaves_pending_marker_and_refuses_second_undo() {
-        let (backends, state, mut host) = setup(false);
+        let (backends, state, mut host) = setup(false, false);
         host.fail_next_journal_replace();
         let first = run(None, &now(), &backends, &mut host).unwrap_err();
         assert!(first.to_string().contains("injected journal save failure"));
@@ -308,8 +347,80 @@ mod tests {
 
         let second = run(None, &now(), &backends, &mut host).unwrap_err();
         let message = second.to_string();
-        assert!(message.contains("still pending"));
+        assert!(message.contains("is pending"));
         assert!(message.contains("/backups/20261026T090000-journal-test2.json"));
+    }
+
+    #[test]
+    fn post_commit_recording_problem_finishes_the_pending_undo() {
+        let (backends, state, mut host) = setup(false, true);
+
+        let outcome = run(None, &now(), &backends, &mut host).unwrap();
+
+        assert!(matches!(outcome, Outcome::Applied { .. }));
+        assert!(!state.borrow().completed);
+        assert!(host.journals[1].1.contains("\"status\": \"applied\""));
+        assert!(host.journals[1].1.contains("\"unrecorded\": true"));
+    }
+
+    #[test]
+    fn apply_and_pending_removal_errors_are_both_reported() {
+        let (backends, _, mut host) = setup(true, false);
+        host.fail_next_journal_remove();
+
+        let error = run(None, &now(), &backends, &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Finish report"));
+        assert!(error.contains("injected journal removal failure"));
+    }
+
+    #[test]
+    fn resolving_a_pending_undo_marks_it_applied_or_removes_it() {
+        let (backends, _, mut applied_host) = setup(false, false);
+        applied_host.fail_next_journal_replace();
+        run(None, &now(), &backends, &mut applied_host).unwrap_err();
+        applied_host = applied_host.answer("yes");
+        let pending_id = applied_host.journals[1]
+            .0
+            .strip_suffix(".json")
+            .unwrap()
+            .to_owned();
+        let pending_summaries = journal::summaries(now().timestamp(), &mut applied_host).unwrap();
+        assert_eq!(
+            pending_summaries[0].status,
+            crate::domain::JournalStatus::Pending
+        );
+        assert!(!pending_summaries[1].undone);
+
+        assert_eq!(
+            resolve(&pending_id, &now(), &mut applied_host).unwrap(),
+            Resolution::Applied
+        );
+        let summaries = journal::summaries(now().timestamp(), &mut applied_host).unwrap();
+        assert_eq!(summaries[0].status, crate::domain::JournalStatus::Applied);
+        assert!(summaries[1].undone);
+        let error = journal::undo_changes(Some(&pending_id), now().timestamp(), &mut applied_host)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("can't be reversed"));
+
+        let (backends, _, mut removed_host) = setup(false, false);
+        removed_host.fail_next_journal_replace();
+        run(None, &now(), &backends, &mut removed_host).unwrap_err();
+        removed_host = removed_host.answer("no");
+        let pending_id = removed_host.journals[1]
+            .0
+            .strip_suffix(".json")
+            .unwrap()
+            .to_owned();
+
+        assert_eq!(
+            resolve(&pending_id, &now(), &mut removed_host).unwrap(),
+            Resolution::Removed
+        );
+        assert_eq!(removed_host.journals.len(), 1);
     }
 
     #[test]

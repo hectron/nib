@@ -154,6 +154,21 @@ pub fn undo_cancelled(id: &str, json: bool) -> Result<String> {
     Ok("Nothing was changed.".into())
 }
 
+pub fn undo_resolution(id: &str, applied: bool, json: bool) -> Result<String> {
+    if json {
+        return to_json(&UndoResolutionJson {
+            id,
+            resolved: true,
+            applied,
+        });
+    }
+    if applied {
+        Ok(format!("Marked pending undo {id} as applied."))
+    } else {
+        Ok(format!("Removed pending undo {id}."))
+    }
+}
+
 fn count(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("1 {noun}")
@@ -327,13 +342,22 @@ struct TodayJson<'a> {
 struct JournalJson<'a> {
     id: &'a str,
     time: Timestamp,
+    written_at: Timestamp,
     action: &'static str,
+    status: &'static str,
     undo_of: Option<&'a str>,
     undone: bool,
     added: usize,
     updated: usize,
     completed: usize,
     deleted: usize,
+}
+
+#[derive(Serialize)]
+struct UndoResolutionJson<'a> {
+    id: &'a str,
+    resolved: bool,
+    applied: bool,
 }
 
 #[derive(Serialize)]
@@ -352,7 +376,9 @@ impl Serialize for JournalSummary {
         JournalJson {
             id: &self.id,
             time: self.time,
+            written_at: self.written_at,
             action: self.action.as_str(),
+            status: self.status.as_str(),
             undo_of: self.undo_of.as_deref(),
             undone: self.undone,
             added: self.counts.added,
@@ -367,8 +393,9 @@ impl Serialize for JournalSummary {
 impl Tabular for JournalSummary {
     const HEADER: &'static [&'static str] = &[
         "ENTRY",
-        "TIME",
+        "WRITTEN",
         "ACTION",
+        "STATUS",
         "UNDO OF",
         "UNDONE",
         "ADDED",
@@ -381,8 +408,9 @@ impl Tabular for JournalSummary {
     fn row(&self) -> Vec<String> {
         vec![
             self.id.clone(),
-            self.time.to_string(),
+            self.written_at.to_string(),
             self.action.as_str().into(),
+            self.status.as_str().into(),
             self.undo_of.clone().unwrap_or_default(),
             if self.undone {
                 "yes".into()

@@ -162,6 +162,7 @@ impl Reminders for Demo {
                 .enumerate()
                 .map(|(index, change)| demo_written(index, change))
                 .collect(),
+            unrecorded: Vec::new(),
         })
     }
 }

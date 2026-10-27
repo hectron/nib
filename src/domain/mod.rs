@@ -210,6 +210,7 @@ pub enum ReminderChange {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApplyResult {
     pub written: Vec<Option<StoredReminder>>,
+    pub unrecorded: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -230,10 +231,27 @@ impl ChangeCounts {
 pub struct JournalSummary {
     pub id: String,
     pub time: Timestamp,
+    pub written_at: Timestamp,
     pub action: JournalAction,
+    pub status: JournalStatus,
     pub undo_of: Option<String>,
     pub undone: bool,
     pub counts: ChangeCounts,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalStatus {
+    Applied,
+    Pending,
+}
+
+impl JournalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Pending => "pending",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

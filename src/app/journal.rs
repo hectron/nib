@@ -6,8 +6,8 @@ use miette::{IntoDiagnostic, Result, miette};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    ApplyResult, ChangeCounts, FieldEdit, JournalAction, JournalSummary, Priority, ReminderChange,
-    ReminderDueComponents, ReminderEdit, StoredReminder,
+    ApplyResult, ChangeCounts, FieldEdit, JournalAction, JournalStatus, JournalSummary, Priority,
+    ReminderChange, ReminderDueComponents, ReminderEdit, StoredReminder,
 };
 use crate::infra::host::{Host, JournalFile};
 
@@ -16,6 +16,8 @@ const VERSION: u8 = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Entry {
     version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sequence: Option<u64>,
     time: Timestamp,
     action: Action,
     #[serde(default)]
@@ -56,6 +58,7 @@ struct Loaded {
     id: String,
     path: std::path::PathBuf,
     written: u128,
+    written_at: Option<Timestamp>,
     entry: Entry,
 }
 
@@ -94,6 +97,8 @@ struct ReminderRecord {
     recurrence_present: bool,
     url: Option<String>,
     partial: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unrecorded: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +167,7 @@ impl From<&StoredReminder> for ReminderRecord {
             recurrence_present: value.recurrence_present,
             url: value.url.clone(),
             partial: value.backup_partial,
+            unrecorded: None,
         }
     }
 }
@@ -181,7 +187,16 @@ impl From<ReminderRecord> for StoredReminder {
             alarms_present: value.alarms_present,
             recurrence_present: value.recurrence_present,
             url: value.url,
-            backup_partial: value.partial,
+            backup_partial: value.partial || value.unrecorded.unwrap_or(false),
+        }
+    }
+}
+
+impl ReminderRecord {
+    fn applied(value: &StoredReminder, unrecorded: bool) -> Self {
+        Self {
+            unrecorded: unrecorded.then_some(true),
+            ..Self::from(value)
         }
     }
 }
@@ -242,6 +257,7 @@ pub fn record_edit(
     result: &ApplyResult,
     host: &mut dyn Host,
 ) -> Result<String> {
+    let _lock = host.lock_journal().into_diagnostic()?;
     record(now, Action::TaskEdit, None, changes, result, host)
 }
 
@@ -253,6 +269,7 @@ pub fn begin_undo(
 ) -> Result<String> {
     let entry = Entry {
         version: VERSION,
+        sequence: Some(next_sequence(now.timestamp(), host)?),
         time: now.timestamp(),
         action: Action::Undo,
         status: Status::Pending,
@@ -271,7 +288,15 @@ pub fn finish_undo(
     result: &ApplyResult,
     host: &mut dyn Host,
 ) -> Result<String> {
-    let entry = applied_entry(now, Action::Undo, Some(undo_of.to_owned()), changes, result)?;
+    let sequence = entry_sequence(id, now.timestamp(), host)?;
+    let entry = applied_entry(
+        now,
+        sequence,
+        Action::Undo,
+        Some(undo_of.to_owned()),
+        changes,
+        result,
+    )?;
     let contents = serde_json::to_string_pretty(&entry).into_diagnostic()?;
     let path = host.replace_journal(id, &contents).into_diagnostic()?;
     Ok(path
@@ -289,12 +314,20 @@ fn record(
     result: &ApplyResult,
     host: &mut dyn Host,
 ) -> Result<String> {
-    let entry = applied_entry(now, action, undo_of, changes, result)?;
+    let entry = applied_entry(
+        now,
+        Some(next_sequence(now.timestamp(), host)?),
+        action,
+        undo_of,
+        changes,
+        result,
+    )?;
     save_new(now, &entry, host)
 }
 
 fn applied_entry(
     now: &Zoned,
+    sequence: Option<u64>,
     action: Action,
     undo_of: Option<String>,
     changes: &[ReminderChange],
@@ -303,21 +336,27 @@ fn applied_entry(
     if changes.len() != result.written.len() {
         return Err(miette!("Reminders returned an incomplete apply result"));
     }
+    if !result.unrecorded.is_empty() && changes.len() != result.unrecorded.len() {
+        return Err(miette!("Reminders returned incomplete recording metadata"));
+    }
     let mut journal_changes = Vec::with_capacity(changes.len());
-    for (change, written) in changes.iter().zip(&result.written) {
+    for (index, (change, written)) in changes.iter().zip(&result.written).enumerate() {
+        let unrecorded = result.unrecorded.get(index).copied().unwrap_or(false);
         journal_changes.push(match change {
             ReminderChange::Add { .. } | ReminderChange::Restore { .. } => Change::Added {
-                written: ReminderRecord::from(
+                written: ReminderRecord::applied(
                     written
                         .as_ref()
                         .ok_or_else(|| miette!("Reminders didn't return an added reminder"))?,
+                    unrecorded,
                 ),
             },
             ReminderChange::Update { before, edit } => {
-                let written = ReminderRecord::from(
+                let written = ReminderRecord::applied(
                     written
                         .as_ref()
                         .ok_or_else(|| miette!("Reminders didn't return an updated reminder"))?,
+                    unrecorded,
                 );
                 if edit.completed == Some(true) {
                     Change::Completed {
@@ -338,6 +377,7 @@ fn applied_entry(
     }
     Ok(Entry {
         version: VERSION,
+        sequence,
         time: now.timestamp(),
         action,
         status: Status::Applied,
@@ -345,6 +385,31 @@ fn applied_entry(
         planned_changes: Vec::new(),
         changes: journal_changes,
     })
+}
+
+fn next_sequence(now: Timestamp, host: &mut dyn Host) -> Result<u64> {
+    let maximum = host
+        .journal_files(now)
+        .into_diagnostic()?
+        .into_iter()
+        .filter_map(|file| file.contents.ok())
+        .filter_map(|contents| serde_json::from_str::<Entry>(&contents).ok())
+        .filter_map(|entry| entry.sequence)
+        .max()
+        .unwrap_or(0);
+    maximum
+        .checked_add(1)
+        .ok_or_else(|| miette!("journal sequence is exhausted"))
+}
+
+fn entry_sequence(id: &str, now: Timestamp, host: &mut dyn Host) -> Result<Option<u64>> {
+    host.journal_files(now)
+        .into_diagnostic()?
+        .into_iter()
+        .find(|file| file.id == id)
+        .ok_or_else(|| miette!("journal entry {id:?} not found"))
+        .and_then(parse)
+        .map(|loaded| loaded.entry.sequence)
 }
 
 fn save_new(now: &Zoned, entry: &Entry, host: &mut dyn Host) -> Result<String> {
@@ -380,9 +445,9 @@ impl From<&ReminderChange> for PlannedChange {
     }
 }
 
-pub fn summaries(host: &mut dyn Host) -> Result<Vec<JournalSummary>> {
+pub fn summaries(now: Timestamp, host: &mut dyn Host) -> Result<Vec<JournalSummary>> {
     let mut entries = Vec::new();
-    for file in host.journal_files().into_diagnostic()? {
+    for file in host.journal_files(now).into_diagnostic()? {
         match parse(file) {
             Ok(entry) => entries.push(entry),
             Err(error) => host.say(&format!("warning: {error}")),
@@ -398,7 +463,9 @@ pub fn summaries(host: &mut dyn Host) -> Result<Vec<JournalSummary>> {
                 undone: inactive.contains(&loaded.id),
                 id: loaded.id,
                 time: loaded.entry.time,
+                written_at: loaded.written_at.unwrap_or(loaded.entry.time),
                 action: action(loaded.entry.action),
+                status: status(loaded.entry.status),
                 undo_of: loaded.entry.undo_of,
                 counts: entry_counts,
             }
@@ -408,16 +475,18 @@ pub fn summaries(host: &mut dyn Host) -> Result<Vec<JournalSummary>> {
 
 pub fn undo_changes(
     wanted: Option<&str>,
+    now: Timestamp,
     host: &mut dyn Host,
 ) -> Result<(String, Vec<ReminderChange>, ChangeCounts, bool)> {
-    let mut entries = load(host)?;
+    let mut entries = load(now, host)?;
     sort_entries(&mut entries);
     if let Some(pending) = entries
         .iter()
         .find(|loaded| loaded.entry.status == Status::Pending)
     {
         return Err(miette!(
-            "undo journal entry {:?} is still pending; inspect {} before trying another undo",
+            "undo journal entry {:?} is pending because an earlier undo was interrupted; the journal lock rules out a concurrent run. Inspect Reminders, then run `nib undo --resolve {}`. The record is at {}",
+            pending.id,
             pending.id,
             pending.path.display()
         ));
@@ -443,6 +512,12 @@ pub fn undo_changes(
     };
     let id = loaded.id;
     let entry = loaded.entry;
+    if entry.action == Action::Undo && entry.changes.is_empty() && !entry.planned_changes.is_empty()
+    {
+        return Err(miette!(
+            "journal entry {id:?} was resolved after an interrupted undo and can't be reversed because its committed values weren't recorded"
+        ));
+    }
     let partial = entry.changes.iter().any(|change| match change {
         Change::Deleted { backup } => backup.partial,
         _ => false,
@@ -471,8 +546,51 @@ pub fn undo_changes(
     Ok((id, changes, undo_counts, partial))
 }
 
-fn load(host: &mut dyn Host) -> Result<Vec<Loaded>> {
-    host.journal_files()
+pub fn pending_undo(id: &str, now: Timestamp, host: &mut dyn Host) -> Result<Vec<String>> {
+    let loaded = load(now, host)?
+        .into_iter()
+        .find(|loaded| loaded.id == id)
+        .ok_or_else(|| miette!("journal entry {id:?} not found"))?;
+    if loaded.entry.status != Status::Pending {
+        return Err(miette!("journal entry {id:?} is not pending"));
+    }
+    Ok(loaded
+        .entry
+        .planned_changes
+        .iter()
+        .map(planned_title)
+        .collect())
+}
+
+pub fn resolve_pending(id: &str, applied: bool, now: Timestamp, host: &mut dyn Host) -> Result<()> {
+    let mut loaded = load(now, host)?
+        .into_iter()
+        .find(|loaded| loaded.id == id)
+        .ok_or_else(|| miette!("journal entry {id:?} not found"))?;
+    if loaded.entry.status != Status::Pending {
+        return Err(miette!("journal entry {id:?} is not pending"));
+    }
+    if !applied {
+        host.remove_journal(id).into_diagnostic()?;
+        return Ok(());
+    }
+    loaded.entry.status = Status::Applied;
+    let contents = serde_json::to_string_pretty(&loaded.entry).into_diagnostic()?;
+    host.replace_journal(id, &contents).into_diagnostic()?;
+    Ok(())
+}
+
+fn planned_title(change: &PlannedChange) -> String {
+    match change {
+        PlannedChange::Add { title }
+        | PlannedChange::Restore { title, .. }
+        | PlannedChange::Update { title, .. }
+        | PlannedChange::Delete { title, .. } => title.clone(),
+    }
+}
+
+fn load(now: Timestamp, host: &mut dyn Host) -> Result<Vec<Loaded>> {
+    host.journal_files(now)
         .into_diagnostic()?
         .into_iter()
         .map(parse)
@@ -503,24 +621,38 @@ fn parse(file: JournalFile) -> Result<Loaded> {
         id: file.id,
         path: file.path,
         written: file.written,
+        written_at: file.written_at,
         entry,
     })
 }
 
 fn sort_entries(entries: &mut [Loaded]) {
-    entries.sort_by(|a, b| (b.written, &b.id).cmp(&(a.written, &a.id)));
+    entries.sort_by(|a, b| match (a.entry.sequence, b.entry.sequence) {
+        (Some(a_sequence), Some(b_sequence)) => (b_sequence, &b.id).cmp(&(a_sequence, &a.id)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => (b.written, &b.id).cmp(&(a.written, &a.id)),
+    });
 }
 
 fn inactive_entries(entries: &[Loaded]) -> HashSet<String> {
     let mut inactive = HashSet::new();
     for loaded in entries {
-        if !inactive.contains(&loaded.id)
+        if loaded.entry.status == Status::Applied
+            && !inactive.contains(&loaded.id)
             && let Some(target) = &loaded.entry.undo_of
         {
             inactive.insert(target.clone());
         }
     }
     inactive
+}
+
+fn status(value: Status) -> JournalStatus {
+    match value {
+        Status::Applied => JournalStatus::Applied,
+        Status::Pending => JournalStatus::Pending,
+    }
 }
 
 fn action(value: Action) -> JournalAction {
@@ -531,7 +663,7 @@ fn action(value: Action) -> JournalAction {
 }
 
 fn counts(entry: &Entry) -> ChangeCounts {
-    if entry.status == Status::Pending {
+    if !entry.planned_changes.is_empty() && entry.changes.is_empty() {
         return planned_counts(&entry.planned_changes);
     }
     let mut counts = ChangeCounts::default();
@@ -673,6 +805,7 @@ mod tests {
                 Some(written_complete),
                 None,
             ],
+            unrecorded: Vec::new(),
         };
         let mut host = Scripted::new();
         let id = record_edit(&now(), &changes, &result, &mut host).unwrap();
@@ -684,7 +817,7 @@ mod tests {
         assert_eq!(value["changes"][2]["change"], "completed");
         assert_eq!(value["changes"][3]["backup"]["id"], "delete-1");
         assert_eq!(
-            summaries(&mut host).unwrap()[0].counts,
+            summaries(now().timestamp(), &mut host).unwrap()[0].counts,
             ChangeCounts {
                 added: 1,
                 updated: 1,
@@ -722,10 +855,12 @@ mod tests {
         ];
         let result = ApplyResult {
             written: vec![Some(added.clone()), Some(written.clone()), None],
+            unrecorded: Vec::new(),
         };
         let mut host = Scripted::new();
         record_edit(&now(), &changes, &result, &mut host).unwrap();
-        let (id, inverse, counts, partial) = undo_changes(None, &mut host).unwrap();
+        let (id, inverse, counts, partial) =
+            undo_changes(None, now().timestamp(), &mut host).unwrap();
         assert_eq!(id, "20261026T090000-journal");
         assert_eq!(
             counts,
@@ -764,6 +899,7 @@ mod tests {
             &[original],
             &ApplyResult {
                 written: vec![None],
+                unrecorded: Vec::new(),
             },
             &mut host,
         )
@@ -784,11 +920,12 @@ mod tests {
             &[inverse],
             &ApplyResult {
                 written: vec![Some(restored)],
+                unrecorded: Vec::new(),
             },
             &mut host,
         )
         .unwrap();
-        let error = undo_changes(Some(&original_id), &mut host).unwrap_err();
+        let error = undo_changes(Some(&original_id), now().timestamp(), &mut host).unwrap_err();
         assert!(error.to_string().contains("already been undone"));
     }
 
@@ -830,6 +967,7 @@ mod tests {
             }],
             &ApplyResult {
                 written: vec![None],
+                unrecorded: Vec::new(),
             },
             &mut host,
         )
@@ -841,6 +979,7 @@ mod tests {
             }],
             &ApplyResult {
                 written: vec![None],
+                unrecorded: Vec::new(),
             },
             &mut host,
         )
@@ -860,13 +999,17 @@ mod tests {
             &[inverse],
             &ApplyResult {
                 written: vec![Some(reminder("second-new", "Second deletion"))],
+                unrecorded: Vec::new(),
             },
             &mut host,
         )
         .unwrap();
-
-        assert_eq!(undo_changes(None, &mut host).unwrap().0, first_id);
-        let (_, changes, _, _) = undo_changes(Some(&undo_id), &mut host).unwrap();
+        assert_eq!(
+            undo_changes(None, now().timestamp(), &mut host).unwrap().0,
+            first_id
+        );
+        let (_, changes, _, _) =
+            undo_changes(Some(&undo_id), now().timestamp(), &mut host).unwrap();
         assert!(matches!(
             &changes[0],
             ReminderChange::Delete { before } if before.id == "second-new"
@@ -874,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_entry_uses_host_write_order_not_command_start_time() {
+    fn sequence_order_survives_changed_file_order() {
         let mut host = Scripted::new();
         record_edit(
             &at(10),
@@ -883,6 +1026,7 @@ mod tests {
             }],
             &ApplyResult {
                 written: vec![None],
+                unrecorded: Vec::new(),
             },
             &mut host,
         )
@@ -894,12 +1038,17 @@ mod tests {
             }],
             &ApplyResult {
                 written: vec![None],
+                unrecorded: Vec::new(),
             },
             &mut host,
         )
         .unwrap();
+        host.journals.swap(0, 1);
 
-        assert_eq!(undo_changes(None, &mut host).unwrap().0, committed_last);
+        assert_eq!(
+            undo_changes(None, now().timestamp(), &mut host).unwrap().0,
+            committed_last
+        );
     }
 
     #[test]
@@ -912,6 +1061,7 @@ mod tests {
             }],
             &ApplyResult {
                 written: vec![None],
+                unrecorded: Vec::new(),
             },
             &mut source,
         )
@@ -921,10 +1071,12 @@ mod tests {
             .journal("valid-journal", &contents)
             .unreadable_journal("broken-journal", "permission denied");
 
-        let entries = summaries(&mut host).unwrap();
+        let entries = summaries(now().timestamp(), &mut host).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(host.said[0].contains("/backups/broken-journal.json"));
-        let error = undo_changes(None, &mut host).unwrap_err().to_string();
+        let error = undo_changes(None, now().timestamp(), &mut host)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("/backups/broken-journal.json"));
     }
 }

@@ -259,6 +259,7 @@ mod tests {
         snapshot: ReminderSnapshot,
         applied: Applied,
         conflict: bool,
+        unrecorded: bool,
     }
 
     impl Reminders for Recorder {
@@ -283,6 +284,7 @@ mod tests {
             self.applied.borrow_mut().extend_from_slice(changes);
             Ok(ApplyResult {
                 written: changes.iter().map(fake_written).collect(),
+                unrecorded: vec![self.unrecorded; changes.len()],
             })
         }
     }
@@ -389,11 +391,21 @@ mod tests {
         conflict: bool,
         host: &mut Scripted,
     ) -> (Result<String>, Vec<ReminderChange>) {
+        run_snapshot_with_recording(snapshot, conflict, false, host)
+    }
+
+    fn run_snapshot_with_recording(
+        snapshot: ReminderSnapshot,
+        conflict: bool,
+        unrecorded: bool,
+        host: &mut Scripted,
+    ) -> (Result<String>, Vec<ReminderChange>) {
         let applied = Applied::default();
         let recorder = Recorder {
             snapshot,
             applied: applied.clone(),
             conflict,
+            unrecorded,
         };
         let backends = Backends::new(
             || -> Box<dyn Notes> { unreachable!() },
@@ -433,6 +445,20 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("✓ complete  \"Oat milk\""))
         );
+    }
+
+    #[test]
+    fn post_commit_recording_problem_still_writes_the_edit_journal() {
+        let mut host = Scripted::new().edit(check("Oat milk")).answer("y");
+
+        let (result, applied) =
+            run_snapshot_with_recording(snapshot(&["Oat milk"]), false, true, &mut host);
+
+        assert_eq!(result.unwrap(), "Applied 1 change: 1 completed.");
+        assert_eq!(applied.len(), 1);
+        assert_eq!(host.journals.len(), 1);
+        assert!(host.journals[0].1.contains("\"unrecorded\": true"));
+        assert!(!host.said.iter().any(|line| line.contains("still in")));
     }
 
     #[test]

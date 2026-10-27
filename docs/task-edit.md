@@ -63,6 +63,14 @@ Pass an entry from `nib log` to choose an older edit. Plain `nib undo` skips ent
 
 Undoing a deletion re-creates the reminder with a new ID. It may lose alarms, repeats, or other metadata that EventKit does not expose. Keep the journal files in the backups folder: removing one changes the history nib can undo.
 
+If an undo is interrupted, `nib log` shows its status as `pending` and later undo commands stop rather than risk applying it twice. Inspect the listed reminders, then run:
+
+```bash
+nib undo --resolve <ID>
+```
+
+nib shows the titles the interrupted undo would have changed and asks whether those changes are visible in Reminders. Answer yes to mark the undo applied. Answer no only when the changes are absent; nib then removes the pending record so the edit can be undone again.
+
 ## Safety rules
 
 - The edit file is created with owner-only permissions.

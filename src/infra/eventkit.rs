@@ -116,34 +116,31 @@ impl Reminders for EventKitReminders {
                     &format!("nothing was saved: {}", e.localizedDescription()),
                 )
             })?;
+            let mut written = Vec::with_capacity(staged.len());
+            let mut unrecorded = Vec::with_capacity(staged.len());
+            for reminder in staged {
+                if let Some(reminder) = reminder.as_deref() {
+                    let (stored, was_unrecorded) = stored_after_commit(reminder);
+                    written.push(Some(stored));
+                    unrecorded.push(was_unrecorded);
+                } else {
+                    written.push(None);
+                    unrecorded.push(false);
+                }
+            }
             Ok(ApplyResult {
-                written: staged
-                    .into_iter()
-                    .map(|reminder| {
-                        reminder
-                            .as_deref()
-                            .map(|reminder| stored_after_commit(&store, reminder))
-                            .transpose()
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
+                written,
+                unrecorded,
             })
         })
     }
 }
 
-fn stored_after_commit(
-    _store: &EKEventStore,
-    reminder: &EKReminder,
-) -> Result<StoredReminder, BackendError> {
-    // SAFETY: The typed reminder and its retained store remain alive while EventKit refreshes the
-    // object synchronously, and all fields are copied before either reference can be released.
-    if !unsafe { reminder.refresh() } {
-        return Err(failed(
-            REMINDERS,
-            "a saved reminder disappeared before nib could record it",
-        ));
-    }
-    Ok(to_stored(reminder))
+fn stored_after_commit(reminder: &EKReminder) -> (StoredReminder, bool) {
+    // SAFETY: The typed reminder remains alive while EventKit synchronously refreshes it, and nib
+    // only observes the Boolean result before copying fields from that same live object.
+    let unrecorded = !unsafe { reminder.refresh() };
+    (to_stored(reminder), unrecorded)
 }
 
 fn matching_events(

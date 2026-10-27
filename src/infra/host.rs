@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
+use jiff::Timestamp;
+
 pub trait JournalLock {}
 
 pub trait Host {
@@ -21,7 +23,7 @@ pub trait Host {
     fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf>;
     fn replace_journal(&mut self, id: &str, contents: &str) -> io::Result<PathBuf>;
     fn remove_journal(&mut self, id: &str) -> io::Result<()>;
-    fn journal_files(&mut self) -> io::Result<Vec<JournalFile>>;
+    fn journal_files(&mut self, now: Timestamp) -> io::Result<Vec<JournalFile>>;
     fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>>;
 }
 
@@ -32,7 +34,13 @@ pub struct JournalFile {
     pub id: String,
     pub path: PathBuf,
     pub written: u128,
+    pub written_at: Option<Timestamp>,
     pub contents: Result<String, String>,
+}
+
+struct PublishedJournal {
+    path: PathBuf,
+    warning: Option<String>,
 }
 
 impl JournalLock for File {}
@@ -136,23 +144,35 @@ fn save_backup_in(dir: &Path, name: &str, contents: &str) -> io::Result<PathBuf>
     ))
 }
 
-fn save_journal_in(dir: &Path, name: &str, contents: &str) -> io::Result<PathBuf> {
+fn save_journal_in(dir: &Path, name: &str, contents: &str) -> io::Result<PublishedJournal> {
     for _ in 0..128 {
         let path = dir.join(backup_name(name));
         let temporary = path.with_extension(format!("json.{}.tmp", random_token()));
-        let result: io::Result<()> = (|| {
+        let result = (|| {
             let mut file = secure_new(&temporary)?;
             file.write_all(contents.as_bytes())?;
             file.sync_all()?;
-            std::fs::hard_link(&temporary, &path)?;
-            File::open(dir)?.sync_all()?;
-            Ok(())
+            std::fs::hard_link(&temporary, &path)
         })();
-        let _ = std::fs::remove_file(&temporary);
         match result {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Ok(()) => {
+                let warning = File::open(dir)
+                    .and_then(|file| file.sync_all())
+                    .err()
+                    .map(|error| {
+                        format!(
+                            "journal {} was written, but its folder couldn't be synced: {error}",
+                            path.display()
+                        )
+                    });
+                let _ = std::fs::remove_file(&temporary);
+                return Ok(PublishedJournal { path, warning });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_file(&temporary);
+            }
             Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
                 return Err(io::Error::new(
                     error.kind(),
                     format!("couldn't write journal {}: {error}", path.display()),
@@ -166,26 +186,37 @@ fn save_journal_in(dir: &Path, name: &str, contents: &str) -> io::Result<PathBuf
     ))
 }
 
-fn replace_journal_in(dir: &Path, id: &str, contents: &str) -> io::Result<PathBuf> {
+fn replace_journal_in(dir: &Path, id: &str, contents: &str) -> io::Result<PublishedJournal> {
     let path = dir.join(format!("{id}.json"));
     let temporary = path.with_extension(format!("json.{}.tmp", random_token()));
-    let result: io::Result<PathBuf> = (|| {
+    let result: io::Result<()> = (|| {
         let mut file = secure_new(&temporary)?;
         file.write_all(contents.as_bytes())?;
         file.sync_all()?;
         std::fs::rename(&temporary, &path)?;
-        File::open(dir)?.sync_all()?;
-        Ok(path.clone())
+        Ok(())
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
+    match result {
+        Ok(()) => {
+            let warning = File::open(dir)
+                .and_then(|file| file.sync_all())
+                .err()
+                .map(|error| {
+                    format!(
+                        "journal {} was updated, but its folder couldn't be synced: {error}",
+                        path.display()
+                    )
+                });
+            Ok(PublishedJournal { path, warning })
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            Err(io::Error::new(
+                error.kind(),
+                format!("couldn't update journal {}: {error}", path.display()),
+            ))
+        }
     }
-    result.map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("couldn't update journal {}: {error}", path.display()),
-        )
-    })
 }
 
 fn backups_dir() -> io::Result<PathBuf> {
@@ -193,7 +224,7 @@ fn backups_dir() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home).join("Library/Application Support/nib/backups"))
 }
 
-fn journal_files_in(dir: &Path) -> io::Result<Vec<JournalFile>> {
+fn journal_files_in(dir: &Path, now: Timestamp) -> io::Result<Vec<JournalFile>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -203,6 +234,10 @@ fn journal_files_in(dir: &Path) -> io::Result<Vec<JournalFile>> {
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
+        if is_stale_journal_temporary(&path, now) {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
         let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
             continue;
         };
@@ -214,22 +249,49 @@ fn journal_files_in(dir: &Path) -> io::Result<Vec<JournalFile>> {
             continue;
         }
         let contents = std::fs::read_to_string(&path).map_err(|error| error.to_string());
-        let written = std::fs::metadata(&path)
+        let written_at = std::fs::metadata(&path)
             .and_then(|metadata| metadata.modified())
-            .and_then(|modified| {
-                modified
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .map_err(io::Error::other)
-            })
-            .map_or(0, |duration| duration.as_nanos());
+            .ok()
+            .and_then(system_time_to_timestamp);
+        let written = written_at.map_or(0, timestamp_key);
         files.push(JournalFile {
             id: id.to_owned(),
             path,
             written,
+            written_at,
             contents,
         });
     }
     Ok(files)
+}
+
+fn is_stale_journal_temporary(path: &Path, now: Timestamp) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !name.contains("-journal")
+        || !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
+    {
+        return false;
+    }
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(system_time_to_timestamp)
+        .is_some_and(|modified| now.as_second().saturating_sub(modified.as_second()) > 86_400)
+}
+
+fn system_time_to_timestamp(time: SystemTime) -> Option<Timestamp> {
+    let duration = time.duration_since(SystemTime::UNIX_EPOCH).ok()?;
+    let seconds = i64::try_from(duration.as_secs()).ok()?;
+    Timestamp::new(seconds, duration.subsec_nanos().try_into().ok()?).ok()
+}
+
+fn timestamp_key(timestamp: Timestamp) -> u128 {
+    u128::try_from(timestamp.as_second()).unwrap_or_default() * 1_000_000_000
+        + u128::try_from(timestamp.subsec_nanosecond()).unwrap_or_default()
 }
 
 impl Host for System {
@@ -275,11 +337,19 @@ impl Host for System {
     fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
         let dir = backups_dir()?;
         std::fs::create_dir_all(&dir)?;
-        save_journal_in(&dir, name, contents)
+        let published = save_journal_in(&dir, name, contents)?;
+        if let Some(warning) = published.warning {
+            self.say(&format!("warning: {warning}"));
+        }
+        Ok(published.path)
     }
 
     fn replace_journal(&mut self, id: &str, contents: &str) -> io::Result<PathBuf> {
-        replace_journal_in(&backups_dir()?, id, contents)
+        let published = replace_journal_in(&backups_dir()?, id, contents)?;
+        if let Some(warning) = published.warning {
+            self.say(&format!("warning: {warning}"));
+        }
+        Ok(published.path)
     }
 
     fn remove_journal(&mut self, id: &str) -> io::Result<()> {
@@ -288,8 +358,8 @@ impl Host for System {
         File::open(dir)?.sync_all()
     }
 
-    fn journal_files(&mut self) -> io::Result<Vec<JournalFile>> {
-        journal_files_in(&backups_dir()?)
+    fn journal_files(&mut self, now: Timestamp) -> io::Result<Vec<JournalFile>> {
+        journal_files_in(&backups_dir()?, now)
     }
 
     fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>> {
@@ -302,7 +372,14 @@ impl Host for System {
             .truncate(false)
             .mode(0o600)
             .open(dir.join("journal.lock"))?;
-        file.lock()?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                self.say("Waiting for another nib undo to finish…");
+                file.lock()?;
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
         Ok(Box::new(file))
     }
 }
@@ -373,7 +450,7 @@ impl Host for Memory {
         Ok(())
     }
 
-    fn journal_files(&mut self) -> io::Result<Vec<JournalFile>> {
+    fn journal_files(&mut self, _now: Timestamp) -> io::Result<Vec<JournalFile>> {
         Ok(self
             .journals
             .iter()
@@ -381,6 +458,7 @@ impl Host for Memory {
                 id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
                 path: PathBuf::from("demo-backups").join(name),
                 written: *written,
+                written_at: None,
                 contents: Ok(contents.clone()),
             })
             .collect())
@@ -401,6 +479,7 @@ pub struct Scripted {
     unreadable_journals: Vec<(String, String)>,
     sequence: u128,
     fail_replace_once: bool,
+    fail_remove_once: bool,
 }
 
 #[cfg(test)]
@@ -415,6 +494,7 @@ impl Scripted {
             unreadable_journals: Vec::new(),
             sequence: 0,
             fail_replace_once: false,
+            fail_remove_once: false,
         }
     }
 
@@ -441,6 +521,10 @@ impl Scripted {
 
     pub fn fail_next_journal_replace(&mut self) {
         self.fail_replace_once = true;
+    }
+
+    pub fn fail_next_journal_remove(&mut self) {
+        self.fail_remove_once = true;
     }
 }
 
@@ -501,6 +585,10 @@ impl Host for Scripted {
     }
 
     fn remove_journal(&mut self, id: &str) -> io::Result<()> {
+        if self.fail_remove_once {
+            self.fail_remove_once = false;
+            return Err(io::Error::other("injected journal removal failure"));
+        }
         let index = self
             .journals
             .iter()
@@ -510,7 +598,7 @@ impl Host for Scripted {
         Ok(())
     }
 
-    fn journal_files(&mut self) -> io::Result<Vec<JournalFile>> {
+    fn journal_files(&mut self, _now: Timestamp) -> io::Result<Vec<JournalFile>> {
         let readable = self
             .journals
             .iter()
@@ -519,6 +607,7 @@ impl Host for Scripted {
                 id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
                 path: PathBuf::from("/backups").join(name),
                 written: u128::try_from(index).unwrap_or_default(),
+                written_at: None,
                 contents: Ok(contents.clone()),
             });
         let unreadable =
@@ -529,6 +618,7 @@ impl Host for Scripted {
                     id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
                     path: PathBuf::from("/backups").join(name),
                     written: u128::try_from(self.journals.len() + index).unwrap_or_default(),
+                    written_at: None,
                     contents: Err(error.clone()),
                 });
         Ok(readable.chain(unreadable).collect())
@@ -615,9 +705,35 @@ mod tests {
         )
         .unwrap();
         temporary.write_all(b"partial").unwrap();
-        let files = journal_files_in(&dir.0).unwrap();
+        let now: Timestamp = "2026-10-26T14:00:00Z".parse().unwrap();
+        let files = journal_files_in(&dir.0, now).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].contents.as_deref(), Ok("{}"));
-        assert_eq!(files[0].id, journal.file_stem().unwrap().to_str().unwrap());
+        assert_eq!(
+            files[0].id,
+            journal.path.file_stem().unwrap().to_str().unwrap()
+        );
+        assert!(temporary.metadata().is_ok());
+    }
+
+    #[test]
+    fn journal_files_remove_temporary_files_older_than_a_day() {
+        let dir = TestDir::new();
+        let path = dir
+            .0
+            .join("20261024T090000-journal-deadbeef.json.feedface.tmp");
+        secure_new(&path).unwrap();
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+
+        let now: Timestamp = "2026-06-26T00:00:01Z".parse().unwrap();
+        journal_files_in(&dir.0, now).unwrap();
+
+        assert!(!path.exists());
     }
 }

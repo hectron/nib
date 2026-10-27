@@ -39,8 +39,18 @@ pub fn run(
         Action::ListTasks => output::list(&backends.reminders.list()?, json, style),
         Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
         Action::ListEvents(query) => output::list(&backends.calendar.events(query)?, json, style),
-        Action::Log => output::journal(&journal::summaries(host)?, json, style),
-        Action::Undo { entry } => match undo::run(entry.as_deref(), now, backends, host)? {
+        Action::Log => output::journal(&journal::summaries(now.timestamp(), host)?, json, style),
+        Action::Undo {
+            entry: _,
+            resolve: Some(id),
+        } => {
+            let applied = undo::resolve(&id, now, host)? == undo::Resolution::Applied;
+            output::undo_resolution(&id, applied, json)
+        }
+        Action::Undo {
+            entry,
+            resolve: None,
+        } => match undo::run(entry.as_deref(), now, backends, host)? {
             undo::Outcome::Cancelled { id } => output::undo_cancelled(&id, json),
             undo::Outcome::Applied {
                 id,
@@ -417,9 +427,9 @@ mod tests {
     #[test]
     fn log_lists_newest_entries_with_counts() {
         assert_snapshot!(journal_output(&["log"]), @r"
-        ENTRY          TIME                  ACTION     UNDO OF        UNDONE  ADDED  UPDATED  COMPLETED  DELETED
-        newer-journal  2026-10-26T14:00:00Z  undo       older-journal          0      0        0          1
-        older-journal  2026-10-25T14:00:00Z  task_edit                 yes     1      0        0          0
+        ENTRY          WRITTEN               ACTION     STATUS   UNDO OF        UNDONE  ADDED  UPDATED  COMPLETED  DELETED
+        newer-journal  2026-10-26T14:00:00Z  undo       applied  older-journal          0      0        0          1
+        older-journal  2026-10-25T14:00:00Z  task_edit  applied                 yes     1      0        0          0
         ");
     }
 
@@ -430,7 +440,9 @@ mod tests {
           {
             "id": "newer-journal",
             "time": "2026-10-26T14:00:00Z",
+            "written_at": "2026-10-26T14:00:00Z",
             "action": "undo",
+            "status": "applied",
             "undo_of": "older-journal",
             "undone": false,
             "added": 0,
@@ -441,7 +453,9 @@ mod tests {
           {
             "id": "older-journal",
             "time": "2026-10-25T14:00:00Z",
+            "written_at": "2026-10-25T14:00:00Z",
             "action": "task_edit",
+            "status": "applied",
             "undo_of": null,
             "undone": true,
             "added": 1,
@@ -475,6 +489,22 @@ mod tests {
           "updated": 2,
           "completed": 3,
           "deleted": 4
+        }
+        "#);
+    }
+
+    #[test]
+    fn undo_resolution_json_has_stable_fields() {
+        assert_snapshot!(output::undo_resolution(
+            "20261026T090100-journal-efgh",
+            true,
+            true,
+        )
+        .unwrap(), @r#"
+        {
+          "id": "20261026T090100-journal-efgh",
+          "resolved": true,
+          "applied": true
         }
         "#);
     }
