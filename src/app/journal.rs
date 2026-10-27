@@ -558,7 +558,7 @@ pub fn pending_undo(id: &str, now: Timestamp, host: &mut dyn Host) -> Result<Vec
         .entry
         .planned_changes
         .iter()
-        .map(planned_title)
+        .map(expected_state)
         .collect())
 }
 
@@ -580,12 +580,17 @@ pub fn resolve_pending(id: &str, applied: bool, now: Timestamp, host: &mut dyn H
     Ok(())
 }
 
-fn planned_title(change: &PlannedChange) -> String {
+fn expected_state(change: &PlannedChange) -> String {
+    let title = |title: &str| crate::app::markdown::normalize_title(title);
     match change {
-        PlannedChange::Add { title }
-        | PlannedChange::Restore { title, .. }
-        | PlannedChange::Update { title, .. }
-        | PlannedChange::Delete { title, .. } => title.clone(),
+        PlannedChange::Add { title: name } => format!("\"{}\" exists again", title(name)),
+        PlannedChange::Restore { title: name, .. } => {
+            format!("\"{}\" is re-created", title(name))
+        }
+        PlannedChange::Update { title: name, .. } => {
+            format!("\"{}\" has its earlier values", title(name))
+        }
+        PlannedChange::Delete { title: name, .. } => format!("\"{}\" is gone", title(name)),
     }
 }
 

@@ -44,8 +44,12 @@ pub fn run(
             entry: _,
             resolve: Some(id),
         } => {
-            let applied = undo::resolve(&id, now, host)? == undo::Resolution::Applied;
-            output::undo_resolution(&id, applied, json)
+            let resolution = match undo::resolve(&id, now, host)? {
+                undo::Resolution::Applied => Some(true),
+                undo::Resolution::Removed => Some(false),
+                undo::Resolution::Cancelled => None,
+            };
+            output::undo_resolution(&id, resolution, json)
         }
         Action::Undo {
             entry,
@@ -497,7 +501,7 @@ mod tests {
     fn undo_resolution_json_has_stable_fields() {
         assert_snapshot!(output::undo_resolution(
             "20261026T090100-journal-efgh",
-            true,
+            Some(true),
             true,
         )
         .unwrap(), @r#"

@@ -69,7 +69,7 @@ If an undo is interrupted, `nib log` shows its status as `pending` and later und
 nib undo --resolve <ID>
 ```
 
-nib shows the titles the interrupted undo would have changed and asks whether those changes are visible in Reminders. Answer yes to mark the undo applied. Answer no only when the changes are absent; nib then removes the pending record so the edit can be undone again.
+nib lists what Reminders shows if the undo was applied, such as `"Oat milk" is re-created`. Type `applied` if Reminders matches, and nib marks the undo applied. Type `absent` only if none of it happened; nib then removes the pending record so the edit can be undone again. Any other answer, including pressing Return, changes nothing.
 
 ## Safety rules
 

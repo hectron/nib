@@ -22,6 +22,7 @@ pub enum Outcome {
 pub enum Resolution {
     Applied,
     Removed,
+    Cancelled,
 }
 
 pub fn run(
@@ -68,24 +69,22 @@ pub fn run(
 
 pub fn resolve(id: &str, now: &Zoned, host: &mut dyn Host) -> Result<Resolution> {
     let _lock = host.lock_journal().into_diagnostic()?;
-    let titles = journal::pending_undo(id, now.timestamp(), host)?;
-    let mut lines = vec![format!("Pending undo {id} would have changed:")];
-    lines.extend(
-        titles
-            .iter()
-            .map(|title| format!("  - \"{}\"", markdown::normalize_title(title))),
-    );
+    let expected = journal::pending_undo(id, now.timestamp(), host)?;
+    let mut lines = vec![format!(
+        "Pending undo {id} was interrupted. If it was applied, Reminders shows:"
+    )];
+    lines.extend(expected.iter().map(|line| format!("  - {line}")));
     host.say(&clean_lines(&lines.join("\n")));
     let answer = host
-        .ask("Are these undo changes visible in Reminders? [y/N] ")
+        .ask("Type `applied` if Reminders matches, `absent` if none of it happened, or anything else to cancel: ")
         .into_diagnostic()?;
-    let applied = answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes");
-    journal::resolve_pending(id, applied, now.timestamp(), host)?;
-    Ok(if applied {
-        Resolution::Applied
-    } else {
-        Resolution::Removed
-    })
+    let resolution = match answer.trim().to_ascii_lowercase().as_str() {
+        "applied" => Resolution::Applied,
+        "absent" => Resolution::Removed,
+        _ => return Ok(Resolution::Cancelled),
+    };
+    journal::resolve_pending(id, resolution == Resolution::Applied, now.timestamp(), host)?;
+    Ok(resolution)
 }
 
 fn describe(id: &str, changes: &[ReminderChange], partial: bool) -> String {
@@ -381,7 +380,7 @@ mod tests {
         let (backends, _, mut applied_host) = setup(false, false);
         applied_host.fail_next_journal_replace();
         run(None, &now(), &backends, &mut applied_host).unwrap_err();
-        applied_host = applied_host.answer("yes");
+        applied_host = applied_host.answer("applied");
         let pending_id = applied_host.journals[1]
             .0
             .strip_suffix(".json")
@@ -409,7 +408,7 @@ mod tests {
         let (backends, _, mut removed_host) = setup(false, false);
         removed_host.fail_next_journal_replace();
         run(None, &now(), &backends, &mut removed_host).unwrap_err();
-        removed_host = removed_host.answer("no");
+        removed_host = removed_host.answer("absent");
         let pending_id = removed_host.journals[1]
             .0
             .strip_suffix(".json")
@@ -421,6 +420,25 @@ mod tests {
             Resolution::Removed
         );
         assert_eq!(removed_host.journals.len(), 1);
+    }
+
+    #[test]
+    fn resolve_changes_nothing_without_an_explicit_answer() {
+        for answer in ["", "n", "y", "yes"] {
+            let (backends, _, mut host) = setup(false, false);
+            host.fail_next_journal_replace();
+            run(None, &now(), &backends, &mut host).unwrap_err();
+            host = host.answer(answer);
+            let pending_id = host.journals[1].0.strip_suffix(".json").unwrap().to_owned();
+            let before = host.journals.clone();
+
+            assert_eq!(
+                resolve(&pending_id, &now(), &mut host).unwrap(),
+                Resolution::Cancelled,
+                "{answer:?}"
+            );
+            assert_eq!(host.journals, before, "{answer:?}");
+        }
     }
 
     #[test]

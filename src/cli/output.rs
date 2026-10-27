@@ -154,19 +154,19 @@ pub fn undo_cancelled(id: &str, json: bool) -> Result<String> {
     Ok("Nothing was changed.".into())
 }
 
-pub fn undo_resolution(id: &str, applied: bool, json: bool) -> Result<String> {
+pub fn undo_resolution(id: &str, applied: Option<bool>, json: bool) -> Result<String> {
     if json {
         return to_json(&UndoResolutionJson {
             id,
-            resolved: true,
-            applied,
+            resolved: applied.is_some(),
+            applied: applied == Some(true),
         });
     }
-    if applied {
-        Ok(format!("Marked pending undo {id} as applied."))
-    } else {
-        Ok(format!("Removed pending undo {id}."))
-    }
+    Ok(match applied {
+        Some(true) => format!("Marked pending undo {id} as applied."),
+        Some(false) => format!("Removed pending undo {id}."),
+        None => format!("Nothing was changed. Undo {id} is still pending."),
+    })
 }
 
 fn count(n: usize, noun: &str) -> String {
