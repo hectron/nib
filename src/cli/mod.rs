@@ -28,13 +28,23 @@ pub struct Cli {
 pub enum Action {
     Doctor,
     Config(ConfigAction),
-    Today { date: Date, query: EventQuery },
+    Today {
+        date: Date,
+        query: EventQuery,
+    },
     NewNote(NewNote),
     ListNotes(NoteQuery),
     AddTask(NewReminder),
     ListTasks,
-    EditTasks { list: Option<String> },
+    EditTasks {
+        list: Option<String>,
+    },
     ListEvents(EventQuery),
+    Log,
+    Undo {
+        entry: Option<String>,
+        resolve: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -57,6 +67,21 @@ pub enum Command {
     N(NoteCapture),
     /// Add a reminder from the rest of the line, or list reminders
     T(TaskCapture),
+    /// List recent task edit and undo journal entries
+    Log,
+    /// Undo a journal entry, or the latest entry when omitted
+    Undo(UndoArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UndoArgs {
+    /// Journal entry identifier from `nib log`
+    #[arg(value_name = "ENTRY", conflicts_with = "resolve")]
+    entry: Option<String>,
+
+    /// Resolve an interrupted undo journal entry
+    #[arg(long, value_name = "ID")]
+    resolve: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -332,6 +357,8 @@ impl Command {
                     },
                 }),
             },
+            Command::Log => Action::Log,
+            Command::Undo(UndoArgs { entry, resolve }) => Action::Undo { entry, resolve },
         })
     }
 }
@@ -550,6 +577,35 @@ mod tests {
             (&["task"], Action::ListTasks),
             (&["todo", "ls"], Action::ListTasks),
             (&["task", "--json", "list"], Action::ListTasks),
+        ]);
+    }
+
+    #[test]
+    fn journal_commands() {
+        assert_parses(&[
+            (&["log"], Action::Log),
+            (&["--json", "log"], Action::Log),
+            (
+                &["undo"],
+                Action::Undo {
+                    entry: None,
+                    resolve: None,
+                },
+            ),
+            (
+                &["undo", "20261026T090000-journal-abcd"],
+                Action::Undo {
+                    entry: Some("20261026T090000-journal-abcd".into()),
+                    resolve: None,
+                },
+            ),
+            (
+                &["undo", "--resolve", "20261026T090100-journal-efgh"],
+                Action::Undo {
+                    entry: None,
+                    resolve: Some("20261026T090100-journal-efgh".into()),
+                },
+            ),
         ]);
     }
 

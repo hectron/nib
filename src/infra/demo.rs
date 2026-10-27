@@ -2,9 +2,9 @@ use jiff::civil::Date;
 use jiff::{ToSpan, Zoned};
 
 use crate::domain::{
-    BackendError, Backends, Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery,
-    Notes, Priority, Reminder, ReminderChange, ReminderList, ReminderSnapshot, Reminders,
-    StoredReminder,
+    ApplyResult, BackendError, Backends, Calendar, Event, EventQuery, FieldEdit, NewNote,
+    NewReminder, Note, NoteQuery, Notes, Priority, Reminder, ReminderChange, ReminderList,
+    ReminderSnapshot, Reminders, StoredReminder,
 };
 
 const DEMO_LIST: &str = "demo-list";
@@ -137,6 +137,7 @@ impl Reminders for Demo {
                 due: r.due,
                 due_components: None,
                 priority: r.priority,
+                completed: false,
                 modified: None,
                 alarms_present: false,
                 recurrence_present: false,
@@ -154,8 +155,74 @@ impl Reminders for Demo {
         })
     }
 
-    fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
-        Ok(())
+    fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
+        Ok(ApplyResult {
+            written: changes
+                .iter()
+                .enumerate()
+                .map(|(index, change)| demo_written(index, change))
+                .collect(),
+            unrecorded: Vec::new(),
+        })
+    }
+}
+
+fn demo_written(index: usize, change: &ReminderChange) -> Option<StoredReminder> {
+    match change {
+        ReminderChange::Add {
+            list_id,
+            title,
+            notes,
+            due,
+            priority,
+        } => Some(StoredReminder {
+            id: format!("demo-added-{index}"),
+            list_id: list_id.clone(),
+            title: title.clone(),
+            notes: notes.clone(),
+            due: *due,
+            due_components: None,
+            priority: *priority,
+            completed: false,
+            modified: None,
+            alarms_present: false,
+            recurrence_present: false,
+            url: None,
+            backup_partial: false,
+        }),
+        ReminderChange::Restore { before } => {
+            let mut written = before.clone();
+            written.id = format!("demo-restored-{index}");
+            Some(written)
+        }
+        ReminderChange::Update { before, edit } => {
+            let mut written = before.clone();
+            if let Some(title) = &edit.title {
+                written.title.clone_from(title);
+            }
+            demo_field(&mut written.notes, &edit.notes);
+            demo_field(&mut written.due, &edit.due);
+            if let Some(parts) = &edit.due_components {
+                written.due_components = Some((**parts).clone());
+            }
+            demo_field(&mut written.priority, &edit.priority);
+            if let Some(list_id) = &edit.list_id {
+                written.list_id.clone_from(list_id);
+            }
+            if let Some(completed) = edit.completed {
+                written.completed = completed;
+            }
+            Some(written)
+        }
+        ReminderChange::Delete { .. } => None,
+    }
+}
+
+fn demo_field<T: Clone>(value: &mut Option<T>, edit: &FieldEdit<T>) {
+    match edit {
+        FieldEdit::Unchanged => {}
+        FieldEdit::Set(new) => *value = Some(new.clone()),
+        FieldEdit::Remove => *value = None,
     }
 }
 

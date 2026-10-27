@@ -1,6 +1,6 @@
 [package]
 name = "nib"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Fast CLI for Apple Notes, Reminders, and Calendar"
 license = "MIT"
@@ -41,7 +41,7 @@ proptest = "1.12.0"
 block2 = "0.6.2"
 objc2 = "0.6.5"
 objc2-event-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "EKCalendar", "EKCalendarItem", "EKEvent", "EKEventStore", "EKObject", "EKReminder", "EKTypes"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSCalendar", "NSDate", "NSEnumerator", "NSError", "NSPredicate", "NSString", "NSURL"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSCalendar", "NSDate", "NSEnumerator", "NSError", "NSPredicate", "NSString", "NSTimeZone", "NSURL"] }
 
 # The profile that 'dist' will build with
 [profile.dist]

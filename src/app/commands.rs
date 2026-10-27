@@ -1,7 +1,7 @@
 use jiff::Zoned;
 use miette::{IntoDiagnostic, Result};
 
-use crate::app::edit;
+use crate::app::{edit, journal, undo};
 use crate::cli::output::{self, Style};
 use crate::cli::{Action, Cli};
 use crate::domain::{Backends, Config};
@@ -49,6 +49,37 @@ pub fn run(
         Action::ListEvents(query) => {
             output::list(&backends.calendar.events(query)?, json, now.date(), style)
         }
+        Action::Log => {
+            let _lock = host.lock_journal().into_diagnostic()?;
+            output::journal(
+                &journal::summaries(now.timestamp(), host)?,
+                json,
+                now.date(),
+                style,
+            )
+        }
+        Action::Undo {
+            entry: _,
+            resolve: Some(id),
+        } => {
+            let resolution = match undo::resolve(&id, now, host)? {
+                undo::Resolution::Applied => Some(true),
+                undo::Resolution::Removed => Some(false),
+                undo::Resolution::Cancelled => None,
+            };
+            output::undo_resolution(&id, resolution, json, style)
+        }
+        Action::Undo {
+            entry,
+            resolve: None,
+        } => match undo::run(entry.as_deref(), now, backends, host)? {
+            undo::Outcome::Cancelled { id } => output::undo_cancelled(&id, json, style),
+            undo::Outcome::Applied {
+                id,
+                undo_id,
+                counts,
+            } => output::undo(&id, &undo_id, counts, json, style),
+        },
     }
 }
 
@@ -64,10 +95,10 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        AutomationStatus, BackendError, Calendar, ConfigEntry, ConfigKey, ConfigOrigin,
-        ConfigValue, DoctorProbe, EditorSetting, Event, EventQuery, NewNote, NewReminder, Note,
-        NoteQuery, Notes, PermissionStatus, Priority, Reminder, ReminderChange, ReminderSnapshot,
-        Reminders,
+        ApplyResult, AutomationStatus, BackendError, Calendar, ChangeCounts, ConfigEntry,
+        ConfigKey, ConfigOrigin, ConfigValue, DoctorProbe, EditorSetting, Event, EventQuery,
+        NewNote, NewReminder, Note, NoteQuery, Notes, PermissionStatus, Priority, Reminder,
+        ReminderChange, ReminderSnapshot, Reminders,
     };
     use crate::infra::host::Scripted;
 
@@ -184,8 +215,8 @@ mod tests {
             Ok(ReminderSnapshot::default())
         }
 
-        fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
-            Ok(())
+        fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
+            Ok(ApplyResult::default())
         }
     }
 
@@ -268,7 +299,7 @@ mod tests {
             unreachable!()
         }
 
-        fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
+        fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
             unreachable!()
         }
     }
@@ -390,6 +421,200 @@ mod tests {
         assert_eq!(built_by(&["t", "Buy groceries"]), ["reminders"]);
         assert_eq!(built_by(&["task"]), ["reminders"]);
         assert_eq!(built_by(&["cal", "--week"]), ["calendar"]);
+        assert_eq!(built_by(&["log"]), Vec::<&str>::new());
+    }
+
+    fn journal_entry(time: &str, action: &str, undo_of: Option<&str>, change: &str) -> String {
+        let reminder = serde_json::json!({
+            "id": "reminder-1",
+            "list_id": "list-1",
+            "title": "Buy groceries",
+            "notes": null,
+            "due": null,
+            "due_components": null,
+            "priority": null,
+            "completed": false,
+            "modified": null,
+            "alarms_present": false,
+            "recurrence_present": false,
+            "url": null,
+            "partial": false,
+            "unrecorded": true
+        });
+        let journal_change = if change == "deleted" {
+            serde_json::json!({ "change": change, "backup": reminder })
+        } else {
+            serde_json::json!({ "change": change, "written": reminder })
+        };
+        serde_json::json!({
+            "version": 1,
+            "time": time,
+            "action": action,
+            "undo_of": undo_of,
+            "changes": [journal_change]
+        })
+        .to_string()
+    }
+
+    fn journal_output(args: &[&str]) -> String {
+        journal_run(args).0
+    }
+
+    fn journal_run(args: &[&str]) -> (String, Scripted) {
+        let backends = fake_backends(&Built::default());
+        let older = journal_entry("2026-10-25T14:00:00Z", "task_edit", None, "added");
+        let newer = journal_entry(
+            "2026-10-26T14:00:00Z",
+            "undo",
+            Some("older-journal"),
+            "deleted",
+        );
+        let mut host = Scripted::new()
+            .journal("older-journal", &older)
+            .journal("newer-journal", &newer);
+        let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        let output = run(
+            cli,
+            &Config::default(),
+            &now(),
+            &backends,
+            Style::default(),
+            &mut host,
+        )
+        .unwrap();
+        (output, host)
+    }
+
+    #[test]
+    fn log_lists_newest_entries_with_counts() {
+        assert_snapshot!(journal_output(&["log"]), @r"
+        ENTRY          WRITTEN               ACTION     STATUS   UNDO OF        UNDONE  ADDED  UPDATED  COMPLETED  DELETED  UNRECORDED
+        newer-journal  2026-10-26T14:00:00Z  undo       applied  older-journal          0      0        0          1        0
+        older-journal  2026-10-25T14:00:00Z  task_edit  applied                 yes     1      0        0          0        1
+        ");
+    }
+
+    #[test]
+    fn log_takes_the_journal_lock() {
+        let (_, host) = journal_run(&["log"]);
+        assert_eq!(host.journal_lock_count, 1);
+    }
+
+    #[test]
+    fn log_json_has_stable_fields() {
+        assert_snapshot!(journal_output(&["log", "--json"]), @r#"
+        [
+          {
+            "id": "newer-journal",
+            "time": "2026-10-26T14:00:00Z",
+            "written_at": "2026-10-26T14:00:00Z",
+            "action": "undo",
+            "status": "applied",
+            "undo_of": "older-journal",
+            "undone": false,
+            "added": 0,
+            "updated": 0,
+            "completed": 0,
+            "deleted": 1,
+            "unrecorded": 0
+          },
+          {
+            "id": "older-journal",
+            "time": "2026-10-25T14:00:00Z",
+            "written_at": "2026-10-25T14:00:00Z",
+            "action": "task_edit",
+            "status": "applied",
+            "undo_of": null,
+            "undone": true,
+            "added": 1,
+            "updated": 0,
+            "completed": 0,
+            "deleted": 0,
+            "unrecorded": 1
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn undo_json_has_stable_fields() {
+        assert_snapshot!(output::undo(
+            "20261026T090000-journal-abcd",
+            "20261026T090100-journal-efgh",
+            ChangeCounts {
+                added: 1,
+                updated: 2,
+                completed: 3,
+                deleted: 4,
+            },
+            true,
+            Style::default(),
+        )
+        .unwrap(), @r#"
+        {
+          "id": "20261026T090000-journal-abcd",
+          "undo_id": "20261026T090100-journal-efgh",
+          "applied": true,
+          "added": 1,
+          "updated": 2,
+          "completed": 3,
+          "deleted": 4
+        }
+        "#);
+    }
+
+    #[test]
+    fn undo_resolution_json_has_stable_fields() {
+        assert_snapshot!(output::undo_resolution(
+            "20261026T090100-journal-efgh",
+            Some(true),
+            true,
+            Style::default(),
+        )
+        .unwrap(), @r#"
+        {
+          "id": "20261026T090100-journal-efgh",
+          "resolved": true,
+          "applied": true
+        }
+        "#);
+    }
+
+    #[test]
+    fn cancelled_undo_resolution_json_has_stable_fields() {
+        assert_snapshot!(output::undo_resolution(
+            "20261026T090100-journal-efgh",
+            None,
+            true,
+            Style::default(),
+        )
+        .unwrap(), @r#"
+        {
+          "id": "20261026T090100-journal-efgh",
+          "resolved": false,
+          "applied": false
+        }
+        "#);
+    }
+
+    #[test]
+    fn cancelled_undo_json_is_an_object() {
+        assert_snapshot!(output::undo_cancelled(
+            "20261026T090000-journal-abcd",
+            true,
+            Style::default(),
+        )
+        .unwrap(), @r#"
+        {
+          "id": "20261026T090000-journal-abcd",
+          "undo_id": null,
+          "applied": false,
+          "added": 0,
+          "updated": 0,
+          "completed": 0,
+          "deleted": 0
+        }
+        "#);
     }
 
     #[test]
@@ -695,7 +920,7 @@ mod tests {
                 unreachable!()
             }
 
-            fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
+            fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
                 unreachable!()
             }
         }
