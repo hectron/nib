@@ -1,6 +1,14 @@
 # macOS permissions
 
-Run a command for each app from your regular terminal:
+Check every permission at once without triggering a prompt:
+
+```bash
+nib doctor
+```
+
+`nib doctor` also checks your macOS version, configuration files, and editor. Warnings don't fail the command; a failed check exits with status 1. Add `--json` for scripts.
+
+To grant access, run a command for each app from your regular terminal:
 
 ```bash
 nib note list

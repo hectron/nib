@@ -6,6 +6,7 @@ use jiff::{Timestamp, Zoned};
 use miette::{IntoDiagnostic, Result};
 use serde::{Serialize, Serializer};
 
+use crate::app::doctor::{Check, CheckStatus};
 use crate::domain::{Event, Note, Priority, Reminder};
 
 pub trait Tabular: Serialize {
@@ -114,6 +115,40 @@ pub fn today(
         Ok("Nothing due today.".into())
     } else {
         Ok(rendered.join("\n\n"))
+    }
+}
+
+pub fn doctor(checks: &[Check], json: bool, style: Style) -> Result<String> {
+    if json {
+        let checks = checks.iter().map(DoctorCheckJson::from).collect::<Vec<_>>();
+        return to_json(&DoctorJson {
+            id: "doctor",
+            ok: !checks.iter().any(|check| check.status == "fail"),
+            checks,
+        });
+    }
+    Ok(checks
+        .iter()
+        .map(|check| {
+            let symbol = match check.status {
+                CheckStatus::Pass => styled_symbol("✓", "32", style),
+                CheckStatus::Warning => styled_symbol("!", "33", style),
+                CheckStatus::Fail => styled_symbol("✗", "31", style),
+            };
+            check.fix.as_ref().map_or_else(
+                || format!("{symbol} {}", clean(&check.message)),
+                |fix| format!("{symbol} {}\n  Fix: {}", clean(&check.message), clean(fix)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn styled_symbol(symbol: &str, color: &str, style: Style) -> String {
+    if style.color {
+        format!("\u{1b}[{color}m{symbol}\u{1b}[0m")
+    } else {
+        symbol.into()
     }
 }
 
@@ -272,6 +307,32 @@ struct TodayJson<'a> {
     overdue: &'a [Reminder],
     due_today: &'a [Reminder],
     events: &'a [Event],
+}
+
+#[derive(Serialize)]
+struct DoctorJson {
+    id: &'static str,
+    ok: bool,
+    checks: Vec<DoctorCheckJson>,
+}
+
+#[derive(Serialize)]
+struct DoctorCheckJson {
+    id: String,
+    status: &'static str,
+    message: String,
+    fix: Option<String>,
+}
+
+impl From<&Check> for DoctorCheckJson {
+    fn from(check: &Check) -> Self {
+        Self {
+            id: check.id.clone(),
+            status: check.status.as_str(),
+            message: check.message.clone(),
+            fix: check.fix.clone(),
+        }
+    }
 }
 
 impl Serialize for Event {
