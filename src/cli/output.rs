@@ -1,8 +1,8 @@
 use comfy_table::{
     Attribute, Cell, ColumnConstraint, ContentArrangement, Row, Table, presets::NOTHING,
 };
-use jiff::Zoned;
 use jiff::civil::Date;
+use jiff::{Timestamp, Zoned};
 use miette::{IntoDiagnostic, Result};
 use serde::{Serialize, Serializer};
 
@@ -140,11 +140,19 @@ pub fn clean(text: &str) -> String {
 }
 
 impl Tabular for Note {
-    const HEADER: &'static [&'static str] = &["TITLE", "FOLDER"];
+    const HEADER: &'static [&'static str] = &["TITLE", "FOLDER", "LOCKED"];
     const TITLE_COLUMN: usize = 0;
 
     fn row(&self) -> Vec<String> {
-        vec![self.title.clone(), self.folder.clone().unwrap_or_default()]
+        vec![
+            self.title.clone(),
+            self.folder.clone().unwrap_or_default(),
+            if self.locked {
+                "yes".into()
+            } else {
+                String::new()
+            },
+        ]
     }
 }
 
@@ -213,6 +221,8 @@ struct NoteJson<'a> {
     id: &'a str,
     title: &'a str,
     folder: Option<&'a str>,
+    modified: Option<Timestamp>,
+    locked: bool,
 }
 
 impl Serialize for Note {
@@ -221,6 +231,8 @@ impl Serialize for Note {
             id: &self.id,
             title: &self.title,
             folder: self.folder.as_deref(),
+            modified: self.modified,
+            locked: self.locked,
         }
         .serialize(serializer)
     }
@@ -348,13 +360,15 @@ mod tests {
             id: "note-1".into(),
             title: "Hi\u{1b}]0;pwned\u{7}\nthere".into(),
             folder: None,
+            modified: None,
+            locked: false,
         };
         assert_snapshot!(
             single(&note, "Created note", false).unwrap(),
             @r#"Created note "Hi�]0;pwned� there""#
         );
         assert_snapshot!(list(std::slice::from_ref(&note), false, Style::default()).unwrap(), @r"
-        TITLE               FOLDER
+        TITLE               FOLDER  LOCKED
         Hi�]0;pwned� there
         ");
         assert!(
@@ -370,6 +384,8 @@ mod tests {
             id: "note-1".into(),
             title: "Q4 planning".into(),
             folder: Some("Work".into()),
+            modified: None,
+            locked: false,
         };
         let reminder = Reminder {
             id: "reminder-1".into(),

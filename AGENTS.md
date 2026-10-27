@@ -46,6 +46,7 @@ nib t "Buy groceries"
 - `src/infra/config.rs` — discovers and merges user, parent-directory, local, and environment configuration. Inputs are injected so tests never depend on the process environment.
 - `src/infra/demo.rs` — sample notes, reminders, and events for `NIB_DEMO=1`, with dates relative to `now`. Nothing is saved.
 - `src/infra/host.rs` — owns editor, prompt, message, temporary-file, and backup filesystem I/O.
+- `src/infra/notes.rs` — invokes Apple Notes through `osascript`, passing data as arguments and parsing batched JXA list results.
 - `src/infra/eventkit.rs` — the only unsafe module. It implements Reminders and Calendar with EventKit on macOS, converts callback data to owned Rust values in the callback, and keeps Objective-C calls behind small safe helpers.
 - `src/cli/mod.rs` — `clap` definitions. Every command line resolves to one `Action`; relative input is resolved against the supplied clock and configuration.
 - `src/cli/output.rs` — table and JSON rendering. Terminal style is detected once; text strips control characters; JSON uses private output types.
