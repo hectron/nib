@@ -410,8 +410,8 @@ mod tests {
         let mut host = Scripted::new().edit(|text| text);
         let (result, applied) = run(&["Oat milk"], false, &mut host);
         assert_eq!(result.unwrap(), "No changes.");
-        assert!(applied.is_empty());
-        assert!(host.backups.is_empty());
+        assert_eq!(applied, Vec::<ReminderChange>::new());
+        assert_eq!(host.backups, Vec::<(String, String)>::new());
     }
 
     #[test]
@@ -447,7 +447,7 @@ mod tests {
                 .to_string()
                 .starts_with("Nothing was changed. Your edits are in")
         );
-        assert!(applied.is_empty());
+        assert_eq!(applied, Vec::<ReminderChange>::new());
     }
 
     #[test]
@@ -462,8 +462,8 @@ mod tests {
         let path = message.rsplit(' ').next().unwrap();
         assert!(fs::read_to_string(path).unwrap().contains("- [x] Oat milk"));
         fs::remove_file(path).unwrap();
-        assert!(applied.is_empty());
-        assert!(host.backups.is_empty());
+        assert_eq!(applied, Vec::<ReminderChange>::new());
+        assert_eq!(host.backups, Vec::<(String, String)>::new());
     }
 
     #[test]
@@ -483,7 +483,7 @@ mod tests {
         let mut host = Scripted::new().edit(delete_four).answer("y");
         let (result, applied) = run(&titles, false, &mut host);
         assert!(result.unwrap().starts_with("Nothing was changed"));
-        assert!(applied.is_empty());
+        assert_eq!(applied, Vec::<ReminderChange>::new());
         assert!(host.said.iter().any(|s| s.contains("Type 4 to apply")));
 
         let mut host = Scripted::new().edit(delete_four).answer("4");
@@ -502,7 +502,7 @@ mod tests {
                 .to_string()
                 .contains("changed in Reminders while you were editing")
         );
-        assert!(applied.is_empty());
+        assert_eq!(applied, Vec::<ReminderChange>::new());
         assert!(
             host.said
                 .iter()

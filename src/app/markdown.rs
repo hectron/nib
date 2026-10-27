@@ -1145,7 +1145,7 @@ mod tests {
         assert!(
             matches!(&plan.changes[..], [ReminderChange::Delete { before }] if before.title == "Oat milk")
         );
-        assert!(plan.warnings.is_empty());
+        assert_eq!(plan.warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -1223,7 +1223,7 @@ mod tests {
     #[test]
     fn renaming_a_heading_warns_and_changes_nothing() {
         let plan = plan_after(|t| replace(t, "## Groceries", "## Food")).unwrap();
-        assert!(plan.changes.is_empty());
+        assert_eq!(plan.changes, Vec::<ReminderChange>::new());
         assert!(plan.warnings[0].contains("renaming lists isn't supported"));
     }
 
