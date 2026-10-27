@@ -31,7 +31,7 @@ nib task edit
 nib cal --week
 ```
 
-`n` and `t` are capture commands. With a title, they create an item; without one, they list items.
+`n` and `t` are capture commands. With a title, they create an item; without one, they list items. Note titles use single spaces between words, and a note folder name must match exactly one folder across your accounts.
 
 ```bash
 nib note new "Meeting with Team" --folder Work
