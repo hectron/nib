@@ -42,6 +42,24 @@ nib cal --calendar Work --week
 
 Quick-add recognizes natural due dates and trailing priority and list tokens. See [Quick-add reminders](docs/quick-add.md) for every form. `nib today` combines overdue and due-today reminders with today's events. `nib doctor` checks permissions and configuration without prompting.
 
+## Configuration
+
+Set your defaults once in `~/.config/nib/config.toml`:
+
+```toml
+[task]
+list = "Inbox"
+priority = "medium"
+
+[cal]
+calendars = ["Work", "Personal"]
+
+[note]
+folder = "Notes"
+```
+
+A `nib.toml` in a project directory overrides these field by field, and `.nib.local.toml` holds personal overrides you don't commit. See [Configuration](docs/configuration.md) for every setting, environment variables, and precedence.
+
 ## Why nib
 
 - Fast, focused commands with short aliases and useful defaults.

@@ -1,19 +1,16 @@
 # Configuration
 
-Put shared defaults in `nib.toml`:
+Add a `nib.toml` to a work repository:
 
 ```toml
 [task]
 list = "Work"
-priority = "medium"
-parse_inline = true
 
 [cal]
-calendars = ["Work", "Birthdays"]
-
-[note]
-folder = "Inbox"
+calendars = ["Work"]
 ```
+
+These defaults apply in that directory and every directory below it.
 
 Now capture with fewer flags:
 
