@@ -68,7 +68,7 @@ A `nib.toml` in a project directory overrides these field by field, and `.nib.lo
 - A daily agenda for overdue reminders, due-today reminders, and events.
 - Natural due dates and quick-add tokens for reminders.
 - Safe bulk reminder editing in `$VISUAL` or `$EDITOR`.
-- Pretty terminal tables and script-friendly JSON.
+- Colored tables and JSON in the terminal, plain when piped or with `NO_COLOR` set.
 - Layered TOML configuration for personal and project defaults.
 - A non-persistent demo backend with dates relative to today.
 

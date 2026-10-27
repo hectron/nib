@@ -30,18 +30,22 @@ pub fn run(
                 .filter(|reminder| reminder.due == Some(date))
                 .collect::<Vec<_>>();
             let events = backends.calendar.events(query)?;
-            output::today(&overdue, &due_today, &events, json, style)
+            output::today(&overdue, &due_today, &events, date, json, style)
         }
         Action::NewNote(note) => {
-            output::single(&backends.notes.create(note)?, "Created note", json)
+            output::single(&backends.notes.create(note)?, "Created note", json, style)
         }
-        Action::ListNotes(query) => output::list(&backends.notes.list(query)?, json, style),
+        Action::ListNotes(query) => {
+            output::list(&backends.notes.list(query)?, json, now.date(), style)
+        }
         Action::AddTask(reminder) => {
-            output::single(&backends.reminders.add(reminder)?, "Added", json)
+            output::single(&backends.reminders.add(reminder)?, "Added", json, style)
         }
-        Action::ListTasks => output::list(&backends.reminders.list()?, json, style),
+        Action::ListTasks => output::list(&backends.reminders.list()?, json, now.date(), style),
         Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
-        Action::ListEvents(query) => output::list(&backends.calendar.events(query)?, json, style),
+        Action::ListEvents(query) => {
+            output::list(&backends.calendar.events(query)?, json, now.date(), style)
+        }
     }
 }
 
