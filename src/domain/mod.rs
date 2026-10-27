@@ -1,5 +1,6 @@
 use std::cell::LazyCell;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use jiff::civil::Date;
 use jiff::{Timestamp, Zoned};
@@ -81,6 +82,81 @@ pub struct NoteConfig {
     pub folder: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigKey {
+    TaskList,
+    TaskPriority,
+    TaskParseInline,
+    CalCalendars,
+    NoteFolder,
+}
+
+impl ConfigKey {
+    pub const ALL: [Self; 5] = [
+        Self::TaskList,
+        Self::TaskPriority,
+        Self::TaskParseInline,
+        Self::CalCalendars,
+        Self::NoteFolder,
+    ];
+
+    pub fn parse(key: &str) -> Option<Self> {
+        match key {
+            "task.list" => Some(Self::TaskList),
+            "task.priority" => Some(Self::TaskPriority),
+            "task.parse_inline" => Some(Self::TaskParseInline),
+            "cal.calendars" => Some(Self::CalCalendars),
+            "note.folder" => Some(Self::NoteFolder),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskList => "task.list",
+            Self::TaskPriority => "task.priority",
+            Self::TaskParseInline => "task.parse_inline",
+            Self::CalCalendars => "cal.calendars",
+            Self::NoteFolder => "note.folder",
+        }
+    }
+
+    pub fn parts(self) -> (&'static str, &'static str) {
+        self.as_str()
+            .split_once('.')
+            .expect("configuration keys always contain a section separator")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigValue {
+    Unset,
+    String(String),
+    Priority(Priority),
+    Bool(bool),
+    Strings(Vec<String>),
+}
+
+impl ConfigValue {
+    pub fn is_unset(&self) -> bool {
+        matches!(self, Self::Unset)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigOrigin {
+    Default,
+    File(PathBuf),
+    Environment(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigEntry {
+    pub key: ConfigKey,
+    pub value: ConfigValue,
+    pub origin: ConfigOrigin,
+}
+
 impl Priority {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -145,6 +221,7 @@ pub struct ReminderDueComponents {
     pub is_leap_month: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredReminder {
     pub id: String,
@@ -154,6 +231,7 @@ pub struct StoredReminder {
     pub due: Option<Date>,
     pub due_components: Option<ReminderDueComponents>,
     pub priority: Option<Priority>,
+    pub completed: bool,
     pub modified: Option<Timestamp>,
     pub alarms_present: bool,
     pub recurrence_present: bool,
@@ -172,9 +250,10 @@ pub struct ReminderEdit {
     pub title: Option<String>,
     pub notes: FieldEdit<String>,
     pub due: FieldEdit<Date>,
+    pub due_components: Option<Box<ReminderDueComponents>>,
     pub priority: FieldEdit<Priority>,
     pub list_id: Option<String>,
-    pub complete: bool,
+    pub completed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -200,6 +279,9 @@ pub enum ReminderChange {
         due: Option<Date>,
         priority: Option<Priority>,
     },
+    Restore {
+        before: StoredReminder,
+    },
     Update {
         before: StoredReminder,
         edit: ReminderEdit,
@@ -207,6 +289,69 @@ pub enum ReminderChange {
     Delete {
         before: StoredReminder,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApplyResult {
+    pub written: Vec<Option<StoredReminder>>,
+    pub unrecorded: Vec<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChangeCounts {
+    pub added: usize,
+    pub updated: usize,
+    pub completed: usize,
+    pub deleted: usize,
+}
+
+impl ChangeCounts {
+    pub fn total(self) -> usize {
+        self.added + self.updated + self.completed + self.deleted
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalSummary {
+    pub id: String,
+    pub time: Timestamp,
+    pub written_at: Timestamp,
+    pub action: JournalAction,
+    pub status: JournalStatus,
+    pub undo_of: Option<String>,
+    pub undone: bool,
+    pub counts: ChangeCounts,
+    pub unrecorded: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalStatus {
+    Applied,
+    Pending,
+}
+
+impl JournalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Pending => "pending",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalAction {
+    TaskEdit,
+    Undo,
+}
+
+impl JournalAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskEdit => "task_edit",
+            Self::Undo => "undo",
+        }
+    }
 }
 
 #[derive(Debug, Error, Diagnostic)]
@@ -267,10 +412,10 @@ pub enum BackendError {
     )]
     NotImplemented { app: &'static str },
 
-    #[error("{} changed in Reminders while you were editing", .titles.join(", "))]
+    #[error("{} changed in Reminders since nib last read them", .titles.join(", "))]
     #[diagnostic(
         code(nib::backend::conflict),
-        help("nothing was changed; run `nib task edit` again to start from the current reminders")
+        help("nothing was changed; review the named reminders and try the command again")
     )]
     Conflict { titles: Vec<String> },
 
@@ -336,7 +481,7 @@ pub trait Reminders {
     fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError>;
     fn list(&self) -> Result<Vec<Reminder>, BackendError>;
     fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError>;
-    fn apply(&self, changes: &[ReminderChange]) -> Result<(), BackendError>;
+    fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError>;
 }
 
 pub trait Calendar {

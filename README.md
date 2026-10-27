@@ -28,6 +28,8 @@ nib note list -f Work
 nib t Pay rent fri !high '#bills'
 nib today
 nib task edit
+nib log
+nib undo
 nib cal --week
 nib doctor
 ```
@@ -59,6 +61,8 @@ folder = "Notes"
 ```
 
 A `nib.toml` in a project directory overrides these field by field, and `.nib.local.toml` holds personal overrides you don't commit. See [Configuration](docs/configuration.md) for every setting, environment variables, and precedence.
+
+Run `nib config list --origin` to see every effective value and where it came from.
 
 ## Shell completions
 
@@ -110,7 +114,7 @@ NIB_DEMO=1 nib t Pay rent tomorrow !high
 NIB_DEMO=1 nib note list
 ```
 
-Nothing is saved while `NIB_DEMO=1` is set.
+Nothing is saved while `NIB_DEMO=1` is set, including backups and undo history.
 
 ## Guides
 

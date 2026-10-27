@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "nib"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "assert_cmd",
  "block2",
@@ -739,6 +739,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "toml",
+ "toml_edit",
  "unicode-normalization",
 ]
 
@@ -1272,6 +1273,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

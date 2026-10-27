@@ -2,6 +2,7 @@ use clap::CommandFactory;
 use clap_complete::{Shell, generate};
 
 use super::{Cli, CompletionShell};
+use crate::domain::ConfigKey;
 
 pub fn script(shell: CompletionShell) -> String {
     let shell = Shell::from(shell);
@@ -19,7 +20,22 @@ pub fn script(shell: CompletionShell) -> String {
 }
 
 fn bash(generated: &str) -> String {
-    let generated = hide_bash_completion_command(generated);
+    let keys = ConfigKey::ALL.map(ConfigKey::as_str).join(" ");
+    let mut generated = generated.to_owned();
+    for (command, options) in [
+        ("get", "-h --json --help"),
+        ("set", "-h --local --project --json --help"),
+        ("unset", "-h --local --project --json --help"),
+    ] {
+        let current = format!(
+            "        nib__subcmd__config__subcmd__{command})\n            opts=\"{options}\""
+        );
+        let completed = format!(
+            "        nib__subcmd__config__subcmd__{command})\n            opts=\"{options} {keys}\""
+        );
+        generated = generated.replacen(&current, &completed, 1);
+    }
+    let generated = hide_bash_completion_command(&generated);
     let mut script = generated.replacen("_nib() {", "_nib_clap() {", 1);
     script.push_str(BASH_WRAPPER);
     script
@@ -185,6 +201,10 @@ fn fish(generated: &str) -> String {
         }
         script.push('\n');
     }
+    let keys = ConfigKey::ALL.map(ConfigKey::as_str).join(" ");
+    script.push_str("complete -c nib -n \"__fish_nib_using_subcommand config; and __fish_seen_subcommand_from get set unset\" -f -a '");
+    script.push_str(&keys);
+    script.push_str("'\n");
     script
 }
 
@@ -202,6 +222,8 @@ fn zsh(generated: &str) -> String {
         .filter(|line| line.trim_start() != "'__complete:' \\")
         .collect::<Vec<_>>()
         .join("\n");
+    let keys = ConfigKey::ALL.map(ConfigKey::as_str).join(" ");
+    let generated = generated.replace("':key:_default'", &format!("':key:({keys})'"));
     let generated = generated.replacen("_nib() {", "_nib_clap() {", 1);
     let wrapper = r#"_nib() {
     local option="${words[CURRENT-1]}"
@@ -302,5 +324,17 @@ esac
         assert!(!script.contains("opts=\"__complete completions"));
         assert!(script.contains("nib,completions)"));
         assert!(script.contains("nib__subcmd__completions)"));
+    }
+
+    #[test]
+    fn every_shell_completes_config_keys() {
+        let keys = ConfigKey::ALL.map(ConfigKey::as_str).join(" ");
+        for shell in [
+            CompletionShell::Bash,
+            CompletionShell::Fish,
+            CompletionShell::Zsh,
+        ] {
+            assert!(script(shell).contains(&keys), "{shell:?}");
+        }
     }
 }

@@ -1,5 +1,29 @@
 # Configuration
 
+Inspect the effective configuration and where each value came from:
+
+```bash
+nib config list
+nib config list --origin
+nib config get task.list
+```
+
+Change the user configuration without opening it in an editor:
+
+```bash
+nib config set task.list Work
+nib config set task.priority high
+nib config set cal.calendars 'Work, Personal'
+nib config unset task.priority
+nib config path
+```
+
+`set` and `unset` edit the user configuration by default. Pass `--local` to edit `.nib.local.toml` in the current directory. `--project` edits `nib.toml` when it exists, otherwise `.nib.toml` when that exists, and otherwise creates `nib.toml`. Existing comments, line endings, and string quote style are preserved when the new value can use the same TOML quoting. Calendar values accept comma-separated names or a TOML array such as `["Work", "Personal"]`; string values such as list and folder names are passed directly.
+
+Like Git, `nib config set` and `nib config unset` replace the configuration file atomically. Replacing a read-only file is allowed when its directory is writable, and replacing one name of a hard-linked file splits that name from the other links.
+
+All config commands that print output accept `--json`. In text mode, `get` exits with status 1 and prints nothing when a setting is unset and has no built-in default. In JSON mode it still exits with status 1 but prints an object whose `value` is `null`. JSON list entries always include a typed `origin` object; `--origin` controls only the text table. Unsetting a key absent from the selected file succeeds without creating or rewriting anything and reports that nothing changed.
+
 Add a `nib.toml` to a work repository:
 
 ```toml
@@ -30,6 +54,14 @@ The user configuration is:
 For directory-specific defaults, nib walks from the filesystem root to the current directory. In each directory it reads `nib.toml`, or `.nib.toml` when `nib.toml` is absent, followed by `.nib.local.toml`.
 
 Use `nib.toml` for settings you commit. Use `.nib.local.toml` for personal overrides.
+
+## Editor schema
+
+The published [JSON schema](config.schema.json) provides completion and validation. Taplo recognizes this comment at the top of any nib configuration file:
+
+```toml
+#:schema https://raw.githubusercontent.com/hectron/nib/main/docs/config.schema.json
+```
 
 ## Precedence
 
@@ -70,4 +102,4 @@ nib note list --folder Archive
 
 The configured note folder is a creation default. Use `--folder` explicitly when listing notes.
 
-Unknown TOML keys and invalid environment values are errors, so misspelled settings do not fail silently.
+Unknown TOML keys and invalid file or environment values are errors, so misspelled settings do not fail silently. File diagnostics highlight the exact source span.
