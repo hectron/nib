@@ -1,4 +1,4 @@
-## [unreleased]
+## [0.1.0] - 2026-10-27
 
 ### 🚀 Features
 
@@ -34,6 +34,7 @@
 - Document Reminders, macOS 26, and terminal permissions
 - Document Calendar, event ids, and CLI test limits
 - Document `nib task edit`
+- Add a git-cliff changelog and release steps
 
 ### ⚡ Performance
 
@@ -65,6 +66,8 @@
 
 - License nib under MIT
 - Check fmt, clippy, and tests on macOS 26
+- Release with cargo-dist to GitHub and Homebrew
+- Publish GitHub releases only for now
 
 ### 💼 Other
 
