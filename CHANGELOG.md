@@ -1,3 +1,32 @@
+## [0.2.0] - 2026-10-27
+
+### 🚀 Features
+
+- Add `nib today` agenda view
+- Parse quick-add suffixes and natural-language dates
+- Capture and list Apple Notes through AppleScript
+
+### 🐛 Bug Fixes
+
+- Restore the Date import that `nib today` needs
+
+### 📚 Documentation
+
+- Restructure the docs around a short README
+- Cover Notes, quick-add, and `nib today`, and add the demo GIF
+
+### 🚜 Refactor
+
+- Adopt STYLE.md, strict lints, and a layered library structure
+
+### ⚙️ Miscellaneous Tasks
+
+- Cut releases with one workflow_dispatch command
+- Release through a pull request with two commands
+
+### 💼 Other
+
+- Pin the Rust toolchain to 1.98.1
 ## [0.1.0] - 2026-10-27
 
 ### 🚀 Features
@@ -68,6 +97,7 @@
 - Check fmt, clippy, and tests on macOS 26
 - Release with cargo-dist to GitHub and Homebrew
 - Publish GitHub releases only for now
+- *(release)* V0.1.0
 
 ### 💼 Other
 
