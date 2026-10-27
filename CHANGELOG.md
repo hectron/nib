@@ -1,3 +1,14 @@
+## [0.4.0] - 2026-10-27
+
+### 🚀 Features
+
+- Show and edit reminder due times
+- Add shell completions with live list, calendar, and folder names
+- Add `nib config` to list, get, set, and unset settings
+
+### 🐛 Bug Fixes
+
+- Journal edits under the lock and refuse unrecorded undos clearly
 ## [0.3.0] - 2026-10-27
 
 ### 🚀 Features
@@ -23,6 +34,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Report the required check from the release workflow
+- *(release)* V0.3.0
 
 ### 💼 Other
 
