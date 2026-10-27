@@ -18,6 +18,9 @@ install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
 
+# Start releases from the cut-release workflow instead of tag pushes
+dispatch-releases = true
+
 [dist.github-custom-runners]
 aarch64-apple-darwin = "macos-26"
 x86_64-apple-darwin = "macos-26"
