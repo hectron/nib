@@ -245,6 +245,7 @@ pub struct JournalSummary {
     pub undo_of: Option<String>,
     pub undone: bool,
     pub counts: ChangeCounts,
+    pub unrecorded: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
