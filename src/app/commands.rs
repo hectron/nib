@@ -650,6 +650,7 @@ mod tests {
             task: crate::domain::TaskConfig {
                 list: Some("Snowglobe".into()),
                 priority: Some(Priority::Medium),
+                parse_inline: true,
             },
             ..Config::default()
         };

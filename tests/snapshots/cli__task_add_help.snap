@@ -12,6 +12,6 @@ Arguments:
 Options:
       --json                 Print JSON instead of text
   -l, --list <NAME>          Reminder list to add to
-  -d, --due <DATE>           Due date: today, tomorrow, or YYYY-MM-DD
+  -d, --due <DATE>           Due date: natural date or YYYY-MM-DD
   -p, --priority <PRIORITY>  [possible values: low, medium, high]
   -h, --help                 Print help

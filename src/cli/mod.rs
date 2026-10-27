@@ -1,12 +1,15 @@
 use std::ops::Range;
 
 use clap::{Args, Parser, Subcommand};
-use jiff::civil::Date;
 use jiff::{ToSpan, Zoned};
+use thiserror::Error;
 
 use crate::domain::{Config, EventQuery, NewNote, NewReminder, NoteQuery, Priority};
 
 pub mod output;
+mod task;
+
+use task::{Due, InlineTask, due, parse_inline};
 
 /// Fast CLI for Apple Notes, Reminders, and Calendar
 #[derive(Debug, Parser)]
@@ -129,7 +132,7 @@ struct TaskOpts {
     /// Reminder list to add to
     #[arg(short, long, value_name = "NAME", requires = "words")]
     list: Option<String>,
-    /// Due date: today, tomorrow, or YYYY-MM-DD
+    /// Due date: natural date or YYYY-MM-DD
     #[arg(short, long, value_name = "DATE", value_parser = due, requires = "words")]
     due: Option<Due>,
     #[arg(short, long, value_enum, requires = "words")]
@@ -170,61 +173,46 @@ fn word(s: &str) -> Result<String, &'static str> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Due {
-    Today,
-    Tomorrow,
-    On(Date),
-}
-
-fn due(s: &str) -> Result<Due, &'static str> {
-    match s {
-        "today" => Ok(Due::Today),
-        "tomorrow" => Ok(Due::Tomorrow),
-        _ if is_iso_date(s) => s
-            .parse()
-            .map(Due::On)
-            .map_err(|_| "that date doesn't exist"),
-        _ => Err("expected today, tomorrow, or YYYY-MM-DD"),
-    }
-}
-
-fn is_iso_date(s: &str) -> bool {
-    s.len() == 10
-        && s.bytes().enumerate().all(|(i, b)| match i {
-            4 | 7 => b == b'-',
-            _ => b.is_ascii_digit(),
-        })
-}
-
-impl Due {
-    fn on(self, today: Date) -> Result<Date, jiff::Error> {
-        match self {
-            Self::Today => Ok(today),
-            Self::Tomorrow => today.tomorrow(),
-            Self::On(date) => Ok(date),
-        }
-    }
-}
-
 fn days_from_today(now: &Zoned, count: i32) -> Result<Range<Zoned>, jiff::Error> {
     let end = now.date().checked_add(count.days())?;
     Ok(now.start_of_day()?..end.to_zoned(now.time_zone().clone())?)
 }
 
 impl TaskOpts {
-    fn add(self, title: String, now: &Zoned, config: &Config) -> Result<Action, jiff::Error> {
+    fn add(self, words: &[String], now: &Zoned, config: &Config) -> Result<Action, ActionError> {
+        let inline = if config.task.parse_inline {
+            parse_inline(words)?
+        } else {
+            InlineTask {
+                title: words.join(" "),
+                list: None,
+                due: None,
+                priority: None,
+            }
+        };
+        let due = self.due.or(inline.due);
         Ok(Action::AddTask(NewReminder {
-            title,
-            list: self.list.or_else(|| config.task.list.clone()),
-            due: self.due.map(|due| due.on(now.date())).transpose()?,
-            priority: self.priority.or(config.task.priority),
+            title: inline.title,
+            list: self
+                .list
+                .or(inline.list)
+                .or_else(|| config.task.list.clone()),
+            due: due.map(|due| due.on(now.date())).transpose()?,
+            priority: self.priority.or(inline.priority).or(config.task.priority),
         }))
     }
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum ActionError {
+    #[error(transparent)]
+    Date(#[from] jiff::Error),
+    #[error(transparent)]
+    Inline(#[from] task::InlineError),
+}
+
 impl Command {
-    pub fn into_action(self, now: &Zoned, config: &Config) -> Result<Action, jiff::Error> {
+    pub(crate) fn into_action(self, now: &Zoned, config: &Config) -> Result<Action, ActionError> {
         Ok(match self {
             Command::Today(TodayArgs { calendar }) => Action::Today {
                 date: now.date(),
@@ -264,7 +252,7 @@ impl Command {
                 Some(TaskAction::Add {
                     title: Title { words },
                     opts,
-                }) => opts.add(words.join(" "), now, config)?,
+                }) => opts.add(&words, now, config)?,
                 Some(TaskAction::List) | None => Action::ListTasks,
                 Some(TaskAction::Edit { list }) => Action::EditTasks {
                     list: list.or_else(|| config.task.list.clone()),
@@ -274,7 +262,7 @@ impl Command {
                 if words.is_empty() {
                     Action::ListTasks
                 } else {
-                    opts.add(words.join(" "), now, config)?
+                    opts.add(&words, now, config)?
                 }
             }
             Command::Cal(CalArgs {
@@ -300,7 +288,7 @@ mod tests {
     use clap::CommandFactory;
     use clap::error::ErrorKind;
     use insta::assert_snapshot;
-    use jiff::civil::date;
+    use jiff::civil::{Date, date};
     use jiff::tz::{TimeZone, offset};
 
     use super::*;
@@ -318,6 +306,17 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Action, clap::Error> {
         parse_at(&at(date(2026, 10, 26), 9, 30), args)
+    }
+
+    fn action_with_config(
+        now: &Zoned,
+        args: &[&str],
+        config: &Config,
+    ) -> Result<Action, ActionError> {
+        Cli::try_parse_from(["nib"].iter().chain(args))
+            .unwrap()
+            .command
+            .into_action(now, config)
     }
 
     fn assert_parses(cases: &[(&[&str], Action)]) {
@@ -497,6 +496,13 @@ mod tests {
             (&late, "today", date(2026, 10, 26)),
             (&late, "tomorrow", date(2026, 10, 27)),
             (&new_years_eve, "tomorrow", date(2027, 1, 1)),
+            (&morning, "fri", date(2026, 10, 30)),
+            (&morning, "friday", date(2026, 10, 30)),
+            (&morning, "next fri", date(2026, 11, 6)),
+            (&morning, "in 3d", date(2026, 10, 29)),
+            (&morning, "in 2w", date(2026, 11, 9)),
+            (&morning, "+2w", date(2026, 11, 9)),
+            (&morning, "eom", date(2026, 10, 31)),
             (&morning, "2026-11-03", date(2026, 11, 3)),
             (&morning, "2025-01-31", date(2025, 1, 31)),
         ];
@@ -520,12 +526,134 @@ mod tests {
             })
             .collect();
         assert_snapshot!(errors.join("\n"), @"
-        error: invalid value 'banana' for '--due <DATE>': expected today, tomorrow, or YYYY-MM-DD
-        error: invalid value '' for '--due <DATE>': expected today, tomorrow, or YYYY-MM-DD
-        error: invalid value '2026-1-5' for '--due <DATE>': expected today, tomorrow, or YYYY-MM-DD
-        error: invalid value '2026-11-03T10:00' for '--due <DATE>': expected today, tomorrow, or YYYY-MM-DD
+        error: invalid value 'banana' for '--due <DATE>': expected today, tomorrow, a weekday, next WEEKDAY, in Nd, in Nw, +Nd, +Nw, eom, or YYYY-MM-DD
+        error: invalid value '' for '--due <DATE>': expected today, tomorrow, a weekday, next WEEKDAY, in Nd, in Nw, +Nd, +Nw, eom, or YYYY-MM-DD
+        error: invalid value '2026-1-5' for '--due <DATE>': expected YYYY-MM-DD
+        error: invalid value '2026-11-03T10:00' for '--due <DATE>': expected YYYY-MM-DD
         error: invalid value '2026-02-30' for '--due <DATE>': that date doesn't exist
         ");
+    }
+
+    #[test]
+    fn inline_quick_add_works_for_both_task_commands() {
+        let now = at(date(2026, 10, 26), 9, 30);
+        let cases = [
+            &["t", "Pay", "rent", "fri", "!high", "#bills"][..],
+            &["task", "add", "Pay", "rent", "fri", "!high", "#bills"][..],
+        ];
+        for args in cases {
+            assert_eq!(
+                action_with_config(&now, args, &Config::default()).unwrap(),
+                Action::AddTask(NewReminder {
+                    title: "Pay rent".into(),
+                    list: Some("bills".into()),
+                    due: Some(date(2026, 10, 30)),
+                    priority: Some(Priority::High),
+                }),
+                "nib {}",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn every_due_form_works_inline() {
+        let now = at(date(2026, 10, 26), 9, 30);
+        let cases = [
+            (&["t", "Do", "it", "today"][..], date(2026, 10, 26)),
+            (&["t", "Do", "it", "tomorrow"][..], date(2026, 10, 27)),
+            (&["t", "Do", "it", "fri"][..], date(2026, 10, 30)),
+            (&["t", "Do", "it", "friday"][..], date(2026, 10, 30)),
+            (&["t", "Do", "it", "next", "fri"][..], date(2026, 11, 6)),
+            (&["t", "Do", "it", "in", "3d"][..], date(2026, 10, 29)),
+            (&["t", "Do", "it", "in", "2w"][..], date(2026, 11, 9)),
+            (&["t", "Do", "it", "+2w"][..], date(2026, 11, 9)),
+            (&["t", "Do", "it", "eom"][..], date(2026, 10, 31)),
+            (&["t", "Do", "it", "2027-01-05"][..], date(2027, 1, 5)),
+        ];
+        for (args, expected) in cases {
+            assert_eq!(
+                action_with_config(&now, args, &Config::default()).unwrap(),
+                task("Do it", Some(expected), None),
+                "nib {}",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_flags_override_inline_fields() {
+        let now = at(date(2026, 10, 26), 9, 30);
+        let cases = [
+            &[
+                "t",
+                "Pay",
+                "rent",
+                "fri",
+                "!low",
+                "#bills",
+                "--due",
+                "tomorrow",
+                "--priority",
+                "high",
+                "--list",
+                "home",
+            ][..],
+            &[
+                "task",
+                "add",
+                "Pay",
+                "rent",
+                "fri",
+                "!low",
+                "#bills",
+                "--due",
+                "tomorrow",
+                "--priority",
+                "high",
+                "--list",
+                "home",
+            ][..],
+        ];
+        for args in cases {
+            assert_eq!(
+                action_with_config(&now, args, &Config::default()).unwrap(),
+                Action::AddTask(NewReminder {
+                    title: "Pay rent".into(),
+                    list: Some("home".into()),
+                    due: Some(date(2026, 10, 27)),
+                    priority: Some(Priority::High),
+                }),
+                "nib {}",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_can_disable_inline_parsing() {
+        let config = Config {
+            task: crate::domain::TaskConfig {
+                parse_inline: false,
+                ..crate::domain::TaskConfig::default()
+            },
+            ..Config::default()
+        };
+        let action = action_with_config(
+            &at(date(2026, 10, 26), 9, 30),
+            &["t", "Pay", "rent", "\\fri", "!high", "#bills"],
+            &config,
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            Action::AddTask(NewReminder {
+                title: "Pay rent \\fri !high #bills".into(),
+                list: None,
+                due: None,
+                priority: None,
+            })
+        );
     }
 
     #[test]
@@ -547,6 +675,7 @@ mod tests {
             task: crate::domain::TaskConfig {
                 list: Some("Snowglobe".into()),
                 priority: Some(Priority::Medium),
+                parse_inline: true,
             },
             cal: crate::domain::CalendarConfig {
                 calendars: vec!["Work".into()],
