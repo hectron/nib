@@ -3,6 +3,7 @@ name = "nib"
 version = "0.1.0"
 edition = "2024"
 description = "Fast CLI for Apple Notes, Reminders, and Calendar"
+license = "MIT"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }

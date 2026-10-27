@@ -95,3 +95,7 @@ Tests that touch your real reminders and calendars are skipped by default. Run t
 cargo test -- --ignored lists_real                                   # read only: reminders and events
 NIB_LIVE_WRITE=1 cargo test -- --ignored adds_and_removes_a_real_reminder  # adds one, then deletes it
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
