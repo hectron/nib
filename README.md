@@ -42,6 +42,21 @@ nib t                # no title lists reminders
 
 `--due` takes `today`, `tomorrow`, or a date such as `2026-11-03`.
 
+## Editing reminders
+
+`nib task edit` opens incomplete reminders as Markdown in `$VISUAL` or `$EDITOR`. Edit titles and notes, add due dates and priorities, check boxes to complete reminders, add or delete task lines, or move a task under another list heading.
+
+```markdown
+## Work 🆔 a1b2c3d4
+
+- [ ] Review pull request 🔼 📅 2026-11-03 🆔 e5f6a7b8
+    Check the release notes.
+```
+
+Save and quit to preview the changes. Nothing is applied without confirmation. Before updating or deleting existing reminders, `nib` saves a JSON backup in `~/Library/Application Support/nib/backups`.
+
+Subtasks, tags, flags, sections, and due times are not shown.
+
 Every command accepts `--json` for piping into other tools. Each JSON object starts with an `id` that identifies the note, reminder, or event, and dates use ISO 8601: `"2026-10-27"` for due dates and `"2026-10-26T10:00:00-04:00"` for event starts. Events also have `all_day`. Every occurrence of a recurring event shares Apple's identifier, so an event's `id` adds the occurrence's start in UTC, such as `"ABC123@2026-10-27T14:00:00Z"`.
 
 ## Development
