@@ -6,6 +6,7 @@ Put shared defaults in `nib.toml`:
 [task]
 list = "Work"
 priority = "medium"
+parse_inline = true
 
 [cal]
 calendars = ["Work", "Birthdays"]
@@ -51,10 +52,13 @@ A nearer file only replaces the fields it defines.
 | --- | --- | --- | --- |
 | `task.list` | `NIB_TASK_LIST` | List name | `nib t`, `nib task add`, and `nib task edit` |
 | `task.priority` | `NIB_TASK_PRIORITY` | `low`, `medium`, or `high` | `nib t` and `nib task add` |
+| `task.parse_inline` | `NIB_TASK_PARSE_INLINE` | `true` or `false` | Trailing due dates, priorities, and lists for `nib t` and `nib task add` |
 | `cal.calendars` | `NIB_CAL_CALENDARS` | Array in TOML; comma-separated names in the environment | `nib cal` |
 | `note.folder` | `NIB_NOTE_FOLDER` | Folder name | `nib n` and `nib note new` |
 
 Calendar names from `NIB_CAL_CALENDARS` are trimmed, and empty names are ignored.
+
+Inline task parsing is on by default. Set `task.parse_inline = false` or `NIB_TASK_PARSE_INLINE=false` to keep trailing tokens as part of reminder titles. Explicit `--due`, `--priority`, and `--list` flags still work. See [Quick-add reminders](quick-add.md) for the recognized tokens.
 
 ## Override a default
 

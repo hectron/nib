@@ -12,24 +12,24 @@ Env NIB_DEMO "1"
 Env NO_COLOR "1"
 
 Sleep 1s
-Type `nib t "Plan launch" --due tomorrow --priority high`
+Type `nib t Plan launch tomorrow !high`
 Enter
 Sleep 3s
 
 Ctrl+L
 Sleep 500ms
-Type "nib t"
+Type "nib today"
 Enter
 Sleep 3s
 
 Ctrl+L
 Sleep 500ms
-Type "nib cal --week"
+Type "nib note list -f Work"
 Enter
 Sleep 3s
 
 Ctrl+L
 Sleep 500ms
-Type "nib t --json"
+Type "nib today --json"
 Enter
 Sleep 3s

@@ -4,7 +4,7 @@ Capture and query Apple Notes, Reminders, and Calendar without leaving the termi
 
 ![A terminal demo of nib](docs/demo.gif)
 
-Built for macOS 26 and later. Reminders and Calendar use live Apple data. Apple Notes integration is not implemented yet, but its commands work with the demo backend.
+Built for macOS 26 and later. Notes uses macOS Automation, while Reminders and Calendar use native EventKit access. All three work with live Apple data.
 
 ## Install
 
@@ -23,26 +23,31 @@ cargo install --git https://github.com/hectron/nib
 ## Quick start
 
 ```bash
-nib t "Buy groceries" --due today
-nib t
+nib n "Quick thought"
+nib note list -f Work
+nib t Pay rent fri !high '#bills'
+nib today
 nib task edit
 nib cal --week
-NIB_DEMO=1 nib n "Quick thought"
 ```
 
 `n` and `t` are capture commands. With a title, they create an item; without one, they list items.
 
 ```bash
-nib t "Review pull request" --due tomorrow --priority high
-nib task add "Pay rent" --list Personal
-nib cal --calendar Work
-nib note list --folder Work
+nib note new "Meeting with Team" --folder Work
+nib task add "Review pull request" --due tomorrow --priority high
+nib cal --calendar Work --week
 ```
+
+Quick-add recognizes natural due dates and trailing priority and list tokens. See [Quick-add reminders](docs/quick-add.md) for every form. `nib today` combines overdue and due-today reminders with today's events.
 
 ## Why nib
 
 - Fast, focused commands with short aliases and useful defaults.
+- Live Apple Notes capture and listing through macOS Automation.
 - Native EventKit access for Reminders and Calendar.
+- A daily agenda for overdue reminders, due-today reminders, and events.
+- Natural due dates and quick-add tokens for reminders.
 - Safe bulk reminder editing in `$VISUAL` or `$EDITOR`.
 - Pretty terminal tables and script-friendly JSON.
 - Layered TOML configuration for personal and project defaults.
@@ -51,8 +56,8 @@ nib note list --folder Work
 Try every command without touching Apple data:
 
 ```bash
-NIB_DEMO=1 nib t
-NIB_DEMO=1 nib cal --week
+NIB_DEMO=1 nib today
+NIB_DEMO=1 nib t Pay rent tomorrow !high
 NIB_DEMO=1 nib note list
 ```
 
@@ -61,6 +66,7 @@ Nothing is saved while `NIB_DEMO=1` is set.
 ## Guides
 
 - [Configuration](docs/configuration.md)
+- [Quick-add reminders](docs/quick-add.md)
 - [Editing reminders as Markdown](docs/task-edit.md)
 - [macOS permissions](docs/permissions.md)
 - [JSON output](docs/json.md)

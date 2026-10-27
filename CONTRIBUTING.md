@@ -37,7 +37,7 @@ cargo insta review
 
 ## Live Apple tests
 
-Live tests are ignored by default. Run them only on macOS from a terminal that already has the required Reminders or Calendar permission.
+Live tests are ignored by default. Run them only on macOS from a terminal that already has the required Reminders, Calendar, or Apple Notes permission. Notes access requires allowing the terminal to control Notes under **System Settings > Privacy & Security > Automation**.
 
 Read-only tests:
 
@@ -46,11 +46,12 @@ cargo test lists_real_events -- --ignored
 cargo test lists_real_reminders -- --ignored
 ```
 
-Write tests also require `NIB_LIVE_WRITE=1`. They create a reminder and remove it again:
+Write tests also require `NIB_LIVE_WRITE=1`. They create a reminder or note and remove it again:
 
 ```bash
 NIB_LIVE_WRITE=1 cargo test adds_and_removes_a_real_reminder -- --ignored
 NIB_LIVE_WRITE=1 cargo test edits_a_real_reminder_through_markdown -- --ignored
+NIB_LIVE_WRITE=1 cargo test live_create_list_and_delete_tricky_title -- --ignored
 ```
 
 Do not run ignored tests as part of the normal suite.
