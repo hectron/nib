@@ -269,6 +269,40 @@ pub fn terminal_name(term_program: Option<&str>) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionStatus {
+    FullAccess,
+    NotDetermined,
+    Restricted,
+    Denied,
+    WriteOnly,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationStatus {
+    Allowed,
+    Denied,
+    NotDetermined,
+    TargetNotRunning,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorSetting {
+    pub variable: Option<&'static str>,
+    pub command: Option<String>,
+}
+
+pub trait DoctorProbe {
+    fn macos_version(&self) -> Result<String, String>;
+    fn terminal(&self) -> (String, bool);
+    fn reminders_authorization(&self) -> PermissionStatus;
+    fn calendars_authorization(&self) -> PermissionStatus;
+    fn notes_automation(&self) -> AutomationStatus;
+    fn editor(&self) -> EditorSetting;
+}
+
 pub trait Notes {
     fn create(&self, note: NewNote) -> Result<Note, BackendError>;
     fn list(&self, query: NoteQuery) -> Result<Vec<Note>, BackendError>;

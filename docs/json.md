@@ -79,6 +79,10 @@ Apple can reuse one identifier for every occurrence of a recurring event. nib ap
 
 `nib today --json` returns one object with `overdue`, `due_today`, and `events` arrays. The first two contain reminder objects, and `events` contains calendar event objects.
 
+## Doctor
+
+`nib doctor --json` returns one object with `id`, `ok`, and `checks`. Each check contains `id`, `status` (`pass`, `warning`, or `fail`), `message`, and `fix`, which is `null` when nothing needs fixing. `ok` is `false` when any check fails.
+
 ## Stability
 
 JSON is pretty-printed. Every item object starts with `id`, and field names are treated as a scripting interface. New fields may be added, but existing fields are not renamed or removed casually.

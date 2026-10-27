@@ -29,6 +29,7 @@ nib t Pay rent fri !high '#bills'
 nib today
 nib task edit
 nib cal --week
+nib doctor
 ```
 
 `n` and `t` are capture commands. With a title, they create an item; without one, they list items.
@@ -39,7 +40,7 @@ nib task add "Review pull request" --due tomorrow --priority high
 nib cal --calendar Work --week
 ```
 
-Quick-add recognizes natural due dates and trailing priority and list tokens. See [Quick-add reminders](docs/quick-add.md) for every form. `nib today` combines overdue and due-today reminders with today's events.
+Quick-add recognizes natural due dates and trailing priority and list tokens. See [Quick-add reminders](docs/quick-add.md) for every form. `nib today` combines overdue and due-today reminders with today's events. `nib doctor` checks permissions and configuration without prompting.
 
 ## Why nib
 

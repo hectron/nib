@@ -1,3 +1,4 @@
+use std::ffi::c_void;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -17,15 +18,51 @@ use objc2_foundation::{
 
 use crate::app::markdown::normalize_title;
 use crate::domain::{
-    BackendError, Calendar, Event, EventQuery, FieldEdit, NewReminder, Priority, Reminder,
-    ReminderChange, ReminderDueComponents, ReminderEdit, ReminderList, ReminderSnapshot, Reminders,
-    StoredReminder, terminal_name,
+    AutomationStatus, BackendError, Calendar, Event, EventQuery, FieldEdit, NewReminder,
+    PermissionStatus, Priority, Reminder, ReminderChange, ReminderDueComponents, ReminderEdit,
+    ReminderList, ReminderSnapshot, Reminders, StoredReminder, terminal_name,
 };
 
 const REMINDERS: &str = "Reminders";
 const CALENDARS: &str = "Calendars";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
+const TYPE_APPLICATION_BUNDLE_ID: u32 = u32::from_be_bytes(*b"bund");
+const TYPE_WILDCARD: u32 = u32::from_be_bytes(*b"****");
+const NOTES_BUNDLE_ID: &[u8] = b"com.apple.Notes";
+const NO_ERROR: i32 = 0;
+const PROCESS_NOT_FOUND: i32 = -600;
+const EVENT_NOT_PERMITTED: i32 = -1743;
+const EVENT_WOULD_REQUIRE_CONSENT: i32 = -1744;
+
+// AEDataModel.h declares AEDesc under `#pragma pack(push, 2)`.
+#[repr(C, packed(2))]
+struct AppleEventDescriptor {
+    descriptor_type: u32,
+    data_handle: *mut *mut c_void,
+}
+
+const _: () = assert!(std::mem::size_of::<AppleEventDescriptor>() == 12);
+
+#[link(name = "CoreServices", kind = "framework")]
+unsafe extern "C" {
+    #[link_name = "AECreateDesc"]
+    unsafe fn ae_create_desc(
+        type_code: u32,
+        data: *const c_void,
+        size: isize,
+        result: *mut AppleEventDescriptor,
+    ) -> i16;
+    #[link_name = "AEDisposeDesc"]
+    unsafe fn ae_dispose_desc(descriptor: *mut AppleEventDescriptor) -> i16;
+    #[link_name = "AEDeterminePermissionToAutomateTarget"]
+    unsafe fn ae_determine_permission(
+        target: *const AppleEventDescriptor,
+        event_class: u32,
+        event_id: u32,
+        ask_user_if_needed: u8,
+    ) -> i32;
+}
 
 pub struct EventKitCalendar;
 
@@ -574,6 +611,63 @@ fn authorization_status(entity: EKEntityType) -> EKAuthorizationStatus {
     // SAFETY: EKEntityType values come from EventKit's closed set and this class query has no
     // borrowed return value or caller-managed memory.
     unsafe { EKEventStore::authorizationStatusForEntityType(entity) }
+}
+
+pub(super) fn reminders_authorization_status() -> PermissionStatus {
+    permission_status(authorization_status(EKEntityType::Reminder))
+}
+
+pub(super) fn calendars_authorization_status() -> PermissionStatus {
+    permission_status(authorization_status(EKEntityType::Event))
+}
+
+fn permission_status(status: EKAuthorizationStatus) -> PermissionStatus {
+    match status {
+        EKAuthorizationStatus::FullAccess => PermissionStatus::FullAccess,
+        EKAuthorizationStatus::NotDetermined => PermissionStatus::NotDetermined,
+        EKAuthorizationStatus::Restricted => PermissionStatus::Restricted,
+        EKAuthorizationStatus::Denied => PermissionStatus::Denied,
+        EKAuthorizationStatus::WriteOnly => PermissionStatus::WriteOnly,
+        EKAuthorizationStatus(value) => PermissionStatus::Unknown(format!("status {value}")),
+    }
+}
+
+pub(super) fn notes_automation_status() -> AutomationStatus {
+    let mut target = AppleEventDescriptor {
+        descriptor_type: 0,
+        data_handle: std::ptr::null_mut(),
+    };
+    let size = isize::try_from(NOTES_BUNDLE_ID.len())
+        .expect("the fixed Notes bundle identifier length fits in isize");
+    // SAFETY: The bundle identifier bytes are valid for `size`, `target` points to initialized
+    // descriptor storage, and the Apple Event Manager copies the bytes into owned storage.
+    let created = unsafe {
+        ae_create_desc(
+            TYPE_APPLICATION_BUNDLE_ID,
+            NOTES_BUNDLE_ID.as_ptr().cast(),
+            size,
+            &raw mut target,
+        )
+    };
+    if created != 0 {
+        return AutomationStatus::Unknown(format!("AECreateDesc returned {created}"));
+    }
+    // SAFETY: `target` was successfully initialized by `AECreateDesc`, wildcard event codes are
+    // explicitly supported, and a false final argument guarantees that macOS won't prompt.
+    let status =
+        unsafe { ae_determine_permission(&raw const target, TYPE_WILDCARD, TYPE_WILDCARD, 0) };
+    // SAFETY: `target` was successfully initialized by `AECreateDesc` and is disposed exactly once.
+    let disposed = unsafe { ae_dispose_desc(&raw mut target) };
+    if disposed != 0 {
+        return AutomationStatus::Unknown(format!("AEDisposeDesc returned {disposed}"));
+    }
+    match status {
+        NO_ERROR => AutomationStatus::Allowed,
+        EVENT_NOT_PERMITTED => AutomationStatus::Denied,
+        EVENT_WOULD_REQUIRE_CONSENT => AutomationStatus::NotDetermined,
+        PROCESS_NOT_FOUND => AutomationStatus::TargetNotRunning,
+        value => AutomationStatus::Unknown(format!("Apple Events status {value}")),
+    }
 }
 
 fn new_event_store() -> Retained<EKEventStore> {
