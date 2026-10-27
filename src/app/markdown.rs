@@ -682,7 +682,7 @@ pub fn plan(
                 due: field_edit(item.due, before.due),
                 priority: field_edit(item.priority, before.priority),
                 list_id: (list.id != before.list_id).then(|| list.id.clone()),
-                complete: item.done,
+                completed: item.done.then_some(true),
             };
             if edit == ReminderEdit::default() {
                 continue;
@@ -720,6 +720,9 @@ pub fn describe(plan: &Plan, snapshot: &ReminderSnapshot) -> String {
         lines.push(match change {
             ReminderChange::Add { list_id, title, .. } => {
                 format!("  + add       \"{title}\" to {}", list_name(list_id))
+            }
+            ReminderChange::Restore { before } => {
+                format!("  + restore   \"{}\"", normalize_title(&before.title))
             }
             ReminderChange::Delete { before } => {
                 let losses: Vec<&str> = [
@@ -762,11 +765,13 @@ pub fn describe(plan: &Plan, snapshot: &ReminderSnapshot) -> String {
                 if let Some(list) = &edit.list_id {
                     parts.push(format!("moved to {}", list_name(list)));
                 }
-                if edit.complete && parts.is_empty() {
+                if edit.completed == Some(true) && parts.is_empty() {
                     format!("  ✓ complete  \"{title}\"")
                 } else {
-                    if edit.complete {
+                    if edit.completed == Some(true) {
                         parts.push("completed".into());
+                    } else if edit.completed == Some(false) {
+                        parts.push("marked incomplete".into());
                     }
                     format!("  ~ update    \"{title}\": {}", parts.join(", "))
                 }
@@ -817,6 +822,7 @@ mod tests {
             due: None,
             due_components: None,
             priority: None,
+            completed: false,
             modified: None,
             alarms_present: false,
             recurrence_present: false,
@@ -1088,7 +1094,7 @@ mod tests {
         assert_eq!(
             edit,
             ReminderEdit {
-                complete: true,
+                completed: Some(true),
                 ..Default::default()
             }
         );

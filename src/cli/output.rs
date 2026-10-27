@@ -6,7 +6,7 @@ use jiff::{Timestamp, Zoned};
 use miette::{IntoDiagnostic, Result};
 use serde::{Serialize, Serializer};
 
-use crate::domain::{Event, Note, Priority, Reminder};
+use crate::domain::{ChangeCounts, Event, JournalSummary, Note, Priority, Reminder};
 
 pub trait Tabular: Serialize {
     const HEADER: &'static [&'static str];
@@ -114,6 +114,34 @@ pub fn today(
         Ok("Nothing due today.".into())
     } else {
         Ok(rendered.join("\n\n"))
+    }
+}
+
+pub fn journal(entries: &[JournalSummary], json: bool, style: Style) -> Result<String> {
+    list(entries, json, style)
+}
+
+pub fn undo(id: &str, counts: ChangeCounts, json: bool) -> Result<String> {
+    if json {
+        return to_json(&UndoJson {
+            id,
+            added: counts.added,
+            updated: counts.updated,
+            completed: counts.completed,
+            deleted: counts.deleted,
+        });
+    }
+    Ok(format!(
+        "Undid {} from {id}.",
+        count(counts.total(), "change")
+    ))
+}
+
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -272,6 +300,56 @@ struct TodayJson<'a> {
     overdue: &'a [Reminder],
     due_today: &'a [Reminder],
     events: &'a [Event],
+}
+
+#[derive(Serialize)]
+struct JournalJson<'a> {
+    id: &'a str,
+    time: Timestamp,
+    added: usize,
+    updated: usize,
+    completed: usize,
+    deleted: usize,
+}
+
+#[derive(Serialize)]
+struct UndoJson<'a> {
+    id: &'a str,
+    added: usize,
+    updated: usize,
+    completed: usize,
+    deleted: usize,
+}
+
+impl Serialize for JournalSummary {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        JournalJson {
+            id: &self.id,
+            time: self.time,
+            added: self.counts.added,
+            updated: self.counts.updated,
+            completed: self.counts.completed,
+            deleted: self.counts.deleted,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl Tabular for JournalSummary {
+    const HEADER: &'static [&'static str] =
+        &["ENTRY", "TIME", "ADDED", "UPDATED", "COMPLETED", "DELETED"];
+    const TITLE_COLUMN: usize = 0;
+
+    fn row(&self) -> Vec<String> {
+        vec![
+            self.id.clone(),
+            self.time.to_string(),
+            self.counts.added.to_string(),
+            self.counts.updated.to_string(),
+            self.counts.completed.to_string(),
+            self.counts.deleted.to_string(),
+        ]
+    }
 }
 
 impl Serialize for Event {

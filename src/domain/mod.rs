@@ -137,6 +137,7 @@ pub struct ReminderDueComponents {
     pub is_leap_month: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredReminder {
     pub id: String,
@@ -146,6 +147,7 @@ pub struct StoredReminder {
     pub due: Option<Date>,
     pub due_components: Option<ReminderDueComponents>,
     pub priority: Option<Priority>,
+    pub completed: bool,
     pub modified: Option<Timestamp>,
     pub alarms_present: bool,
     pub recurrence_present: bool,
@@ -166,7 +168,7 @@ pub struct ReminderEdit {
     pub due: FieldEdit<Date>,
     pub priority: FieldEdit<Priority>,
     pub list_id: Option<String>,
-    pub complete: bool,
+    pub completed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -192,6 +194,9 @@ pub enum ReminderChange {
         due: Option<Date>,
         priority: Option<Priority>,
     },
+    Restore {
+        before: StoredReminder,
+    },
     Update {
         before: StoredReminder,
         edit: ReminderEdit,
@@ -199,6 +204,32 @@ pub enum ReminderChange {
     Delete {
         before: StoredReminder,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApplyResult {
+    pub written: Vec<Option<StoredReminder>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChangeCounts {
+    pub added: usize,
+    pub updated: usize,
+    pub completed: usize,
+    pub deleted: usize,
+}
+
+impl ChangeCounts {
+    pub fn total(self) -> usize {
+        self.added + self.updated + self.completed + self.deleted
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalSummary {
+    pub id: String,
+    pub time: Timestamp,
+    pub counts: ChangeCounts,
 }
 
 #[derive(Debug, Error, Diagnostic)]
@@ -243,10 +274,10 @@ pub enum BackendError {
     )]
     NotImplemented { app: &'static str },
 
-    #[error("{} changed in Reminders while you were editing", .titles.join(", "))]
+    #[error("{} changed in Reminders since nib last read them", .titles.join(", "))]
     #[diagnostic(
         code(nib::backend::conflict),
-        help("nothing was changed; run `nib task edit` again to start from the current reminders")
+        help("nothing was changed; review the named reminders and try the command again")
     )]
     Conflict { titles: Vec<String> },
 
@@ -278,7 +309,7 @@ pub trait Reminders {
     fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError>;
     fn list(&self) -> Result<Vec<Reminder>, BackendError>;
     fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError>;
-    fn apply(&self, changes: &[ReminderChange]) -> Result<(), BackendError>;
+    fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError>;
 }
 
 pub trait Calendar {

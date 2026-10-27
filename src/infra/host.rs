@@ -16,9 +16,17 @@ pub trait Host {
     fn ask(&mut self, prompt: &str) -> io::Result<String>;
     fn say(&mut self, message: &str);
     fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf>;
+    fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf>;
+    fn journal_files(&mut self) -> io::Result<Vec<JournalFile>>;
 }
 
 pub struct System;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalFile {
+    pub id: String,
+    pub contents: String,
+}
 
 pub struct EditFile {
     path: PathBuf,
@@ -118,6 +126,39 @@ fn save_backup_in(dir: &Path, name: &str, contents: &str) -> io::Result<PathBuf>
     ))
 }
 
+fn backups_dir() -> io::Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME isn't set"))?;
+    Ok(PathBuf::from(home).join("Library/Application Support/nib/backups"))
+}
+
+fn journal_files_in(dir: &Path) -> io::Result<Vec<JournalFile>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let Some(id) = path.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            || (!id.contains("-journal-") && !id.ends_with("-journal"))
+        {
+            continue;
+        }
+        files.push(JournalFile {
+            id: id.to_owned(),
+            contents: std::fs::read_to_string(path)?,
+        });
+    }
+    Ok(files)
+}
+
 impl Host for System {
     fn edit(&mut self, path: &Path) -> io::Result<Duration> {
         let editor = ["VISUAL", "EDITOR"]
@@ -153,10 +194,17 @@ impl Host for System {
     }
 
     fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
-        let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME isn't set"))?;
-        let dir = PathBuf::from(home).join("Library/Application Support/nib/backups");
+        let dir = backups_dir()?;
         std::fs::create_dir_all(&dir)?;
         save_backup_in(&dir, name, contents)
+    }
+
+    fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
+        self.save_backup(name, contents)
+    }
+
+    fn journal_files(&mut self) -> io::Result<Vec<JournalFile>> {
+        journal_files_in(&backups_dir()?)
     }
 }
 
@@ -166,6 +214,7 @@ pub struct Scripted {
     answers: std::collections::VecDeque<String>,
     pub said: Vec<String>,
     pub backups: Vec<(String, String)>,
+    pub journals: Vec<(String, String)>,
 }
 
 #[cfg(test)]
@@ -176,6 +225,7 @@ impl Scripted {
             answers: std::collections::VecDeque::default(),
             said: Vec::new(),
             backups: Vec::new(),
+            journals: Vec::new(),
         }
     }
 
@@ -186,6 +236,11 @@ impl Scripted {
 
     pub fn answer(mut self, answer: &str) -> Self {
         self.answers.push_back(answer.into());
+        self
+    }
+
+    pub fn journal(mut self, id: &str, contents: &str) -> Self {
+        self.journals.push((format!("{id}.json"), contents.into()));
         self
     }
 }
@@ -217,6 +272,22 @@ impl Host for Scripted {
     fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
         self.backups.push((name.into(), contents.into()));
         Ok(PathBuf::from("/backups").join(name))
+    }
+
+    fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
+        self.journals.push((name.into(), contents.into()));
+        Ok(PathBuf::from("/backups").join(name))
+    }
+
+    fn journal_files(&mut self) -> io::Result<Vec<JournalFile>> {
+        Ok(self
+            .journals
+            .iter()
+            .map(|(name, contents)| JournalFile {
+                id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
+                contents: contents.clone(),
+            })
+            .collect())
     }
 }
 
@@ -283,5 +354,16 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(std::fs::read_to_string(first).unwrap(), "first");
         assert_eq!(std::fs::read_to_string(second).unwrap(), "second");
+    }
+
+    #[test]
+    fn journal_files_ignore_task_backups() {
+        let dir = TestDir::new();
+        save_backup_in(&dir.0, "20261026T090000-tasks.json", "[]").unwrap();
+        let journal = save_backup_in(&dir.0, "20261026T090000-journal.json", "{}").unwrap();
+        let files = journal_files_in(&dir.0).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].contents, "{}");
+        assert_eq!(files[0].id, journal.file_stem().unwrap().to_str().unwrap());
     }
 }

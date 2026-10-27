@@ -8,7 +8,7 @@ mod notes;
 
 #[cfg(any(not(target_os = "macos"), test))]
 use crate::domain::{
-    BackendError, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Reminder,
+    ApplyResult, BackendError, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Reminder,
     ReminderChange, ReminderSnapshot,
 };
 use crate::domain::{Backends, Calendar, Notes, Reminders};
@@ -82,7 +82,7 @@ impl Reminders for Unimplemented {
         self.fail()
     }
 
-    fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
+    fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
         self.fail()
     }
 }

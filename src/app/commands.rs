@@ -1,7 +1,7 @@
 use jiff::Zoned;
 use miette::{IntoDiagnostic, Result};
 
-use crate::app::edit;
+use crate::app::{edit, journal, undo};
 use crate::cli::output::{self, Style};
 use crate::cli::{Action, Cli};
 use crate::domain::{Backends, Config};
@@ -39,6 +39,17 @@ pub fn run(
         Action::ListTasks => output::list(&backends.reminders.list()?, json, style),
         Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
         Action::ListEvents(query) => output::list(&backends.calendar.events(query)?, json, style),
+        Action::Log => output::journal(&journal::summaries(host)?, json, style),
+        Action::Undo { entry } => undo::run(entry.as_deref(), now, backends, host)?.map_or_else(
+            || {
+                Ok(if json {
+                    "null".into()
+                } else {
+                    "Nothing was changed.".into()
+                })
+            },
+            |(id, counts)| output::undo(&id, counts, json),
+        ),
     }
 }
 
@@ -54,8 +65,8 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        BackendError, Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes,
-        Priority, Reminder, ReminderChange, ReminderSnapshot, Reminders,
+        ApplyResult, BackendError, Calendar, ChangeCounts, Event, EventQuery, NewNote, NewReminder,
+        Note, NoteQuery, Notes, Priority, Reminder, ReminderChange, ReminderSnapshot, Reminders,
     };
     use crate::infra::host::Scripted;
 
@@ -141,8 +152,8 @@ mod tests {
             Ok(ReminderSnapshot::default())
         }
 
-        fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
-            Ok(())
+        fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
+            Ok(ApplyResult::default())
         }
     }
 
@@ -225,7 +236,7 @@ mod tests {
             unreachable!()
         }
 
-        fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
+        fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
             unreachable!()
         }
     }
@@ -347,6 +358,112 @@ mod tests {
         assert_eq!(built_by(&["t", "Buy groceries"]), ["reminders"]);
         assert_eq!(built_by(&["task"]), ["reminders"]);
         assert_eq!(built_by(&["cal", "--week"]), ["calendar"]);
+        assert_eq!(built_by(&["log"]), Vec::<&str>::new());
+    }
+
+    fn journal_entry(time: &str, change: &str) -> String {
+        let reminder = serde_json::json!({
+            "id": "reminder-1",
+            "list_id": "list-1",
+            "title": "Buy groceries",
+            "notes": null,
+            "due": null,
+            "due_components": null,
+            "priority": null,
+            "completed": false,
+            "modified": null,
+            "alarms_present": false,
+            "recurrence_present": false,
+            "url": null,
+            "partial": false
+        });
+        let journal_change = if change == "deleted" {
+            serde_json::json!({ "change": change, "backup": reminder })
+        } else {
+            serde_json::json!({ "change": change, "written": reminder })
+        };
+        serde_json::json!({
+            "version": 1,
+            "time": time,
+            "action": "task_edit",
+            "changes": [journal_change]
+        })
+        .to_string()
+    }
+
+    fn journal_output(args: &[&str]) -> String {
+        let backends = fake_backends(&Built::default());
+        let older = journal_entry("2026-10-25T14:00:00Z", "added");
+        let newer = journal_entry("2026-10-26T14:00:00Z", "deleted");
+        let mut host = Scripted::new()
+            .journal("older-journal", &older)
+            .journal("newer-journal", &newer);
+        let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        run(
+            cli,
+            &Config::default(),
+            &now(),
+            &backends,
+            Style::default(),
+            &mut host,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn log_lists_newest_entries_with_counts() {
+        assert_snapshot!(journal_output(&["log"]), @r"
+        ENTRY          TIME                  ADDED  UPDATED  COMPLETED  DELETED
+        newer-journal  2026-10-26T14:00:00Z  0      0        0          1
+        older-journal  2026-10-25T14:00:00Z  1      0        0          0
+        ");
+    }
+
+    #[test]
+    fn log_json_has_stable_fields() {
+        assert_snapshot!(journal_output(&["log", "--json"]), @r#"
+        [
+          {
+            "id": "newer-journal",
+            "time": "2026-10-26T14:00:00Z",
+            "added": 0,
+            "updated": 0,
+            "completed": 0,
+            "deleted": 1
+          },
+          {
+            "id": "older-journal",
+            "time": "2026-10-25T14:00:00Z",
+            "added": 1,
+            "updated": 0,
+            "completed": 0,
+            "deleted": 0
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn undo_json_has_stable_fields() {
+        assert_snapshot!(output::undo(
+            "20261026T090000-journal-abcd",
+            ChangeCounts {
+                added: 1,
+                updated: 2,
+                completed: 3,
+                deleted: 4,
+            },
+            true,
+        )
+        .unwrap(), @r#"
+        {
+          "id": "20261026T090000-journal-abcd",
+          "added": 1,
+          "updated": 2,
+          "completed": 3,
+          "deleted": 4
+        }
+        "#);
     }
 
     #[test]
@@ -652,7 +769,7 @@ mod tests {
                 unreachable!()
             }
 
-            fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
+            fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
                 unreachable!()
             }
         }

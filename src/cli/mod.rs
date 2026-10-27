@@ -33,6 +33,8 @@ pub enum Action {
     ListTasks,
     EditTasks { list: Option<String> },
     ListEvents(EventQuery),
+    Log,
+    Undo { entry: Option<String> },
 }
 
 #[derive(Debug, Subcommand)]
@@ -51,6 +53,17 @@ pub enum Command {
     N(NoteCapture),
     /// Add a reminder from the rest of the line, or list reminders
     T(TaskCapture),
+    /// List recent task edit and undo journal entries
+    Log,
+    /// Undo a journal entry, or the latest entry when omitted
+    Undo(UndoArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UndoArgs {
+    /// Journal entry identifier from `nib log`
+    #[arg(value_name = "ENTRY")]
+    entry: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -280,6 +293,8 @@ impl Command {
                     },
                 }),
             },
+            Command::Log => Action::Log,
+            Command::Undo(UndoArgs { entry }) => Action::Undo { entry },
         })
     }
 }
@@ -426,6 +441,21 @@ mod tests {
             (&["task"], Action::ListTasks),
             (&["todo", "ls"], Action::ListTasks),
             (&["task", "--json", "list"], Action::ListTasks),
+        ]);
+    }
+
+    #[test]
+    fn journal_commands() {
+        assert_parses(&[
+            (&["log"], Action::Log),
+            (&["--json", "log"], Action::Log),
+            (&["undo"], Action::Undo { entry: None }),
+            (
+                &["undo", "20261026T090000-journal-abcd"],
+                Action::Undo {
+                    entry: Some("20261026T090000-journal-abcd".into()),
+                },
+            ),
         ]);
     }
 
