@@ -3,8 +3,11 @@ use jiff::{ToSpan, Zoned};
 
 use crate::backend::{
     BackendError, Backends, Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery,
-    Notes, Priority, Reminder, Reminders,
+    Notes, Priority, Reminder, ReminderChange, ReminderList, ReminderSnapshot, Reminders,
+    StoredReminder,
 };
+
+const DEMO_LIST: &str = "demo-list";
 
 pub fn backends(now: &Zoned) -> Backends {
     let (notes, reminders, calendar) = (Demo(now.clone()), Demo(now.clone()), Demo(now.clone()));
@@ -106,6 +109,42 @@ impl Reminders for Demo {
         .into_iter()
         .collect()
     }
+
+    fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+        if let Some(name) = list.filter(|name| *name != "Reminders") {
+            return Err(BackendError::NotFound {
+                kind: "reminder list",
+                name: name.into(),
+            });
+        }
+        let reminders = Reminders::list(self)?
+            .into_iter()
+            .map(|r| StoredReminder {
+                id: r.id,
+                list_id: DEMO_LIST.into(),
+                title: r.title,
+                notes: None,
+                due: r.due,
+                priority: r.priority,
+                modified: None,
+                has_alarms: false,
+                has_recurrence: false,
+                has_url: false,
+            })
+            .collect();
+        Ok(ReminderSnapshot {
+            lists: vec![ReminderList {
+                id: DEMO_LIST.into(),
+                name: "Reminders".into(),
+                writable: true,
+            }],
+            reminders,
+        })
+    }
+
+    fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
+        Ok(())
+    }
 }
 
 impl Calendar for Demo {
@@ -142,6 +181,7 @@ mod tests {
     use super::*;
     use crate::cli::Cli;
     use crate::commands::run;
+    use crate::host::Scripted;
     use crate::output::Style;
 
     fn nib(args: &[&str]) -> String {
@@ -150,7 +190,14 @@ mod tests {
             .to_zoned(TimeZone::fixed(offset(-4)))
             .unwrap();
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
-        run(cli, &now, &backends(&now), Style::default()).unwrap()
+        run(
+            cli,
+            &now,
+            &backends(&now),
+            Style::default(),
+            &mut Scripted::new(),
+        )
+        .unwrap()
     }
 
     #[test]

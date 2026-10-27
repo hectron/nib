@@ -7,16 +7,19 @@ use jiff::tz::TimeZone;
 use jiff::{Timestamp, Zoned};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::Bool;
-use objc2_event_kit::{EKAuthorizationStatus, EKEntityType, EKEvent, EKEventStore, EKReminder};
+use objc2_event_kit::{
+    EKAuthorizationStatus, EKCalendar, EKEntityType, EKEvent, EKEventStore, EKReminder,
+};
 use objc2_foundation::{
     NSArray, NSCalendar, NSCalendarIdentifierGregorian, NSDate, NSDateComponentUndefined,
     NSDateComponents, NSError, NSInteger, NSString,
 };
 
 use super::{
-    BackendError, Calendar, Event, EventQuery, NewReminder, Priority, Reminder, Reminders,
-    terminal_name,
+    BackendError, Calendar, Event, EventQuery, NewReminder, Priority, Reminder, ReminderChange,
+    ReminderEdit, ReminderList, ReminderSnapshot, Reminders, StoredReminder, terminal_name,
 };
+use crate::markdown::normalize_title;
 
 const REMINDERS: &str = "Reminders";
 const CALENDARS: &str = "Calendars";
@@ -57,9 +60,7 @@ impl Reminders for EventKitReminders {
                 reminder.setTitle(Some(&NSString::from_str(&new.title)));
                 reminder.setCalendar(Some(&list));
                 reminder.setPriority(priority_to_eventkit(new.priority));
-                if let Some(due) = new.due {
-                    reminder.setDueDateComponents(Some(&date_components(due)));
-                }
+                set_due(&reminder, new.due);
                 store
                     .saveReminder_commit_error(&reminder, true)
                     .map_err(|e| failed(REMINDERS, &e.localizedDescription().to_string()))?;
@@ -94,6 +95,255 @@ impl Reminders for EventKitReminders {
             Ok(reminders)
         })
     }
+
+    fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
+            let calendars: Vec<Retained<EKCalendar>> =
+                unsafe { store.calendarsForEntityType(EKEntityType::Reminder) }
+                    .iter()
+                    .filter(|c| list.is_none_or(|name| unsafe { c.title() }.to_string() == name))
+                    .collect();
+            if let Some(name) = list
+                && calendars.is_empty()
+            {
+                return Err(BackendError::NotFound {
+                    kind: "reminder list",
+                    name: name.into(),
+                });
+            }
+            let lists = calendars
+                .iter()
+                .map(|c| unsafe {
+                    ReminderList {
+                        id: c.calendarIdentifier().to_string(),
+                        name: c.title().to_string(),
+                        writable: c.allowsContentModifications(),
+                    }
+                })
+                .collect();
+            if calendars.is_empty() {
+                return Ok(ReminderSnapshot::default());
+            }
+            let chosen = NSArray::from_retained_slice(&calendars);
+            let predicate = unsafe {
+                store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars(
+                    None,
+                    None,
+                    Some(&chosen),
+                )
+            };
+            let (tx, rx) = mpsc::channel();
+            let block = RcBlock::new(move |found: *mut NSArray<EKReminder>| {
+                let reminders = unsafe { found.as_ref() }
+                    .map(|found| found.iter().map(|r| to_stored(&r)).collect::<Vec<_>>());
+                let _ = tx.send(reminders);
+            });
+            let _request =
+                unsafe { store.fetchRemindersMatchingPredicate_completion(&predicate, &block) };
+            let mut reminders = rx
+                .recv_timeout(FETCH_TIMEOUT)
+                .map_err(|_| failed(REMINDERS, "timed out waiting for reminders"))?
+                .ok_or_else(|| failed(REMINDERS, "the reminder query returned nothing"))?;
+            reminders.sort_by(|a, b| {
+                (a.due.is_none(), a.due, &a.title).cmp(&(b.due.is_none(), b.due, &b.title))
+            });
+            Ok(ReminderSnapshot { lists, reminders })
+        })
+    }
+
+    fn apply(&self, changes: &[ReminderChange]) -> Result<(), BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
+            if let Err(e) = stage(&store, changes) {
+                unsafe { store.reset() };
+                return Err(e);
+            }
+            unsafe { store.commit() }.map_err(|e| {
+                unsafe { store.reset() };
+                failed(
+                    REMINDERS,
+                    &format!("nothing was saved: {}", e.localizedDescription()),
+                )
+            })
+        })
+    }
+}
+
+fn stage(store: &EKEventStore, changes: &[ReminderChange]) -> Result<(), BackendError> {
+    let mut current = Vec::with_capacity(changes.len());
+    let mut conflicts = Vec::new();
+    for change in changes {
+        match change {
+            ReminderChange::Add { .. } => current.push(None),
+            ReminderChange::Update { before, .. } | ReminderChange::Delete { before } => {
+                match find_reminder(store, &before.id) {
+                    Some(reminder) if to_stored(&reminder) == *before => {
+                        current.push(Some(reminder))
+                    }
+                    _ => {
+                        conflicts.push(format!("\"{}\"", normalize_title(&before.title)));
+                        current.push(None);
+                    }
+                }
+            }
+        }
+    }
+    if !conflicts.is_empty() {
+        return Err(BackendError::Conflict { titles: conflicts });
+    }
+    for (change, reminder) in changes.iter().zip(current) {
+        match (change, reminder) {
+            (
+                ReminderChange::Add {
+                    list_id,
+                    title,
+                    notes,
+                    due,
+                    priority,
+                },
+                _,
+            ) => unsafe {
+                let reminder = EKReminder::reminderWithEventStore(store);
+                reminder.setCalendar(Some(&*writable_calendar(store, list_id)?));
+                reminder.setTitle(Some(&NSString::from_str(title)));
+                reminder.setNotes(notes.as_deref().map(NSString::from_str).as_deref());
+                reminder.setPriority(priority_to_eventkit(*priority));
+                set_due(&reminder, *due);
+                save(store, &reminder, title)?;
+            },
+            (ReminderChange::Update { before, edit }, Some(reminder)) => {
+                update(store, &reminder, edit)?;
+                save(store, &reminder, &before.title)?;
+            }
+            (ReminderChange::Delete { before }, Some(reminder)) => {
+                unsafe { store.removeReminder_commit_error(&reminder, false) }.map_err(|e| {
+                    failed(
+                        REMINDERS,
+                        &format!(
+                            "\"{}\" couldn't be deleted: {}",
+                            normalize_title(&before.title),
+                            e.localizedDescription()
+                        ),
+                    )
+                })?;
+            }
+            _ => unreachable!("conflicts were checked above"),
+        }
+    }
+    Ok(())
+}
+
+fn update(
+    store: &EKEventStore,
+    reminder: &EKReminder,
+    edit: &ReminderEdit,
+) -> Result<(), BackendError> {
+    unsafe {
+        if let Some(title) = &edit.title {
+            reminder.setTitle(Some(&NSString::from_str(title)));
+        }
+        if let Some(notes) = &edit.notes {
+            reminder.setNotes(notes.as_deref().map(NSString::from_str).as_deref());
+        }
+        if let Some(due) = edit.due {
+            set_due(reminder, due);
+        }
+        if let Some(priority) = edit.priority {
+            reminder.setPriority(priority_to_eventkit(priority));
+        }
+        if let Some(list_id) = &edit.list_id {
+            reminder.setCalendar(Some(&*writable_calendar(store, list_id)?));
+        }
+        if edit.complete {
+            reminder.setCompleted(true);
+        }
+    }
+    Ok(())
+}
+
+fn set_due(reminder: &EKReminder, due: Option<Date>) {
+    let Some(date) = due else {
+        unsafe { reminder.setDueDateComponents(None) };
+        return;
+    };
+    let parts = unsafe { reminder.dueDateComponents() }.unwrap_or_else(|| date_components(date));
+    if parts.calendar().is_none() {
+        parts.setCalendar(
+            NSCalendar::calendarWithIdentifier(unsafe { NSCalendarIdentifierGregorian }).as_deref(),
+        );
+    }
+    parts.setYear(date.year().into());
+    parts.setMonth(date.month().into());
+    parts.setDay(date.day().into());
+    unsafe { reminder.setDueDateComponents(Some(&parts)) };
+}
+
+fn save(store: &EKEventStore, reminder: &EKReminder, title: &str) -> Result<(), BackendError> {
+    unsafe { store.saveReminder_commit_error(reminder, false) }.map_err(|e| {
+        failed(
+            REMINDERS,
+            &format!(
+                "\"{}\" couldn't be saved: {}",
+                normalize_title(title),
+                e.localizedDescription()
+            ),
+        )
+    })
+}
+
+fn find_reminder(store: &EKEventStore, id: &str) -> Option<Retained<EKReminder>> {
+    unsafe { store.calendarItemWithIdentifier(&NSString::from_str(id)) }?
+        .downcast::<EKReminder>()
+        .ok()
+}
+
+fn writable_calendar(store: &EKEventStore, id: &str) -> Result<Retained<EKCalendar>, BackendError> {
+    let calendar =
+        unsafe { store.calendarWithIdentifier(&NSString::from_str(id)) }.ok_or_else(|| {
+            BackendError::NotFound {
+                kind: "reminder list",
+                name: id.into(),
+            }
+        })?;
+    if unsafe { calendar.allowsContentModifications() } {
+        Ok(calendar)
+    } else {
+        Err(failed(
+            REMINDERS,
+            &format!("\"{}\" is read-only", unsafe { calendar.title() }),
+        ))
+    }
+}
+
+fn to_stored(reminder: &EKReminder) -> StoredReminder {
+    unsafe {
+        StoredReminder {
+            id: reminder.calendarItemIdentifier().to_string(),
+            list_id: reminder
+                .calendar()
+                .map(|c| c.calendarIdentifier().to_string())
+                .unwrap_or_default(),
+            title: reminder.title().to_string(),
+            notes: reminder.notes().map(|n| n.to_string()),
+            due: reminder
+                .dueDateComponents()
+                .and_then(|parts| date_from_parts(parts.year(), parts.month(), parts.day())),
+            priority: priority_from_eventkit(reminder.priority()),
+            modified: reminder
+                .lastModifiedDate()
+                .and_then(|d| timestamp_from_epoch(d.timeIntervalSince1970())),
+            has_alarms: reminder.hasAlarms(),
+            has_recurrence: reminder.hasRecurrenceRules(),
+            has_url: reminder.URL().is_some(),
+        }
+    }
+}
+
+fn timestamp_from_epoch(seconds: f64) -> Option<Timestamp> {
+    jiff::SignedDuration::try_from_secs_f64(seconds)
+        .ok()
+        .and_then(|d| Timestamp::from_duration(d).ok())
 }
 
 fn authorized_store(

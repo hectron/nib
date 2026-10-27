@@ -24,6 +24,7 @@ pub enum Action {
     ListNotes(NoteQuery),
     AddTask(NewReminder),
     ListTasks,
+    EditTasks { list: Option<String> },
     ListEvents(EventQuery),
 }
 
@@ -94,6 +95,12 @@ enum TaskAction {
     /// List reminders (the default)
     #[command(visible_alias = "ls")]
     List,
+    /// Edit reminders as a Markdown file in $VISUAL or $EDITOR
+    Edit {
+        /// Only edit this list
+        #[arg(short, long)]
+        list: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -229,6 +236,7 @@ impl Command {
                     opts,
                 }) => opts.add(words.join(" "), now)?,
                 Some(TaskAction::List) | None => Action::ListTasks,
+                Some(TaskAction::Edit { list }) => Action::EditTasks { list },
             },
             Command::T(TaskCapture { words, opts }) => {
                 if words.is_empty() {

@@ -2,6 +2,8 @@ mod backend;
 mod cli;
 mod commands;
 mod demo;
+mod edit;
+mod host;
 mod markdown;
 mod output;
 
@@ -20,7 +22,13 @@ fn main() -> miette::Result<()> {
     } else {
         backend::Backends::system()
     };
-    let out = commands::run(cli, &now, &backends, output::Style::detect())?;
+    let out = commands::run(
+        cli,
+        &now,
+        &backends,
+        output::Style::detect(),
+        &mut host::System,
+    )?;
     if out.is_empty() {
         return Ok(());
     }

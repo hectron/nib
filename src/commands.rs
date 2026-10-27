@@ -3,9 +3,17 @@ use miette::{IntoDiagnostic, Result};
 
 use crate::backend::Backends;
 use crate::cli::{Action, Cli};
+use crate::edit;
+use crate::host::Host;
 use crate::output::{self, Style};
 
-pub fn run(cli: Cli, now: &Zoned, backends: &Backends, style: Style) -> Result<String> {
+pub fn run(
+    cli: Cli,
+    now: &Zoned,
+    backends: &Backends,
+    style: Style,
+    host: &mut dyn Host,
+) -> Result<String> {
     let json = cli.json;
     match cli.command.into_action(now).into_diagnostic()? {
         Action::NewNote(note) => {
@@ -16,6 +24,7 @@ pub fn run(cli: Cli, now: &Zoned, backends: &Backends, style: Style) -> Result<S
             output::single(&backends.reminders.add(reminder)?, "Added", json)
         }
         Action::ListTasks => output::list(&backends.reminders.list()?, json, style),
+        Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
         Action::ListEvents(query) => output::list(&backends.calendar.events(query)?, json, style),
     }
 }
@@ -33,8 +42,9 @@ mod tests {
     use super::*;
     use crate::backend::{
         BackendError, Calendar, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes,
-        Priority, Reminder, Reminders,
+        Priority, Reminder, ReminderChange, ReminderSnapshot, Reminders,
     };
+    use crate::host::Scripted;
 
     struct Fake;
 
@@ -90,6 +100,14 @@ mod tests {
                     priority: None,
                 },
             ])
+        }
+
+        fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+            Ok(ReminderSnapshot::default())
+        }
+
+        fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
+            Ok(())
         }
     }
 
@@ -153,14 +171,28 @@ mod tests {
     fn nib(args: &[&str]) -> String {
         let backends = fake_backends(&Built::default());
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
-        run(cli, &now(), &backends, Style::default()).unwrap()
+        run(
+            cli,
+            &now(),
+            &backends,
+            Style::default(),
+            &mut Scripted::new(),
+        )
+        .unwrap()
     }
 
     fn built_by(args: &[&str]) -> Vec<&'static str> {
         let built = Built::default();
         let backends = fake_backends(&built);
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
-        run(cli, &now(), &backends, Style::default()).unwrap();
+        run(
+            cli,
+            &now(),
+            &backends,
+            Style::default(),
+            &mut Scripted::new(),
+        )
+        .unwrap();
         built.take()
     }
 

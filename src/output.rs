@@ -90,7 +90,7 @@ fn to_json<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     serde_json::to_string_pretty(value).into_diagnostic()
 }
 
-fn clean(text: &str) -> String {
+pub fn clean(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\n' | '\r' | '\t' => ' ',

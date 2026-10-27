@@ -72,7 +72,6 @@ pub struct EventQuery {
     pub range: Range<Zoned>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReminderList {
     pub id: String,
@@ -80,7 +79,6 @@ pub struct ReminderList {
     pub writable: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredReminder {
     pub id: String,
@@ -95,14 +93,12 @@ pub struct StoredReminder {
     pub has_url: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReminderSnapshot {
     pub lists: Vec<ReminderList>,
     pub reminders: Vec<StoredReminder>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReminderEdit {
     pub title: Option<String>,
@@ -113,7 +109,6 @@ pub struct ReminderEdit {
     pub complete: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReminderChange {
     Add {
@@ -159,6 +154,13 @@ pub enum BackendError {
     )]
     NotImplemented { app: &'static str },
 
+    #[error("{} changed in Reminders while you were editing", .titles.join(", "))]
+    #[diagnostic(
+        code(nib::backend::conflict),
+        help("nothing was changed; run `nib task edit` again to start from the current reminders")
+    )]
+    Conflict { titles: Vec<String> },
+
     #[error("{app} request failed: {message}")]
     #[diagnostic(
         code(nib::backend::failed),
@@ -186,6 +188,8 @@ pub trait Notes {
 pub trait Reminders {
     fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError>;
     fn list(&self) -> Result<Vec<Reminder>, BackendError>;
+    fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError>;
+    fn apply(&self, changes: &[ReminderChange]) -> Result<(), BackendError>;
 }
 
 pub trait Calendar {
@@ -266,6 +270,14 @@ impl Reminders for Unimplemented {
     }
 
     fn list(&self) -> Result<Vec<Reminder>, BackendError> {
+        self.fail()
+    }
+
+    fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+        self.fail()
+    }
+
+    fn apply(&self, _: &[ReminderChange]) -> Result<(), BackendError> {
         self.fail()
     }
 }
