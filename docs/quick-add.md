@@ -51,6 +51,7 @@ To keep a recognized trailing token in the title, prefix it with a backslash. Qu
 nib t Discuss '\fri'
 nib t Choose '\!high'
 nib t Label '\#bills'
+nib t Discuss '\next' fri
 ```
 
-These titles end in `fri`, `!high`, and `#bills`; none of those tokens sets a field. Inline parsing is enabled by default and can be disabled in [configuration](configuration.md).
+These titles end in `fri`, `!high`, `#bills`, and `next fri`; none of those tokens sets a field. Escape the first word of a two-word date. A backslash before any other word, such as `'\server'`, stays in the title. Inline parsing is enabled by default and can be disabled in [configuration](configuration.md).
