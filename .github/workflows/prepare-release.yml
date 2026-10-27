@@ -12,6 +12,7 @@ permissions:
   actions: write
   contents: write
   pull-requests: write
+  statuses: write
 
 concurrency:
   group: prepare-release
@@ -118,6 +119,7 @@ jobs:
             }' > "$RUNNER_TEMP/commit.json"
           commit=$(gh api graphql --input "$RUNNER_TEMP/commit.json" --jq '.data.createCommitOnBranch.commit.oid')
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "sha=$commit" >> "$GITHUB_OUTPUT"
           echo "Created $commit on $branch"
 
       - name: Open the release pull request
@@ -141,12 +143,46 @@ jobs:
           pull_request=$(gh pr create "${args[@]}")
           echo "url=$pull_request" >> "$GITHUB_OUTPUT"
 
-      - name: Start CI and enable auto-merge
+      - name: Run CI and report the required check
+        timeout-minutes: 45
         env:
           BRANCH: ${{ steps.commit.outputs.branch }}
+          SHA: ${{ steps.commit.outputs.sha }}
           PULL_REQUEST: ${{ steps.pull-request.outputs.url }}
           GH_TOKEN: ${{ github.token }}
         run: |
           gh workflow run ci.yml --ref "$BRANCH"
+          run=""
+          for _ in $(seq 30); do
+            run=$(gh run list --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --commit "$SHA" \
+              --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            [ -n "$run" ] && break
+            sleep 10
+          done
+          if [ -z "$run" ]; then
+            echo "Couldn't find the CI run for $SHA." >&2
+            exit 1
+          fi
+
+          gh run watch "$run" --interval 15 > /dev/null || true
+          read -r head conclusion < <(gh run view "$run" --json headSha,conclusion --jq '"\(.headSha) \(.conclusion)"')
+          if [ "$head" != "$SHA" ]; then
+            echo "CI run $run tested $head, not $SHA." >&2
+            exit 1
+          fi
+          state=failure
+          [ "$conclusion" = "success" ] && state=success
+
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f context=check \
+            -f state="$state" \
+            -f target_url="$url" \
+            -f description="CI run $run: $conclusion" > /dev/null
+          if [ "$state" != "success" ]; then
+            echo "CI failed on $SHA: $url" >&2
+            exit 1
+          fi
+
           gh pr merge --auto --merge "$PULL_REQUEST"
-          echo "CI started and auto-merge enabled for $PULL_REQUEST"
+          echo "CI passed, reported check, and enabled auto-merge for $PULL_REQUEST"
