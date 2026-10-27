@@ -475,6 +475,46 @@ mod tests {
     use jiff::civil::date;
 
     use super::*;
+    use crate::markdown;
+
+    struct LiveReminderCleanup {
+        id: Option<String>,
+        list_id: String,
+        list_name: String,
+        title: String,
+    }
+
+    impl Drop for LiveReminderCleanup {
+        fn drop(&mut self) {
+            let id = self.id.clone().or_else(|| {
+                EventKitReminders
+                    .snapshot(Some(&self.list_name))
+                    .ok()?
+                    .reminders
+                    .into_iter()
+                    .find(|reminder| {
+                        reminder.list_id == self.list_id && reminder.title == self.title
+                    })
+                    .map(|reminder| reminder.id)
+            });
+            let Some(id) = id else {
+                eprintln!("cleanup failed: couldn't find the live test reminder");
+                return;
+            };
+            autoreleasepool(|_| {
+                let Ok(store) = authorized_store(EKEntityType::Reminder, REMINDERS) else {
+                    eprintln!("cleanup failed: couldn't open Reminders");
+                    return;
+                };
+                let Some(reminder) = find_reminder(&store, &id) else {
+                    return;
+                };
+                if let Err(error) = unsafe { store.removeReminder_commit_error(&reminder, true) } {
+                    eprintln!("cleanup failed: {}", error.localizedDescription());
+                }
+            });
+        }
+    }
 
     #[test]
     fn priorities_read_as_ranges() {
@@ -582,6 +622,100 @@ mod tests {
             .downcast::<EKReminder>()
             .unwrap();
         unsafe { store.removeReminder_commit_error(&reminder, true) }.unwrap();
+    }
+
+    #[test]
+    #[ignore = "writes to your real Reminders; set NIB_LIVE_WRITE=1 and run with --ignored"]
+    fn edits_a_real_reminder_through_markdown() {
+        if std::env::var_os("NIB_LIVE_WRITE").is_none() {
+            eprintln!("skipped: set NIB_LIVE_WRITE=1 to write to your real Reminders");
+            return;
+        }
+        let store = authorized_store(EKEntityType::Reminder, REMINDERS).unwrap();
+        let list = unsafe { store.defaultCalendarForNewReminders() }
+            .expect("there is no default list for new reminders");
+        let list_id = unsafe { list.calendarIdentifier() }.to_string();
+        let list_name = unsafe { list.title() }.to_string();
+        let title = format!(
+            "nib live test {} *bold* #tag \\ 📅 2030-01-01",
+            std::process::id()
+        );
+        let notes = "first line  \n\n\tindented line   \nlast line  ";
+        let mut cleanup = LiveReminderCleanup {
+            id: None,
+            list_id: list_id.clone(),
+            list_name: list_name.clone(),
+            title: title.clone(),
+        };
+
+        EventKitReminders
+            .apply(&[ReminderChange::Add {
+                list_id: list_id.clone(),
+                title: title.clone(),
+                notes: Some(notes.into()),
+                due: None,
+                priority: None,
+            }])
+            .unwrap();
+
+        let snapshot = EventKitReminders.snapshot(Some(&list_name)).unwrap();
+        let reminder = snapshot
+            .reminders
+            .iter()
+            .find(|reminder| reminder.list_id == list_id && reminder.title == title)
+            .unwrap();
+        cleanup.id = Some(reminder.id.clone());
+        let reminder_id = reminder.id.clone();
+        let session = markdown::Session::new(&snapshot);
+        let rendered = markdown::render(&session.document);
+        let parsed = markdown::parse(&rendered).unwrap();
+        assert_eq!(
+            markdown::plan(&snapshot, &session, &parsed).unwrap(),
+            markdown::Plan::default()
+        );
+
+        let short_id = session
+            .document
+            .sections
+            .iter()
+            .flat_map(|section| &section.items)
+            .find(|item| item.title == title)
+            .and_then(|item| item.id.as_deref())
+            .unwrap();
+        let id_marker = format!("🆔 {short_id}");
+        let original_line = rendered
+            .lines()
+            .find(|line| line.starts_with("- [ ]") && line.ends_with(&id_marker))
+            .unwrap();
+        let edited_line = original_line
+            .replacen("- [ ]", "- [x]", 1)
+            .replacen("nib live test", "nib edited live test", 1)
+            .replacen(
+                &format!(" {id_marker}"),
+                &format!(" ⏫ 📅 2030-02-03 {id_marker}"),
+                1,
+            );
+        let edited = rendered.replacen(original_line, &edited_line, 1);
+        let parsed = markdown::parse(&edited).unwrap();
+        let plan = markdown::plan(&snapshot, &session, &parsed).unwrap();
+        assert!(matches!(
+            &plan.changes[..],
+            [ReminderChange::Update { edit, .. }]
+                if edit.title.as_deref()
+                    == Some(title.replacen("nib live test", "nib edited live test", 1).as_str())
+                    && edit.due == Some(Some(date(2030, 2, 3)))
+                    && edit.priority == Some(Some(Priority::High))
+                    && edit.complete
+        ));
+        EventKitReminders.apply(&plan.changes).unwrap();
+
+        let after = EventKitReminders.snapshot(Some(&list_name)).unwrap();
+        assert!(
+            after
+                .reminders
+                .iter()
+                .all(|reminder| reminder.id != reminder_id)
+        );
     }
 
     #[test]
