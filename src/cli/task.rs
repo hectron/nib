@@ -133,10 +133,22 @@ fn is_iso_date(value: &str) -> bool {
 }
 
 fn looks_like_iso_date(value: &str) -> bool {
-    value
-        .as_bytes()
-        .get(..4)
-        .is_some_and(|year| year.iter().all(u8::is_ascii_digit) && value.as_bytes().contains(&b'-'))
+    let mut components = value.split('-');
+    let (Some(year), Some(month), Some(day), None) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) else {
+        return false;
+    };
+    let day = day.split_once('T').map_or(day, |(date, _)| date);
+    year.len() == 4
+        && year.bytes().all(|byte| byte.is_ascii_digit())
+        && !month.is_empty()
+        && month.bytes().all(|byte| byte.is_ascii_digit())
+        && !day.is_empty()
+        && day.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -170,6 +182,9 @@ pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> 
     let mut priority = None;
 
     while end > 0 {
+        if end >= 2 && is_escaped_due_phrase(&words[end - 2], &words[end - 1]) {
+            break;
+        }
         if words[end - 1].starts_with('\\') {
             break;
         }
@@ -248,11 +263,7 @@ pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> 
         }
     }
 
-    let title = words[..end]
-        .iter()
-        .map(|word| word.strip_prefix('\\').unwrap_or(word).to_owned())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let title = inline_title(&words[..end]);
     if title.is_empty() {
         return Err(InlineError::EmptyTitle);
     }
@@ -262,6 +273,40 @@ pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> 
         due,
         priority,
     })
+}
+
+fn inline_title(words: &[String]) -> String {
+    words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| {
+            if is_escaped_inline_word(words, index) {
+                word[1..].to_owned()
+            } else {
+                word.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_escaped_due_phrase(first: &str, second: &str) -> bool {
+    let Some(first) = first.strip_prefix('\\') else {
+        return false;
+    };
+    (first.eq_ignore_ascii_case("next") && parse_weekday(second).is_some())
+        || (first.eq_ignore_ascii_case("in") && matches!(parse_interval(second), Ok(Some(_))))
+}
+
+fn is_escaped_inline_word(words: &[String], index: usize) -> bool {
+    let Some(word) = words[index].strip_prefix('\\') else {
+        return false;
+    };
+    word.starts_with(['!', '#'])
+        || matches!(parse_single_due(word), Ok(Some(_)) | Err(_))
+        || words
+            .get(index + 1)
+            .is_some_and(|next| is_escaped_due_phrase(&words[index], next))
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, field: &'static str) -> Result<(), InlineError> {
@@ -404,6 +449,32 @@ mod tests {
             let parsed = parse_inline(&words).unwrap();
             assert_eq!(parsed.title, title, "{words:?}");
         }
+    }
+
+    #[test]
+    fn escaping_is_phrase_aware_and_preserves_unrelated_backslashes() {
+        let cases = [
+            (&["Discuss", "\\next", "fri"][..], "Discuss next fri"),
+            (&["Review", "\\in", "3d"][..], "Review in 3d"),
+            (&["Copy", "\\server", "docs"][..], "Copy \\server docs"),
+            (
+                &["Discuss", "\\next", "fri", "#work"][..],
+                "Discuss next fri",
+            ),
+        ];
+        for (words, title) in cases {
+            let words: Vec<String> = words.iter().map(ToString::to_string).collect();
+            let parsed = parse_inline(&words).unwrap();
+            assert_eq!(parsed.title, title, "{words:?}");
+        }
+    }
+
+    #[test]
+    fn non_date_hyphenated_year_suffix_stays_in_the_title() {
+        let words = ["Renew".into(), "2026-plan".into()];
+        let parsed = parse_inline(&words).unwrap();
+        assert_eq!(parsed.title, "Renew 2026-plan");
+        assert_eq!(parsed.due, None);
     }
 
     #[test]

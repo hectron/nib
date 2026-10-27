@@ -65,14 +65,69 @@ pub enum ConfigError {
     EnvironmentEncoding { name: &'static str },
 }
 
+#[derive(Debug)]
+pub struct ConfigInspection {
+    result: Result<Config, ConfigError>,
+    files: Vec<ConfigFileInspection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigFileInspection {
+    path: PathBuf,
+    error: Option<String>,
+}
+
+impl ConfigInspection {
+    pub fn into_config(self) -> Result<Config, ConfigError> {
+        self.result
+    }
+
+    pub(crate) fn error(&self) -> Option<&ConfigError> {
+        self.result.as_ref().err()
+    }
+
+    pub(crate) fn files(&self) -> &[ConfigFileInspection] {
+        &self.files
+    }
+}
+
+impl ConfigFileInspection {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
 pub fn load(
     start: &Path,
     user_config: Option<&Path>,
     env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<Config, ConfigError> {
+    inspect(start, user_config, env).into_config()
+}
+
+pub fn inspect(
+    start: &Path,
+    user_config: Option<&Path>,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> ConfigInspection {
+    let mut files = Vec::new();
+    let result = load_inspected(start, user_config, env, &mut files);
+    ConfigInspection { result, files }
+}
+
+fn load_inspected(
+    start: &Path,
+    user_config: Option<&Path>,
+    env: impl Fn(&str) -> Option<OsString>,
+    files: &mut Vec<ConfigFileInspection>,
+) -> Result<Config, ConfigError> {
     let mut config = Config::default();
     if let Some(path) = user_config {
-        apply_if_present(&mut config, path)?;
+        apply_if_present(&mut config, path, files)?;
     }
 
     let directories: Vec<&Path> = start.ancestors().collect();
@@ -80,14 +135,14 @@ pub fn load(
         let visible = directory.join("nib.toml");
         let hidden = directory.join(".nib.toml");
         if is_distinct(&visible, user_config) && exists(&visible)? {
-            apply_file(&mut config, &visible)?;
+            apply_file_inspected(&mut config, &visible, files)?;
         } else if is_distinct(&hidden, user_config) && exists(&hidden)? {
-            apply_file(&mut config, &hidden)?;
+            apply_file_inspected(&mut config, &hidden, files)?;
         }
 
         let local = directory.join(".nib.local.toml");
         if is_distinct(&local, user_config) {
-            apply_if_present(&mut config, &local)?;
+            apply_if_present(&mut config, &local, files)?;
         }
     }
 
@@ -99,11 +154,38 @@ fn is_distinct(path: &Path, user_config: Option<&Path>) -> bool {
     user_config.is_none_or(|user| path != user)
 }
 
-fn apply_if_present(config: &mut Config, path: &Path) -> Result<(), ConfigError> {
+fn apply_if_present(
+    config: &mut Config,
+    path: &Path,
+    files: &mut Vec<ConfigFileInspection>,
+) -> Result<(), ConfigError> {
     if exists(path)? {
-        apply_file(config, path)?;
+        apply_file_inspected(config, path, files)?;
     }
     Ok(())
+}
+
+fn apply_file_inspected(
+    config: &mut Config,
+    path: &Path,
+    files: &mut Vec<ConfigFileInspection>,
+) -> Result<(), ConfigError> {
+    match apply_file(config, path) {
+        Ok(()) => {
+            files.push(ConfigFileInspection {
+                path: path.to_owned(),
+                error: None,
+            });
+            Ok(())
+        }
+        Err(error) => {
+            files.push(ConfigFileInspection {
+                path: path.to_owned(),
+                error: Some(error.to_string()),
+            });
+            Err(error)
+        }
+    }
 }
 
 fn exists(path: &Path) -> Result<bool, ConfigError> {
@@ -272,6 +354,23 @@ mod tests {
     fn no_configuration_keeps_built_in_defaults() {
         let temp = TempDir::new();
         assert_eq!(load(&temp.0, None, no_env).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn inspection_reports_loaded_files_and_parse_errors() {
+        let temp = TempDir::new();
+        let valid = temp.join("nib.toml");
+        let invalid = temp.join(".nib.local.toml");
+        write(&valid, "[task]\nlist = \"Work\"\n");
+        write(&invalid, "[task]\ncolour = \"blue\"\n");
+
+        let inspection = inspect(&temp.0, None, no_env);
+        assert!(inspection.error().is_some());
+        assert_eq!(inspection.files().len(), 2);
+        assert_eq!(inspection.files()[0].path(), valid);
+        assert_eq!(inspection.files()[0].error(), None);
+        assert_eq!(inspection.files()[1].path(), invalid);
+        assert!(inspection.files()[1].error().is_some());
     }
 
     #[test]

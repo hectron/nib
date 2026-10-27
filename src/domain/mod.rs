@@ -6,6 +6,14 @@ use jiff::{Timestamp, Zoned};
 use miette::Diagnostic;
 use thiserror::Error;
 
+fn ambiguity_details(matches: &[String]) -> String {
+    if matches.is_empty() {
+        String::new()
+    } else {
+        format!(" (matches: {})", matches.join(", "))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Note {
     pub id: String,
@@ -296,12 +304,28 @@ pub enum BackendError {
     )]
     NotFound { kind: &'static str, name: String },
 
-    #[error("more than one {kind} is named \"{name}\"")]
+    #[error(
+        "more than one {kind} is named \"{name}\"{details}",
+        details = ambiguity_details(.matches)
+    )]
     #[diagnostic(
         code(nib::backend::ambiguous),
         help("rename one of them, or choose a unique name")
     )]
-    Ambiguous { kind: &'static str, name: String },
+    Ambiguous {
+        kind: &'static str,
+        name: String,
+        matches: Vec<String>,
+    },
+
+    #[error("note title contains whitespace that Apple Notes can't preserve exactly")]
+    #[diagnostic(
+        code(nib::notes::unsupported_whitespace),
+        help(
+            "use single spaces between words and remove tabs, line breaks, and leading, trailing, or repeated spaces"
+        )
+    )]
+    UnsupportedNoteWhitespace,
 
     #[cfg(any(not(target_os = "macos"), test))]
     #[error("{app} integration is not implemented yet")]
@@ -335,6 +359,40 @@ pub fn terminal_name(term_program: Option<&str>) -> String {
         Some(name) if !name.is_empty() => name.into(),
         _ => "Your terminal app".into(),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionStatus {
+    FullAccess,
+    NotDetermined,
+    Restricted,
+    Denied,
+    WriteOnly,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationStatus {
+    Allowed,
+    Denied,
+    NotDetermined,
+    TargetNotRunning,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorSetting {
+    pub variable: Option<&'static str>,
+    pub command: Option<String>,
+}
+
+pub trait DoctorProbe {
+    fn macos_version(&self) -> Result<String, String>;
+    fn terminal(&self) -> (String, bool);
+    fn reminders_authorization(&self) -> PermissionStatus;
+    fn calendars_authorization(&self) -> PermissionStatus;
+    fn notes_automation(&self) -> AutomationStatus;
+    fn editor(&self) -> EditorSetting;
 }
 
 pub trait Notes {
@@ -399,7 +457,9 @@ mod tests {
             BackendError::Ambiguous {
                 kind: "writable reminder list",
                 name: "Work".into(),
+                matches: Vec::new(),
             },
+            BackendError::UnsupportedNoteWhitespace,
             BackendError::NotImplemented { app: "Calendar" },
             BackendError::Failed {
                 app: "Reminders",
@@ -425,6 +485,8 @@ mod tests {
           help: check the spelling and try again
         nib::backend::ambiguous: more than one writable reminder list is named "Work"
           help: rename one of them, or choose a unique name
+        nib::notes::unsupported_whitespace: note title contains whitespace that Apple Notes can't preserve exactly
+          help: use single spaces between words and remove tabs, line breaks, and leading, trailing, or repeated spaces
         nib::backend::not_implemented: Calendar integration is not implemented yet
           help: only the command-line interface exists so far
         nib::backend::failed: Reminders request failed: timed out

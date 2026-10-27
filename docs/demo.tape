@@ -3,13 +3,14 @@ Output docs/demo.gif
 Require nib
 
 Set Shell "bash"
+Set Theme "rose-pine-dawn"
+Set FontFamily "TX-02"
 Set FontSize 16
 Set Width 1100
 Set Height 700
 Set TypingSpeed 35ms
 
 Env NIB_DEMO "1"
-Env NO_COLOR "1"
 
 Sleep 1s
 Type `nib t Plan launch tomorrow !high`

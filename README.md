@@ -31,9 +31,10 @@ nib task edit
 nib log
 nib undo
 nib cal --week
+nib doctor
 ```
 
-`n` and `t` are capture commands. With a title, they create an item; without one, they list items.
+`n` and `t` are capture commands. With a title, they create an item; without one, they list items. Note titles use single spaces between words, and a note folder name must match exactly one folder across your accounts.
 
 ```bash
 nib note new "Meeting with Team" --folder Work
@@ -41,7 +42,25 @@ nib task add "Review pull request" --due tomorrow --priority high
 nib cal --calendar Work --week
 ```
 
-Quick-add recognizes natural due dates and trailing priority and list tokens. See [Quick-add reminders](docs/quick-add.md) for every form. `nib today` combines overdue and due-today reminders with today's events.
+Quick-add recognizes natural due dates and trailing priority and list tokens. See [Quick-add reminders](docs/quick-add.md) for every form. `nib today` combines overdue and due-today reminders with today's events. `nib doctor` checks permissions and configuration without prompting.
+
+## Configuration
+
+Set your defaults once in `~/.config/nib/config.toml`:
+
+```toml
+[task]
+list = "Inbox"
+priority = "medium"
+
+[cal]
+calendars = ["Work", "Personal"]
+
+[note]
+folder = "Notes"
+```
+
+A `nib.toml` in a project directory overrides these field by field, and `.nib.local.toml` holds personal overrides you don't commit. See [Configuration](docs/configuration.md) for every setting, environment variables, and precedence.
 
 ## Why nib
 
@@ -51,7 +70,7 @@ Quick-add recognizes natural due dates and trailing priority and list tokens. Se
 - A daily agenda for overdue reminders, due-today reminders, and events.
 - Natural due dates and quick-add tokens for reminders.
 - Safe bulk reminder editing in `$VISUAL` or `$EDITOR`.
-- Pretty terminal tables and script-friendly JSON.
+- Colored tables and JSON in the terminal, plain when piped or with `NO_COLOR` set.
 - Layered TOML configuration for personal and project defaults.
 - A non-persistent demo backend with dates relative to today.
 

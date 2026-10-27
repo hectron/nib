@@ -17,6 +17,9 @@ pub fn run(
 ) -> Result<String> {
     let json = cli.json;
     match cli.command.into_action(now, config).into_diagnostic()? {
+        Action::Doctor => Err(miette::miette!(
+            "doctor must be run through the system diagnostic entry point"
+        )),
         Action::Today { date, query } => {
             let reminders = backends.reminders.list()?;
             let (overdue, remaining): (Vec<_>, Vec<_>) = reminders
@@ -27,19 +30,28 @@ pub fn run(
                 .filter(|reminder| reminder.due == Some(date))
                 .collect::<Vec<_>>();
             let events = backends.calendar.events(query)?;
-            output::today(&overdue, &due_today, &events, json, style)
+            output::today(&overdue, &due_today, &events, date, json, style)
         }
         Action::NewNote(note) => {
-            output::single(&backends.notes.create(note)?, "Created note", json)
+            output::single(&backends.notes.create(note)?, "Created note", json, style)
         }
-        Action::ListNotes(query) => output::list(&backends.notes.list(query)?, json, style),
+        Action::ListNotes(query) => {
+            output::list(&backends.notes.list(query)?, json, now.date(), style)
+        }
         Action::AddTask(reminder) => {
-            output::single(&backends.reminders.add(reminder)?, "Added", json)
+            output::single(&backends.reminders.add(reminder)?, "Added", json, style)
         }
-        Action::ListTasks => output::list(&backends.reminders.list()?, json, style),
+        Action::ListTasks => output::list(&backends.reminders.list()?, json, now.date(), style),
         Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
-        Action::ListEvents(query) => output::list(&backends.calendar.events(query)?, json, style),
-        Action::Log => output::journal(&journal::summaries(now.timestamp(), host)?, json, style),
+        Action::ListEvents(query) => {
+            output::list(&backends.calendar.events(query)?, json, now.date(), style)
+        }
+        Action::Log => output::journal(
+            &journal::summaries(now.timestamp(), host)?,
+            json,
+            now.date(),
+            style,
+        ),
         Action::Undo {
             entry: _,
             resolve: Some(id),
@@ -49,18 +61,18 @@ pub fn run(
                 undo::Resolution::Removed => Some(false),
                 undo::Resolution::Cancelled => None,
             };
-            output::undo_resolution(&id, resolution, json)
+            output::undo_resolution(&id, resolution, json, style)
         }
         Action::Undo {
             entry,
             resolve: None,
         } => match undo::run(entry.as_deref(), now, backends, host)? {
-            undo::Outcome::Cancelled { id } => output::undo_cancelled(&id, json),
+            undo::Outcome::Cancelled { id } => output::undo_cancelled(&id, json, style),
             undo::Outcome::Applied {
                 id,
                 undo_id,
                 counts,
-            } => output::undo(&id, &undo_id, counts, json),
+            } => output::undo(&id, &undo_id, counts, json, style),
         },
     }
 }
@@ -77,12 +89,44 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        ApplyResult, BackendError, Calendar, ChangeCounts, Event, EventQuery, NewNote, NewReminder,
-        Note, NoteQuery, Notes, Priority, Reminder, ReminderChange, ReminderSnapshot, Reminders,
+        ApplyResult, AutomationStatus, BackendError, Calendar, ChangeCounts, DoctorProbe,
+        EditorSetting, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Notes,
+        PermissionStatus, Priority, Reminder, ReminderChange, ReminderSnapshot, Reminders,
     };
     use crate::infra::host::Scripted;
 
     struct Fake;
+
+    struct FakeDoctor;
+
+    impl DoctorProbe for FakeDoctor {
+        fn macos_version(&self) -> std::result::Result<String, String> {
+            Ok("26.1".into())
+        }
+
+        fn terminal(&self) -> (String, bool) {
+            ("Ghostty".into(), true)
+        }
+
+        fn reminders_authorization(&self) -> PermissionStatus {
+            PermissionStatus::FullAccess
+        }
+
+        fn calendars_authorization(&self) -> PermissionStatus {
+            PermissionStatus::Denied
+        }
+
+        fn notes_automation(&self) -> AutomationStatus {
+            AutomationStatus::TargetNotRunning
+        }
+
+        fn editor(&self) -> EditorSetting {
+            EditorSetting {
+                variable: Some("VISUAL"),
+                command: Some("code".into()),
+            }
+        }
+    }
 
     impl Notes for Fake {
         fn create(&self, note: NewNote) -> Result<Note, BackendError> {
@@ -483,6 +527,7 @@ mod tests {
                 deleted: 4,
             },
             true,
+            Style::default(),
         )
         .unwrap(), @r#"
         {
@@ -503,6 +548,7 @@ mod tests {
             "20261026T090100-journal-efgh",
             Some(true),
             true,
+            Style::default(),
         )
         .unwrap(), @r#"
         {
@@ -518,6 +564,7 @@ mod tests {
         assert_snapshot!(output::undo_cancelled(
             "20261026T090000-journal-abcd",
             true,
+            Style::default(),
         )
         .unwrap(), @r#"
         {
@@ -913,5 +960,92 @@ mod tests {
         .unwrap();
 
         assert_eq!(recorded.take().unwrap().calendars, ["Work", "Birthdays"]);
+    }
+
+    #[test]
+    fn doctor_text_reports_checks_and_fixes() {
+        let checks = crate::app::doctor::checks(
+            &FakeDoctor,
+            &[crate::app::doctor::ConfigFileCheck {
+                path: "/Users/me/project/nib.toml".into(),
+                error: None,
+            }],
+            None,
+        );
+        assert!(crate::app::doctor::failed(&checks));
+        assert_snapshot!(output::doctor(&checks, false, Style::default()).unwrap(), @r###"
+        ✓ macOS 26.1 is supported
+        ✓ macOS attributes permissions to Ghostty
+        ✓ Ghostty has full access to Reminders
+        ✗ Ghostty access to Calendars is denied
+          Fix: Turn on Ghostty in System Settings > Privacy & Security > Calendars.
+        ! Apple Notes Automation access is checked on first use
+          Fix: When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation.
+        ✓ config is valid: /Users/me/project/nib.toml
+        ! $VISUAL uses `code` without a wait flag
+          Fix: Set VISUAL="code --wait".
+        "###);
+    }
+
+    #[test]
+    fn doctor_json_has_stable_check_objects() {
+        let checks = crate::app::doctor::checks(
+            &FakeDoctor,
+            &[crate::app::doctor::ConfigFileCheck {
+                path: "/Users/me/project/nib.toml".into(),
+                error: None,
+            }],
+            None,
+        );
+        assert_snapshot!(output::doctor(&checks, true, Style::default()).unwrap(), @r###"
+        {
+          "id": "doctor",
+          "ok": false,
+          "checks": [
+            {
+              "id": "macos",
+              "status": "pass",
+              "message": "macOS 26.1 is supported",
+              "fix": null
+            },
+            {
+              "id": "terminal",
+              "status": "pass",
+              "message": "macOS attributes permissions to Ghostty",
+              "fix": null
+            },
+            {
+              "id": "reminders",
+              "status": "pass",
+              "message": "Ghostty has full access to Reminders",
+              "fix": null
+            },
+            {
+              "id": "calendars",
+              "status": "fail",
+              "message": "Ghostty access to Calendars is denied",
+              "fix": "Turn on Ghostty in System Settings > Privacy & Security > Calendars."
+            },
+            {
+              "id": "notes",
+              "status": "warning",
+              "message": "Apple Notes Automation access is checked on first use",
+              "fix": "When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation."
+            },
+            {
+              "id": "config_1",
+              "status": "pass",
+              "message": "config is valid: /Users/me/project/nib.toml",
+              "fix": null
+            },
+            {
+              "id": "editor",
+              "status": "warning",
+              "message": "$VISUAL uses `code` without a wait flag",
+              "fix": "Set VISUAL=\"code --wait\"."
+            }
+          ]
+        }
+        "###);
     }
 }

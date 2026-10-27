@@ -26,6 +26,7 @@ pub struct Cli {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
+    Doctor,
     Today {
         date: Date,
         query: EventQuery,
@@ -47,6 +48,8 @@ pub enum Action {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Check system access and configuration without prompting
+    Doctor,
     /// Show today's reminders and events
     Today(TodayArgs),
     /// Create and list notes
@@ -240,6 +243,7 @@ pub(crate) enum ActionError {
 impl Command {
     pub(crate) fn into_action(self, now: &Zoned, config: &Config) -> Result<Action, ActionError> {
         Ok(match self {
+            Command::Doctor => Action::Doctor,
             Command::Today(TodayArgs { calendar }) => Action::Today {
                 date: now.date(),
                 query: EventQuery {
@@ -308,6 +312,12 @@ impl Command {
             Command::Log => Action::Log,
             Command::Undo(UndoArgs { entry, resolve }) => Action::Undo { entry, resolve },
         })
+    }
+}
+
+impl Cli {
+    pub fn is_doctor(&self) -> bool {
+        matches!(self.command, Command::Doctor)
     }
 }
 
@@ -407,6 +417,11 @@ mod tests {
             ),
             (&["--json", "today"], today(&[])),
         ]);
+    }
+
+    #[test]
+    fn doctor_command() {
+        assert_eq!(parse(&["doctor"]).unwrap(), Action::Doctor);
     }
 
     #[test]

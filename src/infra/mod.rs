@@ -1,5 +1,6 @@
 pub(crate) mod config;
 pub(crate) mod demo;
+pub(crate) mod doctor;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod eventkit;
