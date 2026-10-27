@@ -1,12 +1,14 @@
 use std::ops::Range;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 use jiff::civil::Date;
 use jiff::{ToSpan, Zoned};
 use thiserror::Error;
 
 use crate::domain::{Config, EventQuery, NewNote, NewReminder, NoteQuery, Priority};
 
+pub(crate) mod completions;
 pub mod output;
 mod task;
 
@@ -38,6 +40,18 @@ pub enum Action {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[arg(long)]
+        refresh: bool,
+        #[arg(value_enum)]
+        kind: CompletionKind,
+    },
+    /// Generate a shell completion script
+    Completions {
+        #[arg(value_enum)]
+        shell: CompletionShell,
+    },
     /// Check system access and configuration without prompting
     Doctor,
     /// Show today's reminders and events
@@ -54,6 +68,42 @@ pub enum Command {
     N(NoteCapture),
     /// Add a reminder from the rest of the line, or list reminders
     T(TaskCapture),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompletionShell {
+    Zsh,
+    Bash,
+    Fish,
+}
+
+impl From<CompletionShell> for Shell {
+    fn from(shell: CompletionShell) -> Self {
+        match shell {
+            CompletionShell::Zsh => Self::Zsh,
+            CompletionShell::Bash => Self::Bash,
+            CompletionShell::Fish => Self::Fish,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompletionKind {
+    ReminderLists,
+    WritableReminderLists,
+    Calendars,
+    NoteFolders,
+}
+
+impl CompletionKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReminderLists => "reminder-lists",
+            Self::WritableReminderLists => "writable-reminder-lists",
+            Self::Calendars => "calendars",
+            Self::NoteFolders => "note-folders",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -216,8 +266,13 @@ pub(crate) enum ActionError {
 }
 
 impl Command {
-    pub(crate) fn into_action(self, now: &Zoned, config: &Config) -> Result<Action, ActionError> {
-        Ok(match self {
+    pub(crate) fn into_action(
+        self,
+        now: &Zoned,
+        config: &Config,
+    ) -> Result<Option<Action>, ActionError> {
+        Ok(Some(match self {
+            Command::Complete { .. } | Command::Completions { .. } => return Ok(None),
             Command::Doctor => Action::Doctor,
             Command::Today(TodayArgs { calendar }) => Action::Today {
                 date: now.date(),
@@ -284,7 +339,7 @@ impl Command {
                     },
                 }),
             },
-        })
+        }))
     }
 }
 
@@ -292,6 +347,22 @@ impl Cli {
     pub fn is_doctor(&self) -> bool {
         matches!(self.command, Command::Doctor)
     }
+
+    pub(crate) fn completion_request(&self) -> Option<CompletionRequest> {
+        match self.command {
+            Command::Complete { refresh, kind } => {
+                Some(CompletionRequest::Values { kind, refresh })
+            }
+            Command::Completions { shell } => Some(CompletionRequest::Script(shell)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionRequest {
+    Script(CompletionShell),
+    Values { kind: CompletionKind, refresh: bool },
 }
 
 #[cfg(test)]
@@ -311,8 +382,12 @@ mod tests {
     }
 
     fn parse_at(now: &Zoned, args: &[&str]) -> Result<Action, clap::Error> {
-        Cli::try_parse_from(["nib"].iter().chain(args))
-            .map(|cli| cli.command.into_action(now, &Config::default()).unwrap())
+        Cli::try_parse_from(["nib"].iter().chain(args)).map(|cli| {
+            cli.command
+                .into_action(now, &Config::default())
+                .unwrap()
+                .unwrap()
+        })
     }
 
     fn parse(args: &[&str]) -> Result<Action, clap::Error> {
@@ -328,6 +403,7 @@ mod tests {
             .unwrap()
             .command
             .into_action(now, config)
+            .map(|action| action.unwrap())
     }
 
     fn assert_parses(cases: &[(&[&str], Action)]) {
@@ -706,6 +782,7 @@ mod tests {
                 .unwrap()
                 .command
                 .into_action(&now, &config)
+                .unwrap()
                 .unwrap()
         };
 

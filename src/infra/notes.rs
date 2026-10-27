@@ -4,6 +4,7 @@ use jiff::Timestamp;
 use serde::Deserialize;
 
 use crate::domain::{BackendError, NewNote, Note, NoteQuery, Notes, terminal_name};
+use crate::infra::completions::CacheFile;
 
 const APP: &str = "Apple Notes";
 const FOLDER_AMBIGUOUS: &str = "NIB_FOLDER_AMBIGUOUS:";
@@ -28,13 +29,21 @@ function run(argv) {
     const folder = argv.length === 1 ? notes.defaultAccount().defaultFolder() : folderNamed(notes, argv[1]);
     const created = notes.Note({body: argv[0]});
     folder.notes.push(created);
+    let folderName = null;
+    try {
+        folderName = folder.name();
+    } catch (error) {
+    }
     const modified = created.modificationDate();
     return JSON.stringify({
-        id: created.id(),
-        title: created.name(),
-        folder: folder.name(),
-        modified: modified === null ? null : modified.toISOString(),
-        locked: created.passwordProtected()
+        folder: folderName,
+        note: {
+            id: created.id(),
+            title: created.name(),
+            folder: folderName,
+            modified: modified === null ? null : modified.toISOString(),
+            locked: created.passwordProtected()
+        }
     });
 }
 "#;
@@ -68,8 +77,9 @@ function append(result, folder, ids, names, dates, locked) {
 function run(argv) {
     const notes = Application("Notes");
     const result = [];
+    let folders = [];
     if (argv.length === 0) {
-        const folders = notes.folders.name();
+        folders = notes.folders.name();
         const ids = notes.folders.notes.id();
         const names = notes.folders.notes.name();
         const dates = notes.folders.notes.modificationDate();
@@ -80,9 +90,11 @@ function run(argv) {
     } else {
         const folder = folderNamed(notes, argv[0]);
         const selected = folder.notes;
-        append(result, folder.name(), selected.id(), selected.name(), selected.modificationDate(), selected.passwordProtected());
+        const folderName = folder.name();
+        folders = [folderName];
+        append(result, folderName, selected.id(), selected.name(), selected.modificationDate(), selected.passwordProtected());
     }
-    return JSON.stringify(result);
+    return JSON.stringify({folders: folders, notes: result});
 }
 "#;
 #[cfg(all(test, target_os = "macos"))]
@@ -98,13 +110,20 @@ function run(argv) {
 
 pub struct AppleNotes {
     terminal: String,
+    cache: CacheFile,
 }
 
 impl AppleNotes {
-    pub fn new() -> Self {
+    pub fn new(cache: CacheFile) -> Self {
         Self {
             terminal: terminal_name(std::env::var("TERM_PROGRAM").ok().as_deref()),
+            cache,
         }
+    }
+
+    #[cfg(test)]
+    fn uncached() -> Self {
+        Self::new(CacheFile::new(None, 0))
     }
 
     fn execute<T: for<'de> Deserialize<'de>>(
@@ -131,18 +150,34 @@ impl AppleNotes {
 impl Notes for AppleNotes {
     fn create(&self, note: NewNote) -> Result<Note, BackendError> {
         let args = create_arguments(&note)?;
-        let created: ScriptNote = self.execute(CREATE_SCRIPT, &args, note.folder.as_deref())?;
-        Ok(created.into())
+        let created: ScriptCreate = self.execute(CREATE_SCRIPT, &args, note.folder.as_deref())?;
+        if let Some(folder) = created.folder {
+            self.cache.record_note_folder(folder);
+        }
+        Ok(created.note.into())
     }
 
     fn list(&self, query: NoteQuery) -> Result<Vec<Note>, BackendError> {
+        let filtered = query.folder.is_some();
         let args: Vec<String> = query.folder.iter().cloned().collect();
-        let notes: Vec<ScriptNote> = self.execute(LIST_SCRIPT, &args, query.folder.as_deref())?;
-        let mut notes: Vec<Note> = notes.into_iter().map(Into::into).collect();
+        let listed: ScriptList = self.execute(LIST_SCRIPT, &args, query.folder.as_deref())?;
+        let folders = listed.folders.into_iter().flatten().collect::<Vec<_>>();
+        cache_note_folders(&self.cache, filtered, folders);
+        let mut notes: Vec<Note> = listed.notes.into_iter().map(Into::into).collect();
         notes.sort_by(|a: &Note, b: &Note| {
             b.modified.cmp(&a.modified).then_with(|| a.id.cmp(&b.id))
         });
         Ok(notes)
+    }
+}
+
+fn cache_note_folders(cache: &CacheFile, filtered: bool, folders: Vec<String>) {
+    if filtered {
+        for folder in folders {
+            cache.record_note_folder(folder);
+        }
+    } else {
+        cache.update_note_folders(folders);
     }
 }
 
@@ -256,9 +291,23 @@ fn html_body(title: &str) -> Result<String, BackendError> {
 struct ScriptNote {
     id: String,
     title: String,
-    folder: String,
+    folder: Option<String>,
     modified: Option<Timestamp>,
     locked: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptCreate {
+    #[serde(default)]
+    folder: Option<String>,
+    note: ScriptNote,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptList {
+    #[serde(default)]
+    folders: Vec<Option<String>>,
+    notes: Vec<ScriptNote>,
 }
 
 impl From<ScriptNote> for Note {
@@ -266,7 +315,7 @@ impl From<ScriptNote> for Note {
         Self {
             id: note.id,
             title: note.title,
-            folder: Some(note.folder),
+            folder: note.folder,
             modified: note.modified,
             locked: note.locked,
         }
@@ -296,7 +345,7 @@ mod tests {
     impl Drop for LiveNoteCleanup {
         fn drop(&mut self) {
             if let Some(id) = self.id.take() {
-                let _ = AppleNotes::new().delete(&id);
+                let _ = AppleNotes::uncached().delete(&id);
             }
         }
     }
@@ -382,23 +431,92 @@ mod tests {
 
     #[test]
     fn parses_batched_note_json_without_bodies() {
-        let notes: Vec<ScriptNote> = parse(
+        let listed: ScriptList = parse(
             &output(
                 true,
-                r#"[{"id":"x-coredata://1","title":"Plans","folder":"Work","modified":"2026-10-26T14:30:00Z","locked":false},{"id":"x-coredata://2","title":"Secrets","folder":"Work","modified":null,"locked":true}]"#,
+                r#"{"folders":["Work","Archive"],"notes":[{"id":"x-coredata://1","title":"Plans","folder":"Work","modified":"2026-10-26T14:30:00Z","locked":false},{"id":"x-coredata://2","title":"Secrets","folder":"Work","modified":null,"locked":true}]}"#,
                 "",
             ),
             Some("Work"),
             "Terminal",
         )
         .unwrap();
-        let notes: Vec<Note> = notes.into_iter().map(Into::into).collect();
+        assert_eq!(
+            listed.folders,
+            [Some("Work".into()), Some("Archive".into())]
+        );
+        let notes: Vec<Note> = listed.notes.into_iter().map(Into::into).collect();
         assert_eq!(notes.len(), 2);
         assert_eq!(
             notes[0].modified,
             Some("2026-10-26T14:30:00Z".parse().unwrap())
         );
         assert!(notes[1].locked);
+    }
+
+    #[test]
+    fn parses_created_note_with_its_folder_name() {
+        let created: ScriptCreate = parse(
+            &output(
+                true,
+                r#"{"folder":"Notes","note":{"id":"x-coredata://1","title":"Plans","folder":"Notes","modified":"2026-10-26T14:30:00Z","locked":false}}"#,
+                "",
+            ),
+            None,
+            "Terminal",
+        )
+        .unwrap();
+        assert_eq!(created.folder.as_deref(), Some("Notes"));
+        assert_eq!(created.note.title, "Plans");
+        assert!(!CREATE_SCRIPT.contains("notes.folders.name()"));
+    }
+
+    #[test]
+    fn folder_cache_fields_allow_missing_and_null_values() {
+        let created: ScriptCreate = parse(
+            &output(
+                true,
+                r#"{"note":{"id":"x-coredata://1","title":"Plans","folder":null,"modified":null,"locked":false}}"#,
+                "",
+            ),
+            None,
+            "Terminal",
+        )
+        .unwrap();
+        assert!(created.folder.is_none());
+        assert!(created.note.folder.is_none());
+
+        let listed: ScriptList = parse(
+            &output(true, r#"{"folders":["Work",null],"notes":[]}"#, ""),
+            None,
+            "Terminal",
+        )
+        .unwrap();
+        assert_eq!(listed.folders, [Some("Work".into()), None]);
+    }
+
+    #[test]
+    fn filtered_folder_results_merge_into_the_cache() {
+        let directory =
+            std::env::temp_dir().join(format!("nib-notes-filtered-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        let cache = CacheFile::new(Some(&directory), 1_000);
+        assert_eq!(
+            cache.values(crate::cli::CompletionKind::NoteFolders),
+            Vec::<String>::new()
+        );
+        cache.update_note_folders(vec!["Archive".into(), "Personal".into()]);
+        cache_note_folders(&cache, true, vec!["Work".into()]);
+        assert_eq!(
+            cache.values(crate::cli::CompletionKind::NoteFolders),
+            ["Archive", "Personal", "Work"]
+        );
+        cache_note_folders(&cache, false, vec!["Work".into()]);
+        assert_eq!(
+            cache.values(crate::cli::CompletionKind::NoteFolders),
+            ["Work"]
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -427,7 +545,7 @@ mod tests {
 
     #[test]
     fn maps_automation_and_missing_folder_errors() {
-        let denied: Result<Vec<ScriptNote>, _> = parse(
+        let denied: Result<ScriptList, _> = parse(
             &output(false, "", "Not authorized to send Apple events. (-1743)"),
             None,
             "Ghostty",
@@ -437,7 +555,7 @@ mod tests {
             Err(BackendError::AutomationDenied { terminal, .. }) if terminal == "Ghostty"
         ));
 
-        let missing: Result<Vec<ScriptNote>, _> = parse(
+        let missing: Result<ScriptList, _> = parse(
             &output(false, "", "Error: NIB_FOLDER_NOT_FOUND (-2700)"),
             Some("Archive"),
             "Ghostty",
@@ -447,7 +565,7 @@ mod tests {
             Err(BackendError::NotFound { kind: "folder", name }) if name == "Archive"
         ));
 
-        let ambiguous: Result<Vec<ScriptNote>, _> = parse(
+        let ambiguous: Result<ScriptList, _> = parse(
             &output(
                 false,
                 "",
@@ -476,7 +594,7 @@ mod tests {
             eprintln!("skipped: set NIB_LIVE_WRITE=1 to write to your real Apple Notes");
             return;
         }
-        let backend = AppleNotes::new();
+        let backend = AppleNotes::uncached();
         let title = format!(r#"nib live {} "quotes" \\ <>&"#, std::process::id());
         let created = backend
             .create(NewNote {

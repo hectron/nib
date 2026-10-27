@@ -7,6 +7,12 @@ use miette::IntoDiagnostic;
 
 fn main() -> miette::Result<()> {
     let cli = nib::Cli::parse();
+    let demo = std::env::var_os("NIB_DEMO").is_some_and(|value| !value.is_empty());
+    let now = Timestamp::now();
+    let cache_directory = cache_directory();
+    if let Some(out) = nib::completion_output(&cli, cache_directory.as_deref(), now, demo) {
+        return print_output(&out);
+    }
     let current_dir = std::env::current_dir().into_diagnostic()?;
     let user_config = user_config_path();
     let inspection = nib::inspect_config(&current_dir, user_config.as_deref(), |name| {
@@ -28,9 +34,15 @@ fn main() -> miette::Result<()> {
         return Ok(());
     }
     let config = inspection.into_config()?;
-    let now = Zoned::new(Timestamp::now(), local_zone());
-    let demo = std::env::var_os("NIB_DEMO").is_some_and(|value| !value.is_empty());
-    let out = nib::run(cli, &config, &now, demo, nib::Style::detect())?;
+    let now = Zoned::new(now, local_zone());
+    let out = nib::run(
+        cli,
+        &config,
+        &now,
+        demo,
+        cache_directory.as_deref(),
+        nib::Style::detect(),
+    )?;
     print_output(&out)
 }
 
@@ -54,6 +66,13 @@ fn user_config_path() -> Option<std::path::PathBuf> {
                 .map(|home| std::path::PathBuf::from(home).join(".config"))
         })
         .map(|root| root.join("nib/config.toml"))
+}
+
+fn cache_directory() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join("Library/Caches/nib"))
 }
 
 fn local_zone() -> TimeZone {

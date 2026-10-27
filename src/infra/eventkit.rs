@@ -22,6 +22,7 @@ use crate::domain::{
     PermissionStatus, Priority, Reminder, ReminderChange, ReminderDueComponents, ReminderEdit,
     ReminderList, ReminderSnapshot, Reminders, StoredReminder, terminal_name,
 };
+use crate::infra::completions::CacheFile;
 
 const REMINDERS: &str = "Reminders";
 const CALENDARS: &str = "Calendars";
@@ -64,12 +65,29 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-pub struct EventKitCalendar;
+pub struct EventKitCalendar {
+    cache: CacheFile,
+}
+
+impl EventKitCalendar {
+    pub fn new(cache: CacheFile) -> Self {
+        Self { cache }
+    }
+
+    #[cfg(test)]
+    fn uncached() -> Self {
+        Self::new(CacheFile::new(None, 0))
+    }
+}
 
 impl Calendar for EventKitCalendar {
     fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
         autoreleasepool(|_| {
             let store = authorized_store(EKEntityType::Event, CALENDARS)?;
+            let names = self
+                .cache
+                .is_enabled()
+                .then(|| calendar_names(&store, EKEntityType::Event));
             let zone = query.range.start.time_zone().clone();
             let start = NSDate::dateWithTimeIntervalSince1970(epoch_seconds(&query.range.start));
             let end = NSDate::dateWithTimeIntervalSince1970(epoch_seconds(&query.range.end));
@@ -77,12 +95,36 @@ impl Calendar for EventKitCalendar {
             let chosen = (!calendars.is_empty()).then(|| NSArray::from_retained_slice(&calendars));
             let mut events = matching_events(&store, &start, &end, chosen.as_deref(), &zone);
             events.sort_by(|a, b| (a.start.timestamp(), &a.id).cmp(&(b.start.timestamp(), &b.id)));
+            if let Some(names) = names {
+                self.cache.update_calendars(names);
+            }
             Ok(events)
         })
     }
 }
 
-pub struct EventKitReminders;
+pub struct EventKitReminders {
+    cache: CacheFile,
+}
+
+impl EventKitReminders {
+    pub fn new(cache: CacheFile) -> Self {
+        Self { cache }
+    }
+
+    #[cfg(test)]
+    fn uncached() -> Self {
+        Self::new(CacheFile::new(None, 0))
+    }
+
+    fn update_cache(&self, store: &EKEventStore) {
+        if !self.cache.is_enabled() {
+            return;
+        }
+        let (names, writable) = reminder_list_names(store);
+        self.cache.update_reminder_lists(names, writable);
+    }
+}
 
 impl Reminders for EventKitReminders {
     fn add(&self, new: NewReminder) -> Result<Reminder, BackendError> {
@@ -94,7 +136,9 @@ impl Reminders for EventKitReminders {
                     failed(REMINDERS, "there is no default list for new reminders")
                 })?,
             };
-            add_reminder(&store, &list, &new)
+            let reminder = add_reminder(&store, &list, &new)?;
+            self.update_cache(&store);
+            Ok(reminder)
         })
     }
 
@@ -106,6 +150,7 @@ impl Reminders for EventKitReminders {
             reminders.sort_by(|a, b| {
                 (a.due.is_none(), a.due, &a.title).cmp(&(b.due.is_none(), b.due, &b.title))
             });
+            self.update_cache(&store);
             Ok(reminders)
         })
     }
@@ -130,6 +175,7 @@ impl Reminders for EventKitReminders {
                 .map(|calendar| reminder_list(calendar))
                 .collect();
             if calendars.is_empty() {
+                self.update_cache(&store);
                 return Ok(ReminderSnapshot::default());
             }
             let chosen = NSArray::from_retained_slice(&calendars);
@@ -138,7 +184,9 @@ impl Reminders for EventKitReminders {
             reminders.sort_by(|a, b| {
                 (a.due.is_none(), a.due, &a.title).cmp(&(b.due.is_none(), b.due, &b.title))
             });
-            Ok(ReminderSnapshot { lists, reminders })
+            let snapshot = ReminderSnapshot { lists, reminders };
+            self.update_cache(&store);
+            Ok(snapshot)
         })
     }
 
@@ -155,7 +203,9 @@ impl Reminders for EventKitReminders {
                     REMINDERS,
                     &format!("nothing was saved: {}", e.localizedDescription()),
                 )
-            })
+            })?;
+            self.update_cache(&store);
+            Ok(())
         })
     }
 }
@@ -240,6 +290,27 @@ fn calendars(store: &EKEventStore, entity: EKEntityType) -> Vec<Retained<EKCalen
     unsafe { store.calendarsForEntityType(entity) }
         .iter()
         .collect()
+}
+
+fn calendar_names(store: &EKEventStore, entity: EKEntityType) -> Vec<String> {
+    calendars(store, entity)
+        .iter()
+        .map(|calendar| calendar_title(calendar))
+        .collect()
+}
+
+fn reminder_list_names(store: &EKEventStore) -> (Vec<String>, Vec<String>) {
+    let lists = calendars(store, EKEntityType::Reminder);
+    let names = lists
+        .iter()
+        .map(|calendar| calendar_title(calendar))
+        .collect();
+    let writable = lists
+        .iter()
+        .filter(|calendar| calendar_is_writable(calendar))
+        .map(|calendar| calendar_title(calendar))
+        .collect();
+    (names, writable)
 }
 
 fn default_reminder_calendar(store: &EKEventStore) -> Option<Retained<EKCalendar>> {
@@ -622,6 +693,33 @@ pub(super) fn calendars_authorization_status() -> PermissionStatus {
     permission_status(authorization_status(EKEntityType::Event))
 }
 
+pub(super) fn start_new_session() {
+    // SAFETY: setsid takes no pointers and only changes this refresh process's session membership.
+    unsafe {
+        let _ = libc::setsid();
+    }
+}
+
+pub(super) fn completion_reminder_list_names() -> Option<(Vec<String>, Vec<String>)> {
+    if authorization_status(EKEntityType::Reminder) != EKAuthorizationStatus::FullAccess {
+        return None;
+    }
+    Some(autoreleasepool(|_| {
+        let store = new_event_store();
+        reminder_list_names(&store)
+    }))
+}
+
+pub(super) fn completion_calendar_names() -> Option<Vec<String>> {
+    if authorization_status(EKEntityType::Event) != EKAuthorizationStatus::FullAccess {
+        return None;
+    }
+    Some(autoreleasepool(|_| {
+        let store = new_event_store();
+        calendar_names(&store, EKEntityType::Event)
+    }))
+}
+
 fn permission_status(status: EKAuthorizationStatus) -> PermissionStatus {
     match status {
         EKAuthorizationStatus::FullAccess => PermissionStatus::FullAccess,
@@ -816,7 +914,7 @@ mod tests {
     impl Drop for LiveReminderCleanup {
         fn drop(&mut self) {
             let id = self.id.clone().or_else(|| {
-                EventKitReminders
+                EventKitReminders::uncached()
                     .snapshot(Some(&self.list_name))
                     .ok()?
                     .reminders
@@ -899,7 +997,7 @@ mod tests {
         let now = Timestamp::now().to_zoned(TimeZone::system());
         let start = now.start_of_day().unwrap();
         let end = start.checked_add(jiff::Span::new().days(7)).unwrap();
-        EventKitCalendar
+        EventKitCalendar::uncached()
             .events(EventQuery {
                 range: start..end,
                 calendars: Vec::new(),
@@ -941,7 +1039,7 @@ mod tests {
             eprintln!("skipped: set NIB_LIVE_WRITE=1 to write to your real Reminders");
             return;
         }
-        let added = EventKitReminders
+        let added = EventKitReminders::uncached()
             .add(NewReminder {
                 title: "nib live test (safe to delete)".into(),
                 list: None,
@@ -980,7 +1078,7 @@ mod tests {
             title: title.clone(),
         };
 
-        EventKitReminders
+        EventKitReminders::uncached()
             .apply(&[ReminderChange::Add {
                 list_id: list_id.clone(),
                 title: title.clone(),
@@ -990,7 +1088,9 @@ mod tests {
             }])
             .unwrap();
 
-        let snapshot = EventKitReminders.snapshot(Some(&list_name)).unwrap();
+        let snapshot = EventKitReminders::uncached()
+            .snapshot(Some(&list_name))
+            .unwrap();
         let reminder = snapshot
             .reminders
             .iter()
@@ -1039,9 +1139,11 @@ mod tests {
                     && edit.priority == FieldEdit::Set(Priority::High)
                     && edit.complete
         ));
-        EventKitReminders.apply(&plan.changes).unwrap();
+        EventKitReminders::uncached().apply(&plan.changes).unwrap();
 
-        let after = EventKitReminders.snapshot(Some(&list_name)).unwrap();
+        let after = EventKitReminders::uncached()
+            .snapshot(Some(&list_name))
+            .unwrap();
         assert!(
             after
                 .reminders
@@ -1053,6 +1155,6 @@ mod tests {
     #[test]
     #[ignore = "reads your real Reminders; run with --ignored from a terminal that has access"]
     fn lists_real_reminders() {
-        EventKitReminders.list().unwrap();
+        EventKitReminders::uncached().list().unwrap();
     }
 }

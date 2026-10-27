@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use jiff::Zoned;
+use miette::IntoDiagnostic;
 
 pub use cli::Cli;
 pub use cli::output::Style;
@@ -64,12 +65,58 @@ pub fn run(
     config: &Config,
     now: &Zoned,
     demo: bool,
+    cache_directory: Option<&Path>,
     style: Style,
 ) -> miette::Result<String> {
+    let json = cli.json;
+    let action = cli
+        .command
+        .into_action(now, config)
+        .into_diagnostic()?
+        .ok_or_else(|| miette::miette!("completion requests must use completion_output"))?;
     let backends = if demo {
         infra::demo::backends(now)
     } else {
-        infra::system_backends()
+        infra::system_backends(infra::completions::CacheFile::new(
+            cache_directory,
+            now.timestamp().as_second(),
+        ))
     };
-    app::commands::run(cli, config, now, &backends, style, &mut infra::host::System)
+    app::commands::run(
+        action,
+        json,
+        now,
+        &backends,
+        style,
+        &mut infra::host::System,
+    )
+}
+
+pub fn completion_output(
+    cli: &Cli,
+    cache_directory: Option<&Path>,
+    now: jiff::Timestamp,
+    demo: bool,
+) -> Option<String> {
+    match cli.completion_request()? {
+        cli::CompletionRequest::Script(shell) => Some(cli::completions::script(shell)),
+        cli::CompletionRequest::Values { kind, refresh } => {
+            Some(completion_values(kind, refresh, cache_directory, now, demo))
+        }
+    }
+}
+
+fn completion_values(
+    kind: cli::CompletionKind,
+    refresh: bool,
+    cache_directory: Option<&Path>,
+    now: jiff::Timestamp,
+    demo: bool,
+) -> String {
+    if refresh {
+        infra::completions::refresh(kind, cache_directory, now.as_second(), demo);
+        String::new()
+    } else {
+        infra::completions::values(kind, cache_directory, now.as_second(), demo).join("\n")
+    }
 }

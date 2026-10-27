@@ -1,22 +1,21 @@
 use jiff::Zoned;
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 
 use crate::app::edit;
+use crate::cli::Action;
 use crate::cli::output::{self, Style};
-use crate::cli::{Action, Cli};
-use crate::domain::{Backends, Config};
+use crate::domain::Backends;
 use crate::infra::host::Host;
 
 pub fn run(
-    cli: Cli,
-    config: &Config,
+    action: Action,
+    json: bool,
     now: &Zoned,
     backends: &Backends,
     style: Style,
     host: &mut dyn Host,
 ) -> Result<String> {
-    let json = cli.json;
-    match cli.command.into_action(now, config).into_diagnostic()? {
+    match action {
         Action::Doctor => Err(miette::miette!(
             "doctor must be run through the system diagnostic entry point"
         )),
@@ -66,6 +65,7 @@ mod tests {
         ReminderChange, ReminderSnapshot, Reminders,
     };
     use crate::infra::host::Scripted;
+    use crate::{Cli, Config};
 
     struct Fake;
 
@@ -315,9 +315,15 @@ mod tests {
     fn nib(args: &[&str]) -> String {
         let backends = fake_backends(&Built::default());
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        let json = cli.json;
+        let action = cli
+            .command
+            .into_action(&now(), &Config::default())
+            .unwrap()
+            .unwrap();
         run(
-            cli,
-            &Config::default(),
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
@@ -333,9 +339,15 @@ mod tests {
             move || Box::new(AgendaCalendar(events)),
         );
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        let json = cli.json;
+        let action = cli
+            .command
+            .into_action(&now(), &Config::default())
+            .unwrap()
+            .unwrap();
         run(
-            cli,
-            &Config::default(),
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
@@ -366,9 +378,15 @@ mod tests {
         let built = Built::default();
         let backends = fake_backends(&built);
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        let json = cli.json;
+        let action = cli
+            .command
+            .into_action(&now(), &Config::default())
+            .unwrap()
+            .unwrap();
         run(
-            cli,
-            &Config::default(),
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
@@ -712,9 +730,11 @@ mod tests {
             ..Config::default()
         };
         let cli = Cli::try_parse_from(["nib", "t", "Review", "PR"]).unwrap();
+        let json = cli.json;
+        let action = cli.command.into_action(&now(), &config).unwrap().unwrap();
         run(
-            cli,
-            &config,
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
@@ -758,9 +778,11 @@ mod tests {
             ..Config::default()
         };
         let cli = Cli::try_parse_from(["nib", "cal"]).unwrap();
+        let json = cli.json;
+        let action = cli.command.into_action(&now(), &config).unwrap().unwrap();
         run(
-            cli,
-            &config,
+            action,
+            json,
             &now(),
             &backends,
             Style::default(),
