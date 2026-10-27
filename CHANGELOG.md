@@ -1,3 +1,32 @@
+## [0.3.0] - 2026-10-27
+
+### 🚀 Features
+
+- Add `nib log` and `nib undo` for task edits
+- Add `nib doctor` to check access and configuration
+- Color tables and JSON in the terminal
+
+### 🐛 Bug Fixes
+
+- Make `nib undo` safe to retry and keep demo mode off disk
+- Recover safely from interrupted or partly recorded undos
+- Require an explicit answer to resolve a pending undo
+- Keep unrelated backslashes and `2026-plan` in quick-add titles
+- Reject ambiguous Notes folders and batch note listing
+
+### 📚 Documentation
+
+- Render the demo GIF in Rosé Pine Dawn with TX-02
+- Suggest a starter config in the README
+- Show colored output in the demo GIF
+
+### ⚙️ Miscellaneous Tasks
+
+- Report the required check from the release workflow
+
+### 💼 Other
+
+- Upgrade Rust to 1.99.1
 ## [0.2.0] - 2026-10-27
 
 ### 🚀 Features
@@ -23,6 +52,7 @@
 
 - Cut releases with one workflow_dispatch command
 - Release through a pull request with two commands
+- *(release)* V0.2.0
 
 ### 💼 Other
 
