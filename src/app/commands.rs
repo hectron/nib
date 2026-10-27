@@ -46,12 +46,15 @@ pub fn run(
         Action::ListEvents(query) => {
             output::list(&backends.calendar.events(query)?, json, now.date(), style)
         }
-        Action::Log => output::journal(
-            &journal::summaries(now.timestamp(), host)?,
-            json,
-            now.date(),
-            style,
-        ),
+        Action::Log => {
+            let _lock = host.lock_journal().into_diagnostic()?;
+            output::journal(
+                &journal::summaries(now.timestamp(), host)?,
+                json,
+                now.date(),
+                style,
+            )
+        }
         Action::Undo {
             entry: _,
             resolve: Some(id),
@@ -431,7 +434,8 @@ mod tests {
             "alarms_present": false,
             "recurrence_present": false,
             "url": null,
-            "partial": false
+            "partial": false,
+            "unrecorded": true
         });
         let journal_change = if change == "deleted" {
             serde_json::json!({ "change": change, "backup": reminder })
@@ -449,6 +453,10 @@ mod tests {
     }
 
     fn journal_output(args: &[&str]) -> String {
+        journal_run(args).0
+    }
+
+    fn journal_run(args: &[&str]) -> (String, Scripted) {
         let backends = fake_backends(&Built::default());
         let older = journal_entry("2026-10-25T14:00:00Z", "task_edit", None, "added");
         let newer = journal_entry(
@@ -461,7 +469,7 @@ mod tests {
             .journal("older-journal", &older)
             .journal("newer-journal", &newer);
         let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
-        run(
+        let output = run(
             cli,
             &Config::default(),
             &now(),
@@ -469,16 +477,23 @@ mod tests {
             Style::default(),
             &mut host,
         )
-        .unwrap()
+        .unwrap();
+        (output, host)
     }
 
     #[test]
     fn log_lists_newest_entries_with_counts() {
         assert_snapshot!(journal_output(&["log"]), @r"
-        ENTRY          WRITTEN               ACTION     STATUS   UNDO OF        UNDONE  ADDED  UPDATED  COMPLETED  DELETED
-        newer-journal  2026-10-26T14:00:00Z  undo       applied  older-journal          0      0        0          1
-        older-journal  2026-10-25T14:00:00Z  task_edit  applied                 yes     1      0        0          0
+        ENTRY          WRITTEN               ACTION     STATUS   UNDO OF        UNDONE  ADDED  UPDATED  COMPLETED  DELETED  UNRECORDED
+        newer-journal  2026-10-26T14:00:00Z  undo       applied  older-journal          0      0        0          1        0
+        older-journal  2026-10-25T14:00:00Z  task_edit  applied                 yes     1      0        0          0        1
         ");
+    }
+
+    #[test]
+    fn log_takes_the_journal_lock() {
+        let (_, host) = journal_run(&["log"]);
+        assert_eq!(host.journal_lock_count, 1);
     }
 
     #[test]
@@ -496,7 +511,8 @@ mod tests {
             "added": 0,
             "updated": 0,
             "completed": 0,
-            "deleted": 1
+            "deleted": 1,
+            "unrecorded": 0
           },
           {
             "id": "older-journal",
@@ -509,7 +525,8 @@ mod tests {
             "added": 1,
             "updated": 0,
             "completed": 0,
-            "deleted": 0
+            "deleted": 0,
+            "unrecorded": 1
           }
         ]
         "#);
@@ -555,6 +572,23 @@ mod tests {
           "id": "20261026T090100-journal-efgh",
           "resolved": true,
           "applied": true
+        }
+        "#);
+    }
+
+    #[test]
+    fn cancelled_undo_resolution_json_has_stable_fields() {
+        assert_snapshot!(output::undo_resolution(
+            "20261026T090100-journal-efgh",
+            None,
+            true,
+            Style::default(),
+        )
+        .unwrap(), @r#"
+        {
+          "id": "20261026T090100-journal-efgh",
+          "resolved": false,
+          "applied": false
         }
         "#);
     }

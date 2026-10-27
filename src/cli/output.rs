@@ -558,6 +558,7 @@ struct JournalJson<'a> {
     updated: usize,
     completed: usize,
     deleted: usize,
+    unrecorded: usize,
 }
 
 #[derive(Serialize)]
@@ -592,6 +593,7 @@ impl Serialize for JournalSummary {
             updated: self.counts.updated,
             completed: self.counts.completed,
             deleted: self.counts.deleted,
+            unrecorded: self.unrecorded,
         }
         .serialize(serializer)
     }
@@ -609,6 +611,7 @@ impl Tabular for JournalSummary {
         "UPDATED",
         "COMPLETED",
         "DELETED",
+        "UNRECORDED",
     ];
     const TITLE_COLUMN: usize = 0;
 
@@ -628,6 +631,7 @@ impl Tabular for JournalSummary {
             self.counts.updated.to_string(),
             self.counts.completed.to_string(),
             self.counts.deleted.to_string(),
+            self.unrecorded.to_string(),
         ]
     }
 

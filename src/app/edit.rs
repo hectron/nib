@@ -69,6 +69,7 @@ pub fn tasks(
                 file.path().display()
             ));
         }
+        let _lock = host.lock_journal().into_diagnostic()?;
         if let Some(contents) = backup_changes(&plan.changes)? {
             let name = format!("{}-tasks.json", now.strftime("%Y%m%dT%H%M%S"));
             let saved = host.save_backup(&name, &contents).into_diagnostic()?;
@@ -239,6 +240,7 @@ fn count(n: usize, noun: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::cell::RefCell;
     use std::fs;
     use std::rc::Rc;
@@ -260,6 +262,7 @@ mod tests {
         applied: Applied,
         conflict: bool,
         unrecorded: bool,
+        journal_locks: Rc<Cell<usize>>,
     }
 
     impl Reminders for Recorder {
@@ -276,6 +279,10 @@ mod tests {
         }
 
         fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
+            assert!(
+                self.journal_locks.get() > 0,
+                "apply requires the journal lock"
+            );
             if self.conflict {
                 return Err(BackendError::Conflict {
                     titles: vec!["\"Oat milk\"".into()],
@@ -401,11 +408,13 @@ mod tests {
         host: &mut Scripted,
     ) -> (Result<String>, Vec<ReminderChange>) {
         let applied = Applied::default();
+        let journal_locks = host.journal_lock_state();
         let recorder = Recorder {
             snapshot,
             applied: applied.clone(),
             conflict,
             unrecorded,
+            journal_locks,
         };
         let backends = Backends::new(
             || -> Box<dyn Notes> { unreachable!() },
@@ -458,6 +467,8 @@ mod tests {
         assert_eq!(applied.len(), 1);
         assert_eq!(host.journals.len(), 1);
         assert!(host.journals[0].1.contains("\"unrecorded\": true"));
+        assert!(host.said.iter().any(|line| line
+            == "warning: nib couldn't re-read 1 reminder after saving; undo of this entry is limited"));
         assert!(!host.said.iter().any(|line| line.contains("still in")));
     }
 

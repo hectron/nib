@@ -219,6 +219,21 @@ fn replace_journal_in(dir: &Path, id: &str, contents: &str) -> io::Result<Publis
     }
 }
 
+fn remove_journal_in(
+    dir: &Path,
+    id: &str,
+    sync_dir: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<Option<String>> {
+    let path = dir.join(format!("{id}.json"));
+    std::fs::remove_file(&path)?;
+    Ok(sync_dir(dir).err().map(|error| {
+        format!(
+            "journal {} was removed, but its folder couldn't be synced: {error}",
+            path.display()
+        )
+    }))
+}
+
 fn backups_dir() -> io::Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME isn't set"))?;
     Ok(PathBuf::from(home).join("Library/Application Support/nib/backups"))
@@ -354,8 +369,10 @@ impl Host for System {
 
     fn remove_journal(&mut self, id: &str) -> io::Result<()> {
         let dir = backups_dir()?;
-        std::fs::remove_file(dir.join(format!("{id}.json")))?;
-        File::open(dir)?.sync_all()
+        if let Some(warning) = remove_journal_in(&dir, id, |path| File::open(path)?.sync_all())? {
+            self.say(&format!("warning: {warning}"));
+        }
+        Ok(())
     }
 
     fn journal_files(&mut self, now: Timestamp) -> io::Result<Vec<JournalFile>> {
@@ -375,7 +392,7 @@ impl Host for System {
         match file.try_lock() {
             Ok(()) => {}
             Err(std::fs::TryLockError::WouldBlock) => {
-                self.say("Waiting for another nib undo to finish…");
+                self.say("Waiting for another nib command to finish…");
                 file.lock()?;
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error),
@@ -480,6 +497,24 @@ pub struct Scripted {
     sequence: u128,
     fail_replace_once: bool,
     fail_remove_once: bool,
+    journal_replacement_on_answer: Option<(String, String)>,
+    active_journal_locks: std::rc::Rc<std::cell::Cell<usize>>,
+    pub journal_lock_count: usize,
+}
+
+#[cfg(test)]
+struct ScriptedJournalLock {
+    active: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+#[cfg(test)]
+impl JournalLock for ScriptedJournalLock {}
+
+#[cfg(test)]
+impl Drop for ScriptedJournalLock {
+    fn drop(&mut self) {
+        self.active.set(self.active.get() - 1);
+    }
 }
 
 #[cfg(test)]
@@ -495,6 +530,9 @@ impl Scripted {
             sequence: 0,
             fail_replace_once: false,
             fail_remove_once: false,
+            journal_replacement_on_answer: None,
+            active_journal_locks: std::rc::Rc::new(std::cell::Cell::new(0)),
+            journal_lock_count: 0,
         }
     }
 
@@ -517,6 +555,15 @@ impl Scripted {
         self.unreadable_journals
             .push((format!("{id}.json"), error.into()));
         self
+    }
+
+    pub fn replace_journal_on_answer(mut self, id: &str, contents: &str) -> Self {
+        self.journal_replacement_on_answer = Some((id.into(), contents.into()));
+        self
+    }
+
+    pub fn journal_lock_state(&self) -> std::rc::Rc<std::cell::Cell<usize>> {
+        self.active_journal_locks.clone()
     }
 
     pub fn fail_next_journal_replace(&mut self) {
@@ -542,10 +589,26 @@ impl Host for Scripted {
 
     fn ask(&mut self, prompt: &str) -> io::Result<String> {
         self.said.push(prompt.into());
-        Ok(self
+        let answer = self
             .answers
             .pop_front()
-            .expect("nib asked a question unexpectedly"))
+            .expect("nib asked a question unexpectedly");
+        if let Some((id, contents)) = self.journal_replacement_on_answer.take() {
+            if self.active_journal_locks.get() > 0 {
+                return Err(io::Error::other(
+                    "journal lock was held while waiting for an answer",
+                ));
+            }
+            let entry = self
+                .journals
+                .iter_mut()
+                .find(|(name, _)| name.strip_suffix(".json").unwrap_or(name) == id)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "journal entry not found")
+                })?;
+            entry.1 = contents;
+        }
+        Ok(answer)
     }
 
     fn say(&mut self, message: &str) {
@@ -625,7 +688,12 @@ impl Host for Scripted {
     }
 
     fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>> {
-        Ok(Box::new(()))
+        self.journal_lock_count += 1;
+        self.active_journal_locks
+            .set(self.active_journal_locks.get() + 1);
+        Ok(Box::new(ScriptedJournalLock {
+            active: self.active_journal_locks.clone(),
+        }))
     }
 }
 
@@ -735,5 +803,22 @@ mod tests {
         journal_files_in(&dir.0, now).unwrap();
 
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn removing_a_journal_warns_but_succeeds_when_the_directory_sync_fails() {
+        let dir = TestDir::new();
+        let path = dir.0.join("entry.json");
+        secure_new(&path).unwrap();
+
+        let warning = remove_journal_in(&dir.0, "entry", |_| {
+            Err(io::Error::other("injected directory sync failure"))
+        })
+        .unwrap()
+        .unwrap();
+
+        assert!(!path.exists());
+        assert!(warning.contains("was removed"));
+        assert!(warning.contains("injected directory sync failure"));
     }
 }
