@@ -1,3 +1,18 @@
+## [0.4.1] - 2026-10-28
+
+### 🐛 Bug Fixes
+
+- Keep config comments on unset, make cleanup best effort, report stale locks
+- Keep comments across end-of-file and kept-section config unsets
+- Release the journal lock during prompts and surface real re-check errors
+- Compare full entry contents when resolving a pending undo
+- Pin the earlier offset for due times in a daylight saving gap
+
+### 🧪 Testing
+
+- Snapshot mixed doctor locks and pin set-after-unset comment order
+- Tighten the pending undo resolve tests
+- Cover fall-back times and gap display for unnamed zones
 ## [0.4.0] - 2026-10-27
 
 ### 🚀 Features
@@ -9,6 +24,10 @@
 ### 🐛 Bug Fixes
 
 - Journal edits under the lock and refuse unrecorded undos clearly
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* V0.4.0
 ## [0.3.0] - 2026-10-27
 
 ### 🚀 Features
