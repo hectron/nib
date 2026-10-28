@@ -598,7 +598,13 @@ pub fn recheck_undo(plan: &UndoPlan, now: Timestamp, host: &mut dyn Host) -> Res
     }
 }
 
-pub fn pending_undo(id: &str, now: Timestamp, host: &mut dyn Host) -> Result<Vec<String>> {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PendingUndo {
+    pub lines: Vec<String>,
+    contents: String,
+}
+
+pub fn pending_undo(id: &str, now: Timestamp, host: &mut dyn Host) -> Result<PendingUndo> {
     let loaded = load(now, host)?
         .into_iter()
         .find(|loaded| loaded.id == id)
@@ -606,12 +612,15 @@ pub fn pending_undo(id: &str, now: Timestamp, host: &mut dyn Host) -> Result<Vec
     if loaded.entry.status != Status::Pending {
         return Err(miette!("journal entry {id:?} is not pending"));
     }
-    Ok(loaded
-        .entry
-        .planned_changes
-        .iter()
-        .map(expected_state)
-        .collect())
+    Ok(PendingUndo {
+        lines: loaded
+            .entry
+            .planned_changes
+            .iter()
+            .map(expected_state)
+            .collect(),
+        contents: loaded.contents,
+    })
 }
 
 pub fn resolve_pending(id: &str, applied: bool, now: Timestamp, host: &mut dyn Host) -> Result<()> {
@@ -1418,11 +1427,21 @@ mod tests {
         .unwrap();
         let contents = source.journals[0].1.clone();
         let mut host = Scripted::new().journal("valid-journal", &contents);
-        let _held = host.lock_journal().unwrap();
+        let held = host.lock_journal().unwrap();
 
         let entries = log(now().timestamp(), &mut host).unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(host.journal_lock_count, 1);
+        assert_eq!(host.journal_listings_without_cleanup, 1);
+        assert_eq!(host.journal_listings_with_cleanup, 0);
+
+        drop(held);
+        let entries = log(now().timestamp(), &mut host).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(host.journal_lock_count, 2);
+        assert_eq!(host.journal_listings_without_cleanup, 1);
+        assert_eq!(host.journal_listings_with_cleanup, 1);
     }
 }

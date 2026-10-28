@@ -713,8 +713,11 @@ pub struct Scripted {
     fail_replace_once: bool,
     fail_remove_once: bool,
     journal_replacement_on_answer: Option<(String, String)>,
+    journal_removal_on_answer: Option<String>,
     active_journal_locks: std::rc::Rc<std::cell::Cell<usize>>,
     pub journal_lock_count: usize,
+    pub journal_listings_with_cleanup: usize,
+    pub journal_listings_without_cleanup: usize,
 }
 
 #[cfg(test)]
@@ -746,8 +749,11 @@ impl Scripted {
             fail_replace_once: false,
             fail_remove_once: false,
             journal_replacement_on_answer: None,
+            journal_removal_on_answer: None,
             active_journal_locks: std::rc::Rc::new(std::cell::Cell::new(0)),
             journal_lock_count: 0,
+            journal_listings_with_cleanup: 0,
+            journal_listings_without_cleanup: 0,
         }
     }
 
@@ -777,6 +783,11 @@ impl Scripted {
         self
     }
 
+    pub fn remove_journal_on_answer(mut self, id: &str) -> Self {
+        self.journal_removal_on_answer = Some(id.into());
+        self
+    }
+
     pub fn journal_lock_state(&self) -> std::rc::Rc<std::cell::Cell<usize>> {
         self.active_journal_locks.clone()
     }
@@ -787,6 +798,32 @@ impl Scripted {
 
     pub fn fail_next_journal_remove(&mut self) {
         self.fail_remove_once = true;
+    }
+
+    fn listed_journals(&self) -> Vec<JournalFile> {
+        let readable = self
+            .journals
+            .iter()
+            .enumerate()
+            .map(|(index, (name, contents))| JournalFile {
+                id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
+                path: PathBuf::from("/backups").join(name),
+                written: u128::try_from(index).unwrap_or_default(),
+                written_at: None,
+                contents: Ok(contents.clone()),
+            });
+        let unreadable =
+            self.unreadable_journals
+                .iter()
+                .enumerate()
+                .map(|(index, (name, error))| JournalFile {
+                    id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
+                    path: PathBuf::from("/backups").join(name),
+                    written: u128::try_from(self.journals.len() + index).unwrap_or_default(),
+                    written_at: None,
+                    contents: Err(error.clone()),
+                });
+        readable.chain(unreadable).collect()
     }
 }
 
@@ -822,6 +859,16 @@ impl Host for Scripted {
                     io::Error::new(io::ErrorKind::NotFound, "journal entry not found")
                 })?;
             entry.1 = contents;
+        }
+        if let Some(id) = self.journal_removal_on_answer.take() {
+            let index = self
+                .journals
+                .iter()
+                .position(|(name, _)| name.strip_suffix(".json").unwrap_or(name) == id)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "journal entry not found")
+                })?;
+            self.journals.remove(index);
         }
         Ok(answer)
     }
@@ -877,33 +924,13 @@ impl Host for Scripted {
     }
 
     fn journal_files(&mut self, _now: Timestamp) -> io::Result<Vec<JournalFile>> {
-        self.journal_files_without_cleanup()
+        self.journal_listings_with_cleanup += 1;
+        Ok(self.listed_journals())
     }
 
     fn journal_files_without_cleanup(&mut self) -> io::Result<Vec<JournalFile>> {
-        let readable = self
-            .journals
-            .iter()
-            .enumerate()
-            .map(|(index, (name, contents))| JournalFile {
-                id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
-                path: PathBuf::from("/backups").join(name),
-                written: u128::try_from(index).unwrap_or_default(),
-                written_at: None,
-                contents: Ok(contents.clone()),
-            });
-        let unreadable =
-            self.unreadable_journals
-                .iter()
-                .enumerate()
-                .map(|(index, (name, error))| JournalFile {
-                    id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
-                    path: PathBuf::from("/backups").join(name),
-                    written: u128::try_from(self.journals.len() + index).unwrap_or_default(),
-                    written_at: None,
-                    contents: Err(error.clone()),
-                });
-        Ok(readable.chain(unreadable).collect())
+        self.journal_listings_without_cleanup += 1;
+        Ok(self.listed_journals())
     }
 
     fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>> {

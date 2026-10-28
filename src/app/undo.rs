@@ -83,7 +83,7 @@ pub fn resolve(id: &str, now: &Zoned, host: &mut dyn Host) -> Result<Resolution>
     let mut lines = vec![format!(
         "Pending undo {id} was interrupted. If it was applied, Reminders shows:"
     )];
-    lines.extend(expected.iter().map(|line| format!("  - {line}")));
+    lines.extend(expected.lines.iter().map(|line| format!("  - {line}")));
     host.say(&clean_lines(&lines.join("\n")));
     let answer = host
         .ask("Type `applied` if Reminders matches, `absent` if none of it happened, or anything else to cancel: ")
@@ -506,6 +506,68 @@ mod tests {
         assert!(error.contains("changed while nib waited for the answer"));
         assert!(host.journals[1].1.contains("\"status\": \"pending\""));
         assert_eq!(host.journal_lock_count, 4);
+    }
+
+    #[test]
+    fn resolve_rejects_a_change_outside_the_summary_lines() {
+        let (backends, _, mut host) = setup(false, false);
+        host.fail_next_journal_replace();
+        run(None, &now(), &backends, &mut host).unwrap_err();
+        let pending_id = host.journals[1].0.strip_suffix(".json").unwrap().to_owned();
+        let mut entry: serde_json::Value = serde_json::from_str(&host.journals[1].1).unwrap();
+        entry["planned_changes"][0]["id"] = serde_json::json!("reminder-2");
+        let changed = serde_json::to_string_pretty(&entry).unwrap();
+        host = host
+            .replace_journal_on_answer(&pending_id, &changed)
+            .answer("applied");
+
+        let error = resolve(&pending_id, &now(), &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("changed while nib waited for the answer"));
+        assert_eq!(host.journals[1].1, changed);
+    }
+
+    #[test]
+    fn resolve_reports_an_entry_resolved_while_waiting_for_the_answer() {
+        let (backends, _, mut host) = setup(false, false);
+        host.fail_next_journal_replace();
+        run(None, &now(), &backends, &mut host).unwrap_err();
+        let pending_id = host.journals[1].0.strip_suffix(".json").unwrap().to_owned();
+        let resolved = host.journals[1]
+            .1
+            .replace("\"status\": \"pending\"", "\"status\": \"applied\"");
+        host = host
+            .replace_journal_on_answer(&pending_id, &resolved)
+            .answer("absent");
+
+        let error = resolve(&pending_id, &now(), &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("is not pending"));
+        assert!(!error.contains("changed while"));
+        assert_eq!(host.journals.len(), 2);
+        assert_eq!(host.journals[1].1, resolved);
+    }
+
+    #[test]
+    fn resolve_reports_an_entry_removed_while_waiting_for_the_answer() {
+        let (backends, _, mut host) = setup(false, false);
+        host.fail_next_journal_replace();
+        run(None, &now(), &backends, &mut host).unwrap_err();
+        let pending_id = host.journals[1].0.strip_suffix(".json").unwrap().to_owned();
+        let original = host.journals[0].clone();
+        host = host.remove_journal_on_answer(&pending_id).answer("applied");
+
+        let error = resolve(&pending_id, &now(), &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not found"));
+        assert!(!error.contains("changed while"));
+        assert_eq!(host.journals, vec![original]);
     }
 
     #[test]
