@@ -290,4 +290,14 @@ mod tests {
             "[]"
         );
     }
+
+    #[test]
+    fn lock_age_is_elapsed_time_and_clamps_future_times_to_zero() {
+        let now = Timestamp::from_second(1_800_000_000).unwrap();
+        let past = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000 - 90);
+        let future = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000 + 30);
+
+        assert_eq!(lock_age(now, past), Duration::from_secs(90));
+        assert_eq!(lock_age(now, future), Duration::ZERO);
+    }
 }

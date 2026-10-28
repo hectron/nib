@@ -1732,7 +1732,7 @@ mod tests {
         assert_eq!(lock.status, crate::app::doctor::CheckStatus::Fail);
         assert_eq!(
             lock.message,
-            "stale configuration lock: /Users/me/project/nib.toml.lock"
+            "stale configuration lock: /Users/me/project/nib.toml.lock; held by another nib config command: /Users/me/project/.nib.local.toml.lock"
         );
         assert_eq!(
             lock.fix.as_deref(),

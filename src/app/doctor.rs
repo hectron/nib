@@ -79,17 +79,11 @@ fn config_lock(locks: &[ConfigLockFile]) -> Check {
             fix: None,
         };
     }
-    let stale = locks
+    let (stale, held): (Vec<&ConfigLockFile>, Vec<&ConfigLockFile>) = locks
         .iter()
-        .filter(|lock| lock.age > STALE_CONFIG_LOCK_AFTER)
-        .map(|lock| lock.path.display().to_string())
-        .collect::<Vec<_>>();
+        .partition(|lock| lock.age > STALE_CONFIG_LOCK_AFTER);
+    let held = lock_paths(&held);
     if stale.is_empty() {
-        let held = locks
-            .iter()
-            .map(|lock| lock.path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
         Check {
             id: "config_lock".into(),
             status: CheckStatus::Warning,
@@ -97,16 +91,29 @@ fn config_lock(locks: &[ConfigLockFile]) -> Check {
             fix: Some("Wait for that command to finish, then run `nib doctor` again.".into()),
         }
     } else {
-        let stale = stale.join(", ");
+        let stale = lock_paths(&stale);
+        let message = if held.is_empty() {
+            format!("stale configuration lock: {stale}")
+        } else {
+            format!("stale configuration lock: {stale}; held by another nib config command: {held}")
+        };
         Check {
             id: "config_lock".into(),
             status: CheckStatus::Fail,
-            message: format!("stale configuration lock: {stale}"),
+            message,
             fix: Some(format!(
                 "Remove {stale} if no nib config command is running."
             )),
         }
     }
+}
+
+fn lock_paths(locks: &[&ConfigLockFile]) -> String {
+    locks
+        .iter()
+        .map(|lock| lock.path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn macos(version: Result<String, String>) -> Check {

@@ -644,18 +644,22 @@ pub(crate) fn unset(path: &Path, key: ConfigKey) -> Result<ConfigEdit<bool>, Con
         }
         (table.is_empty(), key_comments)
     };
-    if empty
-        && !editable
+    if empty {
+        let section_comments = if editable
             .document
             .get(section)
             .is_some_and(item_has_comments)
-    {
-        let section_comments = editable
-            .document
-            .key(section)
-            .map(|key| leading_comments(key.leaf_decor()))
-            .unwrap_or_default();
-        editable.document.remove(section);
+        {
+            String::new()
+        } else {
+            let comments = editable
+                .document
+                .key(section)
+                .map(|key| leading_comments(key.leaf_decor()))
+                .unwrap_or_default();
+            editable.document.remove(section);
+            comments
+        };
         let comments = format!("{section_comments}{key_comments}");
         place_comments(&mut editable.document, next.as_deref(), &comments);
     }
@@ -786,7 +790,12 @@ fn place_comments(document: &mut DocumentMut, next: Option<&str>, comments: &str
         }
     }
     let trailing = document.trailing().as_str().unwrap_or_default().to_owned();
-    document.set_trailing(format!("{trailing}{comments}"));
+    let separator = if trailing.is_empty() || trailing.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    document.set_trailing(format!("{trailing}{separator}{comments}"));
 }
 
 fn prepend_prefix(decor: &mut Decor, comments: &str) {
@@ -1527,6 +1536,66 @@ mod tests {
         assert!(unset(&dotted, ConfigKey::TaskList).unwrap().value);
 
         assert_eq!(fs::read_to_string(dotted).unwrap(), "# Inbox\n");
+    }
+
+    #[test]
+    fn unset_separates_moved_comments_from_an_eof_comment_without_newline() {
+        let temp = TempDir::new();
+        let path = temp.join("eof.toml");
+        write(
+            &path,
+            "[task]\nlist = \"Inbox\"\n[note]\n# folder doc\nfolder = \"Notes\"\n# footer",
+        );
+
+        assert!(unset(&path, ConfigKey::NoteFolder).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "[task]\nlist = \"Inbox\"\n# footer\n# folder doc\n"
+        );
+    }
+
+    #[test]
+    fn unset_keeps_removed_key_comments_when_the_section_stays() {
+        let temp = TempDir::new();
+        let path = temp.join("section-comment.toml");
+        write(&path, "# Header\n[note]\n# folder doc\nfolder = \"x\"\n");
+
+        assert!(unset(&path, ConfigKey::NoteFolder).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# Header\n[note]\n# folder doc\n"
+        );
+
+        write(
+            &path,
+            "# Header\n[note]\n# folder doc\nfolder = \"x\"\n\n[task]\nlist = \"Inbox\"\n",
+        );
+
+        assert!(unset(&path, ConfigKey::NoteFolder).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "# Header\n[note]\n# folder doc\n\n[task]\nlist = \"Inbox\"\n"
+        );
+    }
+
+    #[test]
+    fn unset_moves_key_comments_from_a_plain_section_to_the_next_item() {
+        let temp = TempDir::new();
+        let path = temp.join("key-comment.toml");
+        write(
+            &path,
+            "[task]\n# doc\nlist = \"Inbox\"\n\n[note]\nfolder = \"Notes\"\n",
+        );
+
+        assert!(unset(&path, ConfigKey::TaskList).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "# doc\n\n[note]\nfolder = \"Notes\"\n"
+        );
     }
 
     #[test]
