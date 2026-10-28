@@ -801,4 +801,38 @@ mod tests {
             "GMT-0600"
         );
     }
+
+    #[test]
+    fn unnamed_zone_repeated_times_use_the_offset_before_the_transition() {
+        let zone = TimeZone::posix("CST6CDT,M3.2.0,M11.1.0").unwrap();
+
+        assert_eq!(
+            local_time_zone_name_at(&zone, date(2027, 11, 7), time(1, 30, 0, 0)),
+            "GMT-0500"
+        );
+    }
+
+    #[test]
+    fn time_zone_is_local_at_matches_gap_and_repeated_times() {
+        let zone = TimeZone::posix("CST6CDT,M3.2.0,M11.1.0").unwrap();
+
+        assert!(time_zone_is_local_at(
+            "GMT-0600",
+            &zone,
+            date(2027, 3, 14),
+            time(2, 30, 0, 0)
+        ));
+        assert!(time_zone_is_local_at(
+            "GMT-0500",
+            &zone,
+            date(2027, 11, 7),
+            time(1, 30, 0, 0)
+        ));
+        assert!(!time_zone_is_local_at(
+            "GMT-0600",
+            &zone,
+            date(2027, 11, 7),
+            time(1, 30, 0, 0)
+        ));
+    }
 }
