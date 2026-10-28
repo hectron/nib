@@ -511,9 +511,8 @@ fn due_marker(reminder: &StoredReminder, local_zone: Option<&TimeZone>) -> Optio
             .and_then(|parts| parts.time_zone.clone())
             .filter(|zone| {
                 is_single_token(zone)
-                    && !local_zone.is_some_and(|local| {
-                        time_zone_is_local_at(zone, local, date, time).is_ok_and(|local| local)
-                    })
+                    && !local_zone
+                        .is_some_and(|local| time_zone_is_local_at(zone, local, date, time))
             })
     });
     Some(DueMarker {
@@ -912,10 +911,7 @@ fn plan_due(
         (Some(_), None) if before_time.is_some() && !before_zone_visible => {
             before_zone.map(ToOwned::to_owned)
         }
-        (Some(time), None) => Some(
-            local_time_zone_name_at(local_zone, after.date, time)
-                .map_err(|error| error.to_string())?,
-        ),
+        (Some(time), None) => Some(local_time_zone_name_at(local_zone, after.date, time)),
     };
     let exact_after = DueMarker {
         date: after.date,
@@ -973,9 +969,7 @@ fn new_due_time_zone(
             date,
             time: Some(time),
             ..
-        }) => local_time_zone_name_at(local_zone, *date, *time)
-            .map(Some)
-            .map_err(|error| error.to_string()),
+        }) => Ok(Some(local_time_zone_name_at(local_zone, *date, *time))),
         _ => Ok(None),
     }
 }
@@ -1104,6 +1098,7 @@ mod tests {
 
     use super::*;
     use crate::domain::ReminderList;
+    use crate::test_support::named_fixed_zone;
 
     const REMINDERS: &str = "AAAA1111-0000-0000-0000-000000000001";
     const GROCERIES: &str = "BBBB2222-0000-0000-0000-000000000002";
@@ -1114,7 +1109,7 @@ mod tests {
     }
 
     fn named_chicago_zone() -> TimeZone {
-        TimeZone::get("America/Chicago").unwrap()
+        named_fixed_zone("America/Chicago", -6 * 60 * 60, *b"CST\0")
     }
 
     fn list(id: &str, name: &str) -> ReminderList {

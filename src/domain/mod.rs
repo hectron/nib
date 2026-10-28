@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use jiff::civil::{Date, Time};
-use jiff::tz::TimeZone;
+use jiff::tz::{AmbiguousOffset, TimeZone};
 use jiff::{Timestamp, Zoned};
 use miette::Diagnostic;
 use thiserror::Error;
@@ -644,39 +644,33 @@ pub trait Reminders {
     }
 }
 
-pub fn local_time_zone_name_at(
-    time_zone: &TimeZone,
-    date: Date,
-    time: Time,
-) -> Result<String, jiff::Error> {
+pub fn local_time_zone_name_at(time_zone: &TimeZone, date: Date, time: Time) -> String {
     if let Some(name) = time_zone.iana_name() {
-        return Ok(name.to_owned());
+        return name.to_owned();
     }
     fixed_offset_name_at(time_zone, date, time)
 }
 
-pub fn time_zone_is_local_at(
-    name: &str,
-    time_zone: &TimeZone,
-    date: Date,
-    time: Time,
-) -> Result<bool, jiff::Error> {
+pub fn time_zone_is_local_at(name: &str, time_zone: &TimeZone, date: Date, time: Time) -> bool {
     if time_zone.iana_name() == Some(name) {
-        return Ok(true);
+        return true;
     }
-    fixed_offset_name_at(time_zone, date, time).map(|offset| name == offset)
+    name == fixed_offset_name_at(time_zone, date, time)
 }
 
-fn fixed_offset_name_at(
-    time_zone: &TimeZone,
-    date: Date,
-    time: Time,
-) -> Result<String, jiff::Error> {
-    let due = date.to_datetime(time).to_zoned(time_zone.clone())?;
-    let seconds = due.offset().seconds();
+fn fixed_offset_name_at(time_zone: &TimeZone, date: Date, time: Time) -> String {
+    let offset = match time_zone
+        .to_ambiguous_timestamp(date.to_datetime(time))
+        .offset()
+    {
+        AmbiguousOffset::Unambiguous { offset }
+        | AmbiguousOffset::Gap { before: offset, .. }
+        | AmbiguousOffset::Fold { before: offset, .. } => offset,
+    };
+    let seconds = offset.seconds();
     let sign = if seconds < 0 { '-' } else { '+' };
     let minutes = seconds.unsigned_abs() / 60;
-    Ok(format!("GMT{sign}{:02}{:02}", minutes / 60, minutes % 60))
+    format!("GMT{sign}{:02}{:02}", minutes / 60, minutes % 60)
 }
 
 pub trait Calendar {
@@ -730,6 +724,7 @@ impl Backends {
 #[cfg(test)]
 mod tests {
     use insta::assert_snapshot;
+    use jiff::civil::{date, time};
 
     use super::*;
 
@@ -795,5 +790,15 @@ mod tests {
         assert_eq!(terminal_name(Some("WezTerm")), "WezTerm");
         assert_eq!(terminal_name(Some("")), "Your terminal app");
         assert_eq!(terminal_name(None), "Your terminal app");
+    }
+
+    #[test]
+    fn unnamed_zone_gaps_use_the_offset_before_the_transition() {
+        let zone = TimeZone::posix("CST6CDT,M3.2.0,M11.1.0").unwrap();
+
+        assert_eq!(
+            local_time_zone_name_at(&zone, date(2027, 3, 14), time(2, 30, 0, 0)),
+            "GMT-0600"
+        );
     }
 }

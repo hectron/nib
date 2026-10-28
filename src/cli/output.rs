@@ -849,9 +849,8 @@ fn format_reminder_due(reminder: &Reminder, now: Option<&Zoned>) -> String {
     };
     let mut due = format!("{date} {}", time.strftime("%H:%M"));
     if let Some(zone) = reminder.due_time_zone.as_deref() {
-        let is_local = now.is_some_and(|now| {
-            time_zone_is_local_at(zone, now.time_zone(), date, time).is_ok_and(|local| local)
-        });
+        let is_local =
+            now.is_some_and(|now| time_zone_is_local_at(zone, now.time_zone(), date, time));
         if !is_local {
             due.push(' ');
             due.push_str(zone);
