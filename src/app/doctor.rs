@@ -1,8 +1,10 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::domain::{AutomationStatus, DoctorProbe, EditorSetting, PermissionStatus};
 
 const MINIMUM_MACOS_MAJOR: u64 = 26;
+const STALE_CONFIG_LOCK_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
@@ -35,10 +37,17 @@ pub struct ConfigFileCheck {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigLockFile {
+    pub path: PathBuf,
+    pub age: Duration,
+}
+
 pub fn checks(
     probe: &dyn DoctorProbe,
     config_files: &[ConfigFileCheck],
     config_error: Option<&str>,
+    config_locks: &[ConfigLockFile],
 ) -> Vec<Check> {
     let terminal = probe.terminal();
     let mut checks = vec![macos(probe.macos_version()), terminal_check(&terminal)];
@@ -56,8 +65,48 @@ pub fn checks(
     ));
     checks.push(notes(probe.notes_automation(), &terminal.0));
     checks.extend(configuration(config_files, config_error));
+    checks.push(config_lock(config_locks));
     checks.push(editor(probe.editor()));
     checks
+}
+
+fn config_lock(locks: &[ConfigLockFile]) -> Check {
+    if locks.is_empty() {
+        return Check {
+            id: "config_lock".into(),
+            status: CheckStatus::Pass,
+            message: "no configuration lock files are left behind".into(),
+            fix: None,
+        };
+    }
+    let stale = locks
+        .iter()
+        .filter(|lock| lock.age > STALE_CONFIG_LOCK_AFTER)
+        .map(|lock| lock.path.display().to_string())
+        .collect::<Vec<_>>();
+    if stale.is_empty() {
+        let held = locks
+            .iter()
+            .map(|lock| lock.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Check {
+            id: "config_lock".into(),
+            status: CheckStatus::Warning,
+            message: format!("configuration lock is held by another nib config command: {held}"),
+            fix: Some("Wait for that command to finish, then run `nib doctor` again.".into()),
+        }
+    } else {
+        let stale = stale.join(", ");
+        Check {
+            id: "config_lock".into(),
+            status: CheckStatus::Fail,
+            message: format!("stale configuration lock: {stale}"),
+            fix: Some(format!(
+                "Remove {stale} if no nib config command is running."
+            )),
+        }
+    }
 }
 
 fn macos(version: Result<String, String>) -> Check {

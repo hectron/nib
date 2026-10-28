@@ -174,7 +174,7 @@ fn atomic_write_with_sync(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("config");
-    remove_stale_temporary_files(directory, file_name, SystemTime::now())?;
+    remove_stale_temporary_files(directory, file_name, SystemTime::now());
 
     for _ in 0..128 {
         let temporary = directory.join(format!(".{file_name}.nib-{}.tmp", random_token()));
@@ -230,14 +230,12 @@ fn resolved_target(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-fn remove_stale_temporary_files(
-    directory: &Path,
-    file_name: &str,
-    now: SystemTime,
-) -> io::Result<()> {
+fn remove_stale_temporary_files(directory: &Path, file_name: &str, now: SystemTime) {
     let prefix = format!(".{file_name}.nib-");
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
@@ -247,18 +245,17 @@ fn remove_stale_temporary_files(
                 .extension()
                 .is_some_and(|extension| extension == "tmp")
         {
-            let metadata = entry.metadata()?;
-            let old = metadata
-                .modified()
+            let old = entry
+                .metadata()
                 .ok()
+                .and_then(|metadata| metadata.modified().ok())
                 .and_then(|modified| now.duration_since(modified).ok())
                 .is_some_and(|age| age > STALE_TEMPORARY_AFTER);
             if old {
-                std::fs::remove_file(entry.path())?;
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }
-    Ok(())
 }
 
 pub(crate) struct ConfigLock {
@@ -272,14 +269,26 @@ impl Drop for ConfigLock {
     }
 }
 
-pub(crate) fn config_lock(path: &Path) -> io::Result<ConfigLock> {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ConfigLockError {
+    #[error("configuration lock {} is already held", path.display())]
+    Held { path: PathBuf },
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+
+pub(crate) fn config_lock_path(path: &Path) -> io::Result<PathBuf> {
     let target = resolved_target(path)?;
     let file_name = target
         .file_name()
         .map_or_else(|| OsString::from("config"), std::ffi::OsStr::to_os_string);
     let mut lock_name = file_name;
     lock_name.push(".lock");
-    let lock_path = target.with_file_name(lock_name);
+    Ok(target.with_file_name(lock_name))
+}
+
+pub(crate) fn config_lock(path: &Path) -> Result<ConfigLock, ConfigLockError> {
+    let lock_path = config_lock_path(path)?;
     match OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -290,14 +299,10 @@ pub(crate) fn config_lock(path: &Path) -> io::Result<ConfigLock> {
             path: lock_path,
             _file: file,
         }),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!(
-                "another nib config command is running, or remove {} if it's stale",
-                lock_path.display()
-            ),
-        )),
-        Err(error) => Err(error),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(ConfigLockError::Held { path: lock_path })
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1042,6 +1047,40 @@ mod tests {
         assert!(!old.exists());
         assert!(recent.exists());
         assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn stale_temporary_entries_that_cannot_be_removed_do_not_fail_a_write() {
+        let dir = TestDir::new();
+        let path = dir.0.join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        let stale = dir.0.join(".config.toml.nib-stuck.tmp");
+        std::fs::create_dir(&stale).unwrap();
+        File::open(&stale)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                SystemTime::now() - STALE_TEMPORARY_AFTER - Duration::from_secs(60 * 60),
+            ))
+            .unwrap();
+
+        atomic_write(&path, "new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert!(stale.is_dir());
+    }
+
+    #[test]
+    fn atomic_writes_succeed_in_directories_that_cannot_be_listed() {
+        let dir = TestDir::new();
+        let path = dir.0.join("config.toml");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o300)).unwrap();
+
+        let result = atomic_write(&path, "new");
+
+        std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 
     #[test]
