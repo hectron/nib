@@ -463,9 +463,18 @@ impl TryFrom<&ReminderChange> for PlannedChange {
     }
 }
 
-pub fn summaries(now: Timestamp, host: &mut dyn Host) -> Result<Vec<JournalSummary>> {
+pub fn log(now: Timestamp, host: &mut dyn Host) -> Result<Vec<JournalSummary>> {
+    let files = match host.try_lock_journal().into_diagnostic()? {
+        Some(_lock) => host.journal_files(now),
+        None => host.journal_files_without_cleanup(),
+    }
+    .into_diagnostic()?;
+    Ok(summarize(files, host))
+}
+
+fn summarize(files: Vec<JournalFile>, host: &mut dyn Host) -> Vec<JournalSummary> {
     let mut entries = Vec::new();
-    for file in host.journal_files(now).into_diagnostic()? {
+    for file in files {
         match parse(file) {
             Ok(entry) => entries.push(entry),
             Err(error) => host.say(&format!("warning: {error}")),
@@ -473,7 +482,7 @@ pub fn summaries(now: Timestamp, host: &mut dyn Host) -> Result<Vec<JournalSumma
     }
     sort_entries(&mut entries);
     let inactive = inactive_entries(&entries);
-    Ok(entries
+    entries
         .into_iter()
         .map(|loaded| {
             let entry_counts = counts(&loaded.entry);
@@ -490,7 +499,7 @@ pub fn summaries(now: Timestamp, host: &mut dyn Host) -> Result<Vec<JournalSumma
                 unrecorded,
             }
         })
-        .collect())
+        .collect()
 }
 
 pub fn undo_changes(wanted: Option<&str>, now: Timestamp, host: &mut dyn Host) -> Result<UndoPlan> {
@@ -578,9 +587,8 @@ pub fn undo_changes(wanted: Option<&str>, now: Timestamp, host: &mut dyn Host) -
 }
 
 pub fn recheck_undo(plan: &UndoPlan, now: Timestamp, host: &mut dyn Host) -> Result<()> {
-    let unchanged = undo_changes(Some(&plan.id), now, host)
-        .is_ok_and(|current| current.fingerprint == plan.fingerprint);
-    if unchanged {
+    let current = undo_changes(Some(&plan.id), now, host)?;
+    if current.fingerprint == plan.fingerprint {
         Ok(())
     } else {
         Err(miette!(
@@ -914,7 +922,7 @@ mod tests {
         assert_eq!(value["changes"][2]["change"], "completed");
         assert_eq!(value["changes"][3]["backup"]["id"], "delete-1");
         assert_eq!(
-            summaries(now().timestamp(), &mut host).unwrap()[0].counts,
+            log(now().timestamp(), &mut host).unwrap()[0].counts,
             ChangeCounts {
                 added: 1,
                 updated: 1,
@@ -955,10 +963,7 @@ mod tests {
                 "warning: nib couldn't re-read 1 reminder after saving; undo of this entry is limited"
             ]
         );
-        assert_eq!(
-            summaries(now().timestamp(), &mut host).unwrap()[0].unrecorded,
-            1
-        );
+        assert_eq!(log(now().timestamp(), &mut host).unwrap()[0].unrecorded, 1);
         let error = undo_changes(Some(&id), now().timestamp(), &mut host)
             .unwrap_err()
             .to_string();
@@ -989,6 +994,78 @@ mod tests {
             .to_string();
 
         assert!(error.contains("changed while nib waited for confirmation"));
+    }
+
+    #[test]
+    fn recheck_reports_a_pending_undo_that_started_during_confirmation() {
+        let mut host = Scripted::new();
+        record_delete(&mut host);
+        let plan = undo_changes(None, now().timestamp(), &mut host).unwrap();
+        begin_undo(&now(), &plan.id, &plan.changes, &mut host).unwrap();
+
+        let error = recheck_undo(&plan, now().timestamp(), &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("is pending"));
+        assert!(!error.contains("changed while"));
+    }
+
+    #[test]
+    fn recheck_reports_an_entry_undone_during_confirmation() {
+        let mut host = Scripted::new();
+        record_delete(&mut host);
+        let plan = undo_changes(None, now().timestamp(), &mut host).unwrap();
+        let pending = begin_undo(&now(), &plan.id, &plan.changes, &mut host).unwrap();
+        finish_undo(
+            &pending,
+            &now(),
+            &plan.id,
+            &plan.changes,
+            &ApplyResult {
+                written: vec![Some(reminder("delete-1", "Old reminder"))],
+                unrecorded: vec![false],
+            },
+            &mut host,
+        )
+        .unwrap();
+
+        let error = recheck_undo(&plan, now().timestamp(), &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("has already been undone"));
+        assert!(!error.contains("changed while"));
+    }
+
+    #[test]
+    fn recheck_reports_an_entry_that_became_unreadable() {
+        let mut host = Scripted::new();
+        record_delete(&mut host);
+        let plan = undo_changes(None, now().timestamp(), &mut host).unwrap();
+        host.journals[0].1 = "{".into();
+
+        let error = recheck_undo(&plan, now().timestamp(), &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("couldn't read journal entry"));
+        assert!(!error.contains("changed while"));
+    }
+
+    fn record_delete(host: &mut Scripted) {
+        record_edit(
+            &now(),
+            &[ReminderChange::Delete {
+                before: reminder("delete-1", "Old reminder"),
+            }],
+            &ApplyResult {
+                written: vec![None],
+                unrecorded: Vec::new(),
+            },
+            host,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1315,12 +1392,37 @@ mod tests {
             .journal("valid-journal", &contents)
             .unreadable_journal("broken-journal", "permission denied");
 
-        let entries = summaries(now().timestamp(), &mut host).unwrap();
+        let entries = log(now().timestamp(), &mut host).unwrap();
         assert_eq!(entries.len(), 1);
         assert!(host.said[0].contains("/backups/broken-journal.json"));
         let error = undo_changes(None, now().timestamp(), &mut host)
             .unwrap_err()
             .to_string();
         assert!(error.contains("/backups/broken-journal.json"));
+    }
+
+    #[test]
+    fn log_lists_entries_without_waiting_for_a_busy_lock() {
+        let mut source = Scripted::new();
+        record_edit(
+            &now(),
+            &[ReminderChange::Delete {
+                before: reminder("valid", "Valid entry"),
+            }],
+            &ApplyResult {
+                written: vec![None],
+                unrecorded: Vec::new(),
+            },
+            &mut source,
+        )
+        .unwrap();
+        let contents = source.journals[0].1.clone();
+        let mut host = Scripted::new().journal("valid-journal", &contents);
+        let _held = host.lock_journal().unwrap();
+
+        let entries = log(now().timestamp(), &mut host).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(host.journal_lock_count, 1);
     }
 }

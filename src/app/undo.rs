@@ -1,5 +1,5 @@
 use jiff::Zoned;
-use miette::{IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, miette};
 
 use crate::app::{edit, journal, markdown};
 use crate::cli::output::clean_lines;
@@ -77,8 +77,9 @@ pub fn run(
 }
 
 pub fn resolve(id: &str, now: &Zoned, host: &mut dyn Host) -> Result<Resolution> {
-    let _lock = host.lock_journal().into_diagnostic()?;
+    let lock = host.lock_journal().into_diagnostic()?;
     let expected = journal::pending_undo(id, now.timestamp(), host)?;
+    drop(lock);
     let mut lines = vec![format!(
         "Pending undo {id} was interrupted. If it was applied, Reminders shows:"
     )];
@@ -92,6 +93,12 @@ pub fn resolve(id: &str, now: &Zoned, host: &mut dyn Host) -> Result<Resolution>
         "absent" => Resolution::Removed,
         _ => return Ok(Resolution::Cancelled),
     };
+    let _lock = host.lock_journal().into_diagnostic()?;
+    if journal::pending_undo(id, now.timestamp(), host)? != expected {
+        return Err(miette!(
+            "pending undo {id:?} changed while nib waited for the answer; nothing was changed"
+        ));
+    }
     journal::resolve_pending(id, resolution == Resolution::Applied, now.timestamp(), host)?;
     Ok(resolution)
 }
@@ -443,7 +450,7 @@ mod tests {
             .strip_suffix(".json")
             .unwrap()
             .to_owned();
-        let pending_summaries = journal::summaries(now().timestamp(), &mut applied_host).unwrap();
+        let pending_summaries = journal::log(now().timestamp(), &mut applied_host).unwrap();
         assert_eq!(
             pending_summaries[0].status,
             crate::domain::JournalStatus::Pending
@@ -454,7 +461,7 @@ mod tests {
             resolve(&pending_id, &now(), &mut applied_host).unwrap(),
             Resolution::Applied
         );
-        let summaries = journal::summaries(now().timestamp(), &mut applied_host).unwrap();
+        let summaries = journal::log(now().timestamp(), &mut applied_host).unwrap();
         assert_eq!(summaries[0].status, crate::domain::JournalStatus::Applied);
         assert!(summaries[1].undone);
         let error = journal::undo_changes(Some(&pending_id), now().timestamp(), &mut applied_host)
@@ -477,6 +484,28 @@ mod tests {
             Resolution::Removed
         );
         assert_eq!(removed_host.journals.len(), 1);
+    }
+
+    #[test]
+    fn resolve_rechecks_the_pending_entry_after_the_answer() {
+        let (backends, _, mut host) = setup(false, false);
+        host.fail_next_journal_replace();
+        run(None, &now(), &backends, &mut host).unwrap_err();
+        let pending_id = host.journals[1].0.strip_suffix(".json").unwrap().to_owned();
+        let changed = host.journals[1]
+            .1
+            .replace("Finish report", "Renamed report");
+        host = host
+            .replace_journal_on_answer(&pending_id, &changed)
+            .answer("applied");
+
+        let error = resolve(&pending_id, &now(), &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("changed while nib waited for the answer"));
+        assert!(host.journals[1].1.contains("\"status\": \"pending\""));
+        assert_eq!(host.journal_lock_count, 4);
     }
 
     #[test]
