@@ -463,10 +463,9 @@ impl TaskOpts {
             .map(|due| due.on(now.date()))
             .transpose()?
             .map_or((None, None), |(date, time)| (Some(date), time));
-        let due_time_zone = due
-            .zip(due_time)
-            .map(|(date, time)| crate::domain::local_time_zone_name_at(now.time_zone(), date, time))
-            .transpose()?;
+        let due_time_zone = due.zip(due_time).map(|(date, time)| {
+            crate::domain::local_time_zone_name_at(now.time_zone(), date, time)
+        });
         Ok(Action::AddTask(NewReminder {
             title: inline.title,
             list: self
@@ -706,20 +705,12 @@ mod tests {
     use jiff::tz::{TimeZone, offset};
 
     use super::*;
+    use crate::test_support::named_fixed_zone;
 
     fn at(day: Date, hour: i8, minute: i8) -> Zoned {
         day.at(hour, minute, 0, 0)
             .to_zoned(TimeZone::fixed(offset(-4)))
             .unwrap()
-    }
-
-    fn named_fixed_zone(name: &str) -> TimeZone {
-        let mut data = vec![0; 54];
-        data[..4].copy_from_slice(b"TZif");
-        data[36..40].copy_from_slice(&1_u32.to_be_bytes());
-        data[40..44].copy_from_slice(&4_u32.to_be_bytes());
-        data[50..].copy_from_slice(b"UTC\0");
-        TimeZone::tzif(name, &data).unwrap()
     }
 
     fn parse_at(now: &Zoned, args: &[&str]) -> Result<Action, clap::Error> {
@@ -1261,7 +1252,7 @@ mod tests {
     fn timed_quick_add_pins_to_the_local_zone() {
         let named_now = date(2026, 10, 26)
             .at(9, 30, 0, 0)
-            .to_zoned(named_fixed_zone("America/Chicago"))
+            .to_zoned(named_fixed_zone("America/Chicago", -6 * 60 * 60, *b"CST\0"))
             .unwrap();
         let named = action_with_config(
             &named_now,
@@ -1299,6 +1290,18 @@ mod tests {
         .unwrap();
         assert!(matches!(
             winter,
+            Action::AddTask(NewReminder { due_time_zone: Some(zone), .. })
+                if zone == "GMT-0600"
+        ));
+
+        let gap = action_with_config(
+            &posix_now,
+            &["t", "Call", "2027-03-14", "2:30am"],
+            &Config::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            gap,
             Action::AddTask(NewReminder { due_time_zone: Some(zone), .. })
                 if zone == "GMT-0600"
         ));
