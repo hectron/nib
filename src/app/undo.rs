@@ -514,9 +514,10 @@ mod tests {
         host.fail_next_journal_replace();
         run(None, &now(), &backends, &mut host).unwrap_err();
         let pending_id = host.journals[1].0.strip_suffix(".json").unwrap().to_owned();
-        let mut entry: serde_json::Value = serde_json::from_str(&host.journals[1].1).unwrap();
-        entry["planned_changes"][0]["id"] = serde_json::json!("reminder-2");
-        let changed = serde_json::to_string_pretty(&entry).unwrap();
+        let original = host.journals[1].1.clone();
+        let changed = original.replacen("\"id\": \"reminder-1\"", "\"id\": \"reminder-2\"", 1);
+        assert_ne!(changed, original);
+        assert!(changed.find("\"id\": \"reminder-2\"") < changed.find("\"changes\""));
         host = host
             .replace_journal_on_answer(&pending_id, &changed)
             .answer("applied");
@@ -527,6 +528,27 @@ mod tests {
 
         assert!(error.contains("changed while nib waited for the answer"));
         assert_eq!(host.journals[1].1, changed);
+    }
+
+    #[test]
+    fn resolve_reports_the_read_error_for_an_entry_unreadable_while_waiting() {
+        let (backends, _, mut host) = setup(false, false);
+        host.fail_next_journal_replace();
+        run(None, &now(), &backends, &mut host).unwrap_err();
+        let pending_id = host.journals[1].0.strip_suffix(".json").unwrap().to_owned();
+        let before = host.journals.clone();
+        host = host
+            .unreadable_journal_on_answer(&pending_id, "permission denied")
+            .answer("applied");
+
+        let error = resolve(&pending_id, &now(), &mut host)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("couldn't read journal entry"));
+        assert!(error.contains("permission denied"));
+        assert!(!error.contains("changed while"));
+        assert_eq!(host.journals, before);
     }
 
     #[test]

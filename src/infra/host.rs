@@ -714,6 +714,7 @@ pub struct Scripted {
     fail_remove_once: bool,
     journal_replacement_on_answer: Option<(String, String)>,
     journal_removal_on_answer: Option<String>,
+    journal_unreadable_on_answer: Option<(String, String)>,
     active_journal_locks: std::rc::Rc<std::cell::Cell<usize>>,
     pub journal_lock_count: usize,
     pub journal_listings_with_cleanup: usize,
@@ -750,6 +751,7 @@ impl Scripted {
             fail_remove_once: false,
             journal_replacement_on_answer: None,
             journal_removal_on_answer: None,
+            journal_unreadable_on_answer: None,
             active_journal_locks: std::rc::Rc::new(std::cell::Cell::new(0)),
             journal_lock_count: 0,
             journal_listings_with_cleanup: 0,
@@ -788,6 +790,11 @@ impl Scripted {
         self
     }
 
+    pub fn unreadable_journal_on_answer(mut self, id: &str, error: &str) -> Self {
+        self.journal_unreadable_on_answer = Some((id.into(), error.into()));
+        self
+    }
+
     pub fn journal_lock_state(&self) -> std::rc::Rc<std::cell::Cell<usize>> {
         self.active_journal_locks.clone()
     }
@@ -805,6 +812,12 @@ impl Scripted {
             .journals
             .iter()
             .enumerate()
+            .filter(|(_, (name, _))| {
+                !self
+                    .unreadable_journals
+                    .iter()
+                    .any(|(unreadable, _)| unreadable == name)
+            })
             .map(|(index, (name, contents))| JournalFile {
                 id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
                 path: PathBuf::from("/backups").join(name),
@@ -859,6 +872,16 @@ impl Host for Scripted {
                     io::Error::new(io::ErrorKind::NotFound, "journal entry not found")
                 })?;
             entry.1 = contents;
+        }
+        if let Some((id, error)) = self.journal_unreadable_on_answer.take() {
+            let (name, _) = self
+                .journals
+                .iter()
+                .find(|(name, _)| name.strip_suffix(".json").unwrap_or(name) == id)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "journal entry not found")
+                })?;
+            self.unreadable_journals.push((name.clone(), error));
         }
         if let Some(id) = self.journal_removal_on_answer.take() {
             let index = self
