@@ -13,7 +13,7 @@ const CACHE_FILE: &str = "completions.json";
 const FRESH_FOR_SECONDS: i64 = 5 * 60;
 const UNCHANGED_WRITE_AFTER_SECONDS: i64 = 60;
 const REFRESH_WATCHDOG: Duration = Duration::from_secs(10);
-const STALE_TEMPORARY_AFTER: Duration = Duration::from_mins(5);
+const STALE_TEMPORARY_AFTER: Duration = Duration::from_secs(5 * 60);
 static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]

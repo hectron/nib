@@ -2,12 +2,56 @@ use jiff::civil::{Date, Time};
 use jiff::{ToSpan, Zoned};
 
 use crate::domain::{
-    ApplyResult, BackendError, Backends, Calendar, Event, EventQuery, FieldEdit, NewNote,
-    NewReminder, Note, NoteQuery, Notes, Priority, Reminder, ReminderChange, ReminderList,
-    ReminderSnapshot, Reminders, StoredReminder,
+    ApplyResult, BackendError, Backends, Calendar, CalendarInfo, CalendarKind, Event, EventQuery,
+    FieldEdit, NewNote, NewReminder, NewResource, Note, NoteFolder, NoteQuery, Notes, Priority,
+    Reminder, ReminderChange, ReminderList, ReminderListInfo, ReminderSnapshot, Reminders,
+    ResourceSelector, StoredReminder,
 };
 
 const DEMO_LIST: &str = "demo-list";
+
+#[derive(Clone, Copy)]
+struct DemoResource {
+    id: &'static str,
+    name: &'static str,
+    owner: &'static str,
+    owner_id: &'static str,
+}
+
+const NOTE_FOLDERS: &[DemoResource] = &[
+    DemoResource {
+        id: "folder-personal",
+        name: "Personal",
+        owner: "iCloud",
+        owner_id: "account-icloud",
+    },
+    DemoResource {
+        id: "folder-work",
+        name: "Work",
+        owner: "iCloud",
+        owner_id: "account-icloud",
+    },
+];
+const REMINDER_LISTS: &[DemoResource] = &[DemoResource {
+    id: DEMO_LIST,
+    name: "Reminders",
+    owner: "iCloud",
+    owner_id: "source-icloud",
+}];
+const CALENDARS: &[DemoResource] = &[
+    DemoResource {
+        id: "calendar-personal",
+        name: "Personal",
+        owner: "iCloud",
+        owner_id: "source-icloud",
+    },
+    DemoResource {
+        id: "calendar-work",
+        name: "Work",
+        owner: "Work Account",
+        owner_id: "source-work",
+    },
+];
 
 pub fn backends(now: &Zoned) -> Backends {
     let (notes, reminders, calendar) = (Demo(now.clone()), Demo(now.clone()), Demo(now.clone()));
@@ -72,6 +116,60 @@ impl Notes for Demo {
                 locked: false,
             })
             .collect())
+    }
+
+    fn folders(&self) -> Result<Vec<NoteFolder>, BackendError> {
+        Ok(vec![
+            NoteFolder {
+                id: "folder-personal".into(),
+                name: "Personal".into(),
+                account: Some("iCloud".into()),
+                account_id: Some("account-icloud".into()),
+            },
+            NoteFolder {
+                id: "folder-work".into(),
+                name: "Work".into(),
+                account: Some("iCloud".into()),
+                account_id: Some("account-icloud".into()),
+            },
+        ])
+    }
+
+    fn create_folder(&self, folder: NewResource) -> Result<NoteFolder, BackendError> {
+        let account = demo_owner(
+            folder.owner.as_deref(),
+            "Notes account",
+            &[("iCloud", "account-icloud")],
+            "account-icloud",
+        )?;
+        ensure_demo_unique(NOTE_FOLDERS, account.1, &folder.name, None, "folder")?;
+        Ok(NoteFolder {
+            id: "folder-created".into(),
+            name: folder.name,
+            account: Some(account.0.into()),
+            account_id: Some(account.1.into()),
+        })
+    }
+
+    fn rename_folder(
+        &self,
+        folder: ResourceSelector,
+        name: String,
+    ) -> Result<NoteFolder, BackendError> {
+        let selected = demo_resource(&folder, "folder", NOTE_FOLDERS)?;
+        ensure_demo_unique(
+            NOTE_FOLDERS,
+            selected.owner_id,
+            &name,
+            Some(selected.id),
+            "folder",
+        )?;
+        Ok(NoteFolder {
+            id: selected.id.into(),
+            name,
+            account: Some(selected.owner.into()),
+            account_id: Some(selected.owner_id.into()),
+        })
     }
 }
 
@@ -206,6 +304,61 @@ impl Reminders for Demo {
                 writable: true,
             }],
             reminders,
+        })
+    }
+
+    fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
+        Ok(vec![ReminderListInfo {
+            id: DEMO_LIST.into(),
+            name: "Reminders".into(),
+            source: Some("iCloud".into()),
+            source_id: Some("source-icloud".into()),
+            kind: CalendarKind::Local,
+            writable: true,
+            default: true,
+        }])
+    }
+
+    fn create_list(&self, list: NewResource) -> Result<ReminderListInfo, BackendError> {
+        let source = demo_owner(
+            list.owner.as_deref(),
+            "EventKit source",
+            &[("iCloud", "source-icloud")],
+            "source-icloud",
+        )?;
+        ensure_demo_unique(REMINDER_LISTS, source.1, &list.name, None, "reminder list")?;
+        Ok(ReminderListInfo {
+            id: "list-created".into(),
+            name: list.name,
+            source: Some(source.0.into()),
+            source_id: Some(source.1.into()),
+            kind: CalendarKind::Local,
+            writable: true,
+            default: false,
+        })
+    }
+
+    fn rename_list(
+        &self,
+        list: ResourceSelector,
+        name: String,
+    ) -> Result<ReminderListInfo, BackendError> {
+        let selected = demo_resource(&list, "reminder list", REMINDER_LISTS)?;
+        ensure_demo_unique(
+            REMINDER_LISTS,
+            selected.owner_id,
+            &name,
+            Some(selected.id),
+            "reminder list",
+        )?;
+        Ok(ReminderListInfo {
+            id: selected.id.into(),
+            name,
+            source: Some(selected.owner.into()),
+            source_id: Some(selected.owner_id.into()),
+            kind: CalendarKind::Local,
+            writable: true,
+            default: true,
         })
     }
 
@@ -348,6 +501,147 @@ impl Calendar for Demo {
             })
             .collect())
     }
+
+    fn calendars(&self) -> Result<Vec<CalendarInfo>, BackendError> {
+        Ok(vec![
+            CalendarInfo {
+                id: "calendar-personal".into(),
+                name: "Personal".into(),
+                source: Some("iCloud".into()),
+                source_id: Some("source-icloud".into()),
+                kind: CalendarKind::Local,
+                writable: true,
+                default: true,
+            },
+            CalendarInfo {
+                id: "calendar-work".into(),
+                name: "Work".into(),
+                source: Some("Work Account".into()),
+                source_id: Some("source-work".into()),
+                kind: CalendarKind::CalDav,
+                writable: true,
+                default: false,
+            },
+        ])
+    }
+
+    fn create_calendar(&self, calendar: NewResource) -> Result<CalendarInfo, BackendError> {
+        let source = demo_owner(
+            calendar.owner.as_deref(),
+            "EventKit source",
+            &[("iCloud", "source-icloud"), ("Work Account", "source-work")],
+            "source-icloud",
+        )?;
+        ensure_demo_unique(CALENDARS, source.1, &calendar.name, None, "calendar")?;
+        Ok(CalendarInfo {
+            id: "calendar-created".into(),
+            name: calendar.name,
+            source: Some(source.0.into()),
+            source_id: Some(source.1.into()),
+            kind: if source.1 == "source-work" {
+                CalendarKind::CalDav
+            } else {
+                CalendarKind::Local
+            },
+            writable: true,
+            default: false,
+        })
+    }
+
+    fn rename_calendar(
+        &self,
+        calendar: ResourceSelector,
+        name: String,
+    ) -> Result<CalendarInfo, BackendError> {
+        let selected = demo_resource(&calendar, "calendar", CALENDARS)?;
+        ensure_demo_unique(
+            CALENDARS,
+            selected.owner_id,
+            &name,
+            Some(selected.id),
+            "calendar",
+        )?;
+        Ok(CalendarInfo {
+            id: selected.id.into(),
+            name,
+            source: Some(selected.owner.into()),
+            source_id: Some(selected.owner_id.into()),
+            kind: if selected.owner_id == "source-work" {
+                CalendarKind::CalDav
+            } else {
+                CalendarKind::Local
+            },
+            writable: true,
+            default: selected.id == "calendar-personal",
+        })
+    }
+}
+
+fn demo_owner<'a>(
+    requested: Option<&str>,
+    kind: &'static str,
+    owners: &'a [(&'a str, &'a str)],
+    default_id: &str,
+) -> Result<(&'a str, &'a str), BackendError> {
+    let selector = requested.unwrap_or(default_id);
+    owners
+        .iter()
+        .copied()
+        .find(|(name, id)| selector == *name || selector == *id)
+        .ok_or_else(|| BackendError::NotFound {
+            kind,
+            name: selector.into(),
+        })
+}
+
+fn demo_resource<'a>(
+    selector: &ResourceSelector,
+    kind: &'static str,
+    resources: &'a [DemoResource],
+) -> Result<&'a DemoResource, BackendError> {
+    resources
+        .iter()
+        .find(|resource| match selector {
+            ResourceSelector::Id(id) => resource.id == id,
+            ResourceSelector::Name { name, owner } => {
+                resource.name == name
+                    && owner
+                        .as_deref()
+                        .is_none_or(|owner| owner == resource.owner || owner == resource.owner_id)
+            }
+        })
+        .ok_or_else(|| BackendError::NotFound {
+            kind,
+            name: match selector {
+                ResourceSelector::Id(id) => id,
+                ResourceSelector::Name { name, .. } => name,
+            }
+            .clone(),
+        })
+}
+
+fn ensure_demo_unique(
+    resources: &[DemoResource],
+    owner_id: &str,
+    name: &str,
+    current_id: Option<&str>,
+    kind: &'static str,
+) -> Result<(), BackendError> {
+    if resources.iter().any(|resource| {
+        resource.owner_id == owner_id && resource.name == name && current_id != Some(resource.id)
+    }) {
+        let owner = resources
+            .iter()
+            .find(|resource| resource.owner_id == owner_id)
+            .map_or(owner_id, |resource| resource.owner);
+        Err(BackendError::AlreadyExists {
+            kind,
+            name: name.into(),
+            owner: format!("{owner} [{owner_id}]"),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -439,5 +733,95 @@ mod tests {
         Groceries   Personal
         Book ideas  Personal
         ");
+    }
+
+    fn demo_backend() -> Demo {
+        Demo(
+            date(2026, 10, 26)
+                .at(9, 0, 0, 0)
+                .to_zoned(TimeZone::fixed(offset(-4)))
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn resource_mutations_reject_only_same_owner_collisions() {
+        let demo = demo_backend();
+        let folder = Notes::create_folder(
+            &demo,
+            NewResource {
+                name: "Work".into(),
+                owner: Some("account-icloud".into()),
+            },
+        );
+        assert!(matches!(
+            folder,
+            Err(BackendError::AlreadyExists { kind: "folder", .. })
+        ));
+
+        let list = Reminders::create_list(
+            &demo,
+            NewResource {
+                name: "Reminders".into(),
+                owner: Some("iCloud".into()),
+            },
+        );
+        assert!(matches!(
+            list,
+            Err(BackendError::AlreadyExists {
+                kind: "reminder list",
+                ..
+            })
+        ));
+
+        let calendar = Calendar::create_calendar(
+            &demo,
+            NewResource {
+                name: "Work".into(),
+                owner: Some("source-icloud".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(calendar.source_id.as_deref(), Some("source-icloud"));
+    }
+
+    #[test]
+    fn resource_renames_preserve_selected_metadata_and_allow_self_rename() {
+        let demo = demo_backend();
+        let folder = Notes::rename_folder(
+            &demo,
+            ResourceSelector::Name {
+                name: "Work".into(),
+                owner: Some("iCloud".into()),
+            },
+            "Work".into(),
+        )
+        .unwrap();
+        assert_eq!(folder.id, "folder-work");
+
+        let collision = Notes::rename_folder(
+            &demo,
+            ResourceSelector::Id("folder-personal".into()),
+            "Work".into(),
+        );
+        assert!(matches!(
+            collision,
+            Err(BackendError::AlreadyExists { kind: "folder", .. })
+        ));
+
+        let calendar = Calendar::rename_calendar(
+            &demo,
+            ResourceSelector::Name {
+                name: "Work".into(),
+                owner: Some("source-work".into()),
+            },
+            "Projects".into(),
+        )
+        .unwrap();
+        assert_eq!(calendar.id, "calendar-work");
+        assert_eq!(calendar.source.as_deref(), Some("Work Account"));
+        assert_eq!(calendar.source_id.as_deref(), Some("source-work"));
+        assert!(matches!(calendar.kind, CalendarKind::CalDav));
+        assert!(!calendar.default);
     }
 }

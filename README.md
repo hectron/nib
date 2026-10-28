@@ -14,10 +14,10 @@ Install the latest release:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/hectron/nib/releases/latest/download/nib-installer.sh | sh
 ```
 
-Or build the current version with Cargo:
+Or build the current version with Cargo. This requires Rust 1.88 or newer:
 
 ```bash
-cargo install --git https://github.com/hectron/nib
+cargo install --locked --git https://github.com/hectron/nib
 ```
 
 ## Quick start
@@ -25,9 +25,12 @@ cargo install --git https://github.com/hectron/nib
 ```bash
 nib n "Quick thought"
 nib note list -f Work
-nib t Pay rent fri !high '#bills'
+nib t Pay rent fri '!high' '#bills'
 nib today
 nib task edit
+nib task lists
+nib note folders
+nib cal calendars
 nib log
 nib undo
 nib cal --week
@@ -43,6 +46,14 @@ nib cal --calendar Work --week
 ```
 
 Quick-add recognizes natural due dates and trailing priority and list tokens. See [Quick-add reminders](docs/quick-add.md) for every form. `nib today` combines overdue and due-today reminders with today's events. `nib doctor` checks permissions and configuration without prompting.
+
+Use `nib note folders`, `nib task lists`, and `nib cal calendars` to discover the names accepted by `--folder`, `--list`, and `--calendar`. Their `create` and `rename` subcommands manage those resources with account or source disambiguation; see [Folders, lists, and calendars](docs/resources.md). Add `--json` for stable resource and owner identifiers. The list and calendar `type` is EventKit's calendar type, such as `local`, `caldav`, or `exchange`; Apple's public EventKit API does not expose the Reminders app's list, sections, or columns view layout.
+
+Your shell parses the command line before nib sees it. Quote titles that contain apostrophes or other shell syntax, and quote quick-add tokens beginning with `!` or `#`:
+
+```bash
+nib t "Get Apple Cider from the Farmer's Market" tomorrow '!high'
+```
 
 ## Configuration
 
@@ -110,7 +121,7 @@ Try every command without touching Apple data:
 
 ```bash
 NIB_DEMO=1 nib today
-NIB_DEMO=1 nib t Pay rent tomorrow !high
+NIB_DEMO=1 nib t Pay rent tomorrow '!high'
 NIB_DEMO=1 nib note list
 ```
 
@@ -118,6 +129,7 @@ Nothing is saved while `NIB_DEMO=1` is set, including backups and undo history.
 
 ## Guides
 
+- [Folders, lists, and calendars](docs/resources.md)
 - [Configuration](docs/configuration.md)
 - [Quick-add reminders](docs/quick-add.md)
 - [Editing reminders as Markdown](docs/task-edit.md)

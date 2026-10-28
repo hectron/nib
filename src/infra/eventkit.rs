@@ -10,7 +10,8 @@ use jiff::{Timestamp, Zoned};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::Bool;
 use objc2_event_kit::{
-    EKAuthorizationStatus, EKCalendar, EKEntityType, EKEvent, EKEventStore, EKReminder,
+    EKAuthorizationStatus, EKCalendar, EKCalendarType, EKEntityType, EKEvent, EKEventStore,
+    EKReminder, EKSource, EKSourceType,
 };
 use objc2_foundation::{
     NSArray, NSCalendar, NSCalendarIdentifierGregorian, NSDate, NSDateComponentUndefined,
@@ -19,9 +20,10 @@ use objc2_foundation::{
 
 use crate::app::markdown::normalize_title;
 use crate::domain::{
-    ApplyResult, AutomationStatus, BackendError, Calendar, Event, EventQuery, FieldEdit,
-    NewReminder, PermissionStatus, Priority, Reminder, ReminderChange, ReminderDueComponents,
-    ReminderEdit, ReminderList, ReminderSnapshot, Reminders, StoredReminder, terminal_name,
+    ApplyResult, AutomationStatus, BackendError, Calendar, CalendarInfo, CalendarKind, Event,
+    EventQuery, FieldEdit, NewReminder, NewResource, PermissionStatus, Priority, Reminder,
+    ReminderChange, ReminderDueComponents, ReminderEdit, ReminderList, ReminderListInfo,
+    ReminderSnapshot, Reminders, ResourceSelector, StoredReminder, terminal_name,
 };
 use crate::infra::completions::CacheFile;
 
@@ -100,6 +102,62 @@ impl Calendar for EventKitCalendar {
                 self.cache.update_calendars(names);
             }
             Ok(events)
+        })
+    }
+
+    fn calendars(&self) -> Result<Vec<CalendarInfo>, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Event, CALENDARS)?;
+            let default = default_event_calendar(&store).as_deref().map(calendar_id);
+            let mut values = calendars(&store, EKEntityType::Event)
+                .iter()
+                .map(|calendar| calendar_info(calendar, default.as_deref()))
+                .collect::<Vec<_>>();
+            values.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+            self.cache
+                .update_calendars(values.iter().map(|value| value.name.clone()).collect());
+            Ok(values)
+        })
+    }
+
+    fn create_calendar(&self, calendar: NewResource) -> Result<CalendarInfo, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Event, CALENDARS)?;
+            let calendar = create_calendar_resource(
+                &store,
+                EKEntityType::Event,
+                &calendar,
+                "calendar",
+                CALENDARS,
+            )?;
+            let default = default_event_calendar(&store).as_deref().map(calendar_id);
+            let value = calendar_info(&calendar, default.as_deref());
+            self.cache
+                .update_calendars(calendar_names(&store, EKEntityType::Event));
+            Ok(value)
+        })
+    }
+
+    fn rename_calendar(
+        &self,
+        calendar: ResourceSelector,
+        name: String,
+    ) -> Result<CalendarInfo, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Event, CALENDARS)?;
+            let calendar = rename_calendar_resource(
+                &store,
+                EKEntityType::Event,
+                &calendar,
+                &name,
+                "calendar",
+                CALENDARS,
+            )?;
+            let default = default_event_calendar(&store).as_deref().map(calendar_id);
+            let value = calendar_info(&calendar, default.as_deref());
+            self.cache
+                .update_calendars(calendar_names(&store, EKEntityType::Event));
+            Ok(value)
         })
     }
 }
@@ -184,6 +242,65 @@ impl Reminders for EventKitReminders {
             let snapshot = ReminderSnapshot { lists, reminders };
             self.update_cache(&store);
             Ok(snapshot)
+        })
+    }
+
+    fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
+            let default = default_reminder_calendar(&store)
+                .as_deref()
+                .map(calendar_id);
+            let mut values = calendars(&store, EKEntityType::Reminder)
+                .iter()
+                .map(|calendar| reminder_list_info(calendar, default.as_deref()))
+                .collect::<Vec<_>>();
+            values.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+            self.update_cache(&store);
+            Ok(values)
+        })
+    }
+
+    fn create_list(&self, list: NewResource) -> Result<ReminderListInfo, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
+            let list = create_calendar_resource(
+                &store,
+                EKEntityType::Reminder,
+                &list,
+                "reminder list",
+                REMINDERS,
+            )?;
+            let default = default_reminder_calendar(&store)
+                .as_deref()
+                .map(calendar_id);
+            let value = reminder_list_info(&list, default.as_deref());
+            self.update_cache(&store);
+            Ok(value)
+        })
+    }
+
+    fn rename_list(
+        &self,
+        list: ResourceSelector,
+        name: String,
+    ) -> Result<ReminderListInfo, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
+            let list = rename_calendar_resource(
+                &store,
+                EKEntityType::Reminder,
+                &list,
+                &name,
+                "reminder list",
+                REMINDERS,
+            )?;
+            let default = default_reminder_calendar(&store)
+                .as_deref()
+                .map(calendar_id);
+            let value = reminder_list_info(&list, default.as_deref());
+            self.update_cache(&store);
+            Ok(value)
         })
     }
 
@@ -395,6 +512,11 @@ fn default_reminder_calendar(store: &EKEventStore) -> Option<Retained<EKCalendar
     unsafe { store.defaultCalendarForNewReminders() }
 }
 
+fn default_event_calendar(store: &EKEventStore) -> Option<Retained<EKCalendar>> {
+    // SAFETY: The retained store is valid and EventKit returns either nil or a retained EKCalendar.
+    unsafe { store.defaultCalendarForNewEvents() }
+}
+
 fn calendar_title(calendar: &EKCalendar) -> String {
     // SAFETY: A typed retained EKCalendar guarantees the title selector and returned NSString type.
     unsafe { calendar.title() }.to_string()
@@ -408,6 +530,344 @@ fn calendar_id(calendar: &EKCalendar) -> String {
 fn calendar_is_writable(calendar: &EKCalendar) -> bool {
     // SAFETY: A typed retained EKCalendar guarantees the content-modification selector.
     unsafe { calendar.allowsContentModifications() }
+}
+
+fn calendar_is_immutable(calendar: &EKCalendar) -> bool {
+    // SAFETY: A typed retained EKCalendar guarantees the immutable selector.
+    unsafe { calendar.isImmutable() }
+}
+
+fn calendar_kind(calendar: &EKCalendar) -> CalendarKind {
+    // SAFETY: A typed retained EKCalendar guarantees the type and subscription selectors.
+    let (kind, subscribed) = unsafe { (calendar.r#type(), calendar.isSubscribed()) };
+    if subscribed {
+        return CalendarKind::Subscription;
+    }
+    match kind {
+        EKCalendarType::Local => CalendarKind::Local,
+        EKCalendarType::CalDAV => CalendarKind::CalDav,
+        EKCalendarType::Exchange => CalendarKind::Exchange,
+        EKCalendarType::Subscription => CalendarKind::Subscription,
+        EKCalendarType::Birthday => CalendarKind::Birthday,
+        _ => CalendarKind::Unknown,
+    }
+}
+
+fn calendar_source(calendar: &EKCalendar) -> (Option<String>, Option<String>) {
+    // SAFETY: A typed retained EKCalendar guarantees the source selector, and a returned EKSource
+    // guarantees its title and identifier selectors while the retained source remains alive.
+    unsafe {
+        calendar.source().map_or((None, None), |source| {
+            (
+                Some(source.title().to_string()),
+                Some(source.sourceIdentifier().to_string()),
+            )
+        })
+    }
+}
+
+fn reminder_list_info(calendar: &EKCalendar, default: Option<&str>) -> ReminderListInfo {
+    let id = calendar_id(calendar);
+    let (source, source_id) = calendar_source(calendar);
+    ReminderListInfo {
+        default: default == Some(&id),
+        id,
+        name: calendar_title(calendar),
+        source,
+        source_id,
+        kind: calendar_kind(calendar),
+        writable: calendar_is_writable(calendar),
+    }
+}
+
+fn calendar_info(calendar: &EKCalendar, default: Option<&str>) -> CalendarInfo {
+    let id = calendar_id(calendar);
+    let (source, source_id) = calendar_source(calendar);
+    CalendarInfo {
+        default: default == Some(&id),
+        id,
+        name: calendar_title(calendar),
+        source,
+        source_id,
+        kind: calendar_kind(calendar),
+        writable: calendar_is_writable(calendar),
+    }
+}
+
+fn source_title(source: &EKSource) -> String {
+    // SAFETY: A typed retained EKSource guarantees the title selector and NSString result.
+    unsafe { source.title() }.to_string()
+}
+
+fn source_id(source: &EKSource) -> String {
+    // SAFETY: A typed retained EKSource guarantees the identifier selector and NSString result.
+    unsafe { source.sourceIdentifier() }.to_string()
+}
+
+fn source_type_can_create(kind: EKSourceType) -> bool {
+    matches!(
+        kind,
+        EKSourceType::Local
+            | EKSourceType::Exchange
+            | EKSourceType::CalDAV
+            | EKSourceType::MobileMe
+    )
+}
+
+fn source_calendars(source: &EKSource, entity: EKEntityType) -> Vec<Retained<EKCalendar>> {
+    // SAFETY: A typed retained EKSource guarantees this entity-specific calendar query, and the
+    // returned set retains its EKCalendar elements while they are collected.
+    unsafe { source.calendarsForEntityType(entity) }
+        .iter()
+        .collect()
+}
+
+fn source_is_eligible(entity: EKEntityType, source: &EKSource) -> bool {
+    // SAFETY: A typed retained EKSource guarantees the source-type selector. Requiring an existing
+    // mutable calendar from calendarsForEntityType deliberately rejects sources for which EventKit
+    // has not demonstrated support for this entity, even if their broad source type looks writable.
+    let can_create = source_type_can_create(unsafe { source.sourceType() });
+    can_create
+        && source_calendars(source, entity)
+            .iter()
+            .any(|calendar| !calendar_is_immutable(calendar))
+}
+
+fn sources(store: &EKEventStore) -> Vec<Retained<EKSource>> {
+    // SAFETY: The retained store is valid and EventKit returns an array whose EKSource elements
+    // remain retained while collected.
+    unsafe { store.sources() }.iter().collect()
+}
+
+fn source_matches(source: &EKSource, selector: &str) -> bool {
+    source_title(source) == selector || source_id(source) == selector
+}
+
+fn source_label(source: &EKSource) -> String {
+    format!("{} [{}]", source_title(source), source_id(source))
+}
+
+fn default_source(store: &EKEventStore, entity: EKEntityType) -> Option<Retained<EKSource>> {
+    let calendar = if entity == EKEntityType::Event {
+        default_event_calendar(store)
+    } else {
+        default_reminder_calendar(store)
+    };
+    calendar.and_then(|calendar| {
+        // SAFETY: A typed retained EKCalendar guarantees the source selector.
+        unsafe { calendar.source() }
+    })
+}
+
+fn resource_source(
+    store: &EKEventStore,
+    entity: EKEntityType,
+    selector: Option<&str>,
+) -> Result<Retained<EKSource>, BackendError> {
+    let eligible = sources(store)
+        .into_iter()
+        .filter(|source| source_is_eligible(entity, source))
+        .collect::<Vec<_>>();
+    if let Some(selector) = selector {
+        let mut matches = eligible
+            .into_iter()
+            .filter(|source| source_matches(source, selector))
+            .collect::<Vec<_>>();
+        return match matches.len() {
+            0 => Err(BackendError::NotFound {
+                kind: "writable EventKit source",
+                name: selector.into(),
+            }),
+            1 => Ok(matches
+                .pop()
+                .expect("a one-element source vector must contain a source")),
+            _ => Err(BackendError::Ambiguous {
+                kind: "writable EventKit source",
+                name: selector.into(),
+                matches: matches.iter().map(|source| source_label(source)).collect(),
+            }),
+        };
+    }
+    if let Some(source) = default_source(store, entity)
+        && source_is_eligible(entity, &source)
+    {
+        return Ok(source);
+    }
+    match eligible.as_slice() {
+        [] => Err(BackendError::NotFound {
+            kind: "writable EventKit source",
+            name: "default".into(),
+        }),
+        [source] => Ok(source.clone()),
+        _ => Err(BackendError::Ambiguous {
+            kind: "writable EventKit source",
+            name: "default".into(),
+            matches: eligible.iter().map(|source| source_label(source)).collect(),
+        }),
+    }
+}
+
+fn create_calendar_resource(
+    store: &EKEventStore,
+    entity: EKEntityType,
+    resource: &NewResource,
+    kind: &'static str,
+    app: &'static str,
+) -> Result<Retained<EKCalendar>, BackendError> {
+    let source = resource_source(store, entity, resource.owner.as_deref())?;
+    ensure_unique_resource_name(&source, entity, kind, &resource.name, None)?;
+    // SAFETY: The retained store and source are valid EventKit objects, the title NSString lives
+    // through its copied setter, and the new calendar is saved before leaving the autorelease pool.
+    let calendar = unsafe {
+        let calendar = EKCalendar::calendarForEntityType_eventStore(entity, store);
+        calendar.setTitle(&NSString::from_str(&resource.name));
+        calendar.setSource(Some(&source));
+        calendar
+    };
+    save_calendar(store, &calendar, app)?;
+    Ok(calendar)
+}
+
+fn selected_calendar(
+    store: &EKEventStore,
+    entity: EKEntityType,
+    selector: &ResourceSelector,
+    kind: &'static str,
+) -> Result<Retained<EKCalendar>, BackendError> {
+    let available = calendars(store, entity);
+    let (name, mut matches) = match selector {
+        ResourceSelector::Id(id) => (
+            id.as_str(),
+            available
+                .into_iter()
+                .filter(|calendar| calendar_id(calendar) == *id)
+                .collect::<Vec<_>>(),
+        ),
+        ResourceSelector::Name { name, owner } => {
+            if let Some(owner) = owner
+                && !sources(store)
+                    .iter()
+                    .any(|source| source_matches(source, owner))
+            {
+                return Err(BackendError::NotFound {
+                    kind: "EventKit source",
+                    name: owner.clone(),
+                });
+            }
+            (
+                name.as_str(),
+                available
+                    .into_iter()
+                    .filter(|calendar| {
+                        calendar_title(calendar) == *name
+                            && owner.as_deref().is_none_or(|owner| {
+                                // SAFETY: A typed retained EKCalendar guarantees the source selector.
+                                unsafe { calendar.source() }
+                                    .is_some_and(|source| source_matches(&source, owner))
+                            })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    match matches.len() {
+        0 => Err(BackendError::NotFound {
+            kind,
+            name: name.into(),
+        }),
+        1 => Ok(matches
+            .pop()
+            .expect("a one-element calendar vector must contain a calendar")),
+        _ => Err(BackendError::Ambiguous {
+            kind,
+            name: name.into(),
+            matches: matches
+                .iter()
+                .map(|calendar| {
+                    let (source, _) = calendar_source(calendar);
+                    format!(
+                        "{} [{}]",
+                        source.unwrap_or_else(|| "unknown source".into()),
+                        calendar_id(calendar)
+                    )
+                })
+                .collect(),
+        }),
+    }
+}
+
+fn rename_calendar_resource(
+    store: &EKEventStore,
+    entity: EKEntityType,
+    selector: &ResourceSelector,
+    name: &str,
+    kind: &'static str,
+    app: &'static str,
+) -> Result<Retained<EKCalendar>, BackendError> {
+    let calendar = selected_calendar(store, entity, selector, kind)?;
+    // SAFETY: A typed retained EKCalendar guarantees the source selector.
+    let source = unsafe { calendar.source() }
+        .ok_or_else(|| failed(app, &format!("selected {kind} has no EventKit source")))?;
+    let id = calendar_id(&calendar);
+    ensure_unique_resource_name(&source, entity, kind, name, Some(&id))?;
+    if calendar_title(&calendar) == name {
+        return Ok(calendar);
+    }
+    if calendar_is_immutable(&calendar) {
+        return Err(BackendError::Immutable {
+            kind,
+            name: calendar_title(&calendar),
+        });
+    }
+    // SAFETY: EventKit copies the NSString during this synchronous title setter.
+    unsafe { calendar.setTitle(&NSString::from_str(name)) };
+    save_calendar(store, &calendar, app)?;
+    Ok(calendar)
+}
+
+fn ensure_unique_resource_name(
+    source: &EKSource,
+    entity: EKEntityType,
+    kind: &'static str,
+    name: &str,
+    current_id: Option<&str>,
+) -> Result<(), BackendError> {
+    let collision = source_calendars(source, entity).iter().any(|calendar| {
+        resource_name_conflicts(
+            &calendar_id(calendar),
+            &calendar_title(calendar),
+            current_id,
+            name,
+        )
+    });
+    if collision {
+        Err(BackendError::AlreadyExists {
+            kind,
+            name: name.into(),
+            owner: source_label(source),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn resource_name_conflicts(
+    candidate_id: &str,
+    candidate_name: &str,
+    current_id: Option<&str>,
+    name: &str,
+) -> bool {
+    candidate_name == name && current_id != Some(candidate_id)
+}
+
+fn save_calendar(
+    store: &EKEventStore,
+    calendar: &EKCalendar,
+    app: &'static str,
+) -> Result<(), BackendError> {
+    // SAFETY: The retained store owns the calendar and both remain valid through the synchronous save.
+    unsafe { store.saveCalendar_commit_error(calendar, true) }
+        .map_err(|error| failed(app, &error.localizedDescription().to_string()))
 }
 
 fn reminder_list(calendar: &EKCalendar) -> ReminderList {
@@ -1252,6 +1712,43 @@ mod tests {
     use super::*;
     use crate::app::markdown;
 
+    #[test]
+    fn only_mutable_account_source_types_are_creation_candidates() {
+        for source in [
+            EKSourceType::Local,
+            EKSourceType::Exchange,
+            EKSourceType::CalDAV,
+            EKSourceType::MobileMe,
+        ] {
+            assert!(source_type_can_create(source));
+        }
+        for source in [EKSourceType::Subscribed, EKSourceType::Birthdays] {
+            assert!(!source_type_can_create(source));
+        }
+    }
+
+    #[test]
+    fn resource_name_collision_excludes_only_the_selected_resource() {
+        assert!(resource_name_conflicts(
+            "other",
+            "Work",
+            Some("current"),
+            "Work"
+        ));
+        assert!(!resource_name_conflicts(
+            "current",
+            "Work",
+            Some("current"),
+            "Work"
+        ));
+        assert!(!resource_name_conflicts(
+            "other",
+            "Personal",
+            Some("current"),
+            "Work"
+        ));
+    }
+
     struct LiveReminderCleanup {
         id: Option<String>,
         list_id: String,
@@ -1468,12 +1965,14 @@ mod tests {
         let now = Timestamp::now().to_zoned(TimeZone::system());
         let start = now.start_of_day().unwrap();
         let end = start.checked_add(jiff::Span::new().days(7)).unwrap();
-        EventKitCalendar::uncached()
+        let backend = EventKitCalendar::uncached();
+        backend
             .events(EventQuery {
                 range: start..end,
                 calendars: Vec::new(),
             })
             .unwrap();
+        backend.calendars().unwrap();
     }
 
     #[test]
@@ -1754,6 +2253,8 @@ mod tests {
     #[test]
     #[ignore = "reads your real Reminders; run with --ignored from a terminal that has access"]
     fn lists_real_reminders() {
-        EventKitReminders::uncached().list().unwrap();
+        let backend = EventKitReminders::uncached();
+        backend.list().unwrap();
+        backend.lists().unwrap();
     }
 }

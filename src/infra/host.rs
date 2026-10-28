@@ -9,6 +9,9 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use jiff::Timestamp;
+use rustix::fs::FlockOperation;
+
+const STALE_TEMPORARY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub trait JournalLock {}
 
@@ -116,6 +119,17 @@ fn random_token() -> String {
 
 fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+fn lock_exclusive(file: &File, waiting: impl FnOnce()) -> io::Result<()> {
+    match rustix::fs::flock(file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::WOULDBLOCK) => {
+            waiting();
+            rustix::fs::flock(file, FlockOperation::LockExclusive).map_err(Into::into)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn atomic_write(path: &Path, contents: &str) -> io::Result<AtomicWriteOutcome> {
@@ -238,7 +252,7 @@ fn remove_stale_temporary_files(
                 .modified()
                 .ok()
                 .and_then(|modified| now.duration_since(modified).ok())
-                .is_some_and(|age| age > Duration::from_hours(24));
+                .is_some_and(|age| age > STALE_TEMPORARY_AFTER);
             if old {
                 std::fs::remove_file(entry.path())?;
             }
@@ -557,14 +571,9 @@ impl Host for System {
             .truncate(false)
             .mode(0o600)
             .open(dir.join("journal.lock"))?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                self.say("Waiting for another nib command to finish…");
-                file.lock()?;
-            }
-            Err(std::fs::TryLockError::Error(error)) => return Err(error),
-        }
+        lock_exclusive(&file, || {
+            self.say("Waiting for another nib command to finish…");
+        })?;
         Ok(Box::new(file))
     }
 }
@@ -868,6 +877,8 @@ impl Host for Scripted {
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    use std::thread;
 
     use super::*;
 
@@ -908,6 +919,33 @@ mod tests {
         assert_eq!(mode, 0o600);
         drop(first);
         assert!(!first_path.exists());
+    }
+
+    #[test]
+    fn exclusive_lock_waits_for_the_current_holder() {
+        let dir = TestDir::new();
+        let path = dir.0.join("journal.lock");
+        let open = || {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .unwrap()
+        };
+        let first = open();
+        let second = open();
+        lock_exclusive(&first, || panic!("the first lock should be immediate")).unwrap();
+
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let worker =
+            thread::spawn(move || lock_exclusive(&second, || waiting_tx.send(()).unwrap()));
+        waiting_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the second lock should report that it is waiting");
+        rustix::fs::flock(&first, FlockOperation::Unlock).unwrap();
+        worker.join().unwrap().unwrap();
     }
 
     #[test]
@@ -994,10 +1032,9 @@ mod tests {
         File::create(&recent).unwrap();
         File::create(&unrelated).unwrap();
         old_file
-            .set_times(
-                std::fs::FileTimes::new()
-                    .set_modified(SystemTime::now() - Duration::from_hours(25)),
-            )
+            .set_times(std::fs::FileTimes::new().set_modified(
+                SystemTime::now() - STALE_TEMPORARY_AFTER - Duration::from_secs(60 * 60),
+            ))
             .unwrap();
 
         atomic_write(&path, "new").unwrap();

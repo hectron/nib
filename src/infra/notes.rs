@@ -3,12 +3,20 @@ use std::process::Command;
 use jiff::Timestamp;
 use serde::Deserialize;
 
-use crate::domain::{BackendError, NewNote, Note, NoteQuery, Notes, terminal_name};
+use crate::domain::{
+    BackendError, NewNote, NewResource, Note, NoteFolder, NoteQuery, Notes, ResourceSelector,
+    terminal_name,
+};
 use crate::infra::completions::CacheFile;
 
 const APP: &str = "Apple Notes";
 const FOLDER_AMBIGUOUS: &str = "NIB_FOLDER_AMBIGUOUS:";
 const FOLDER_NOT_FOUND: &str = "NIB_FOLDER_NOT_FOUND";
+const ACCOUNT_NOT_FOUND: &str = "NIB_ACCOUNT_NOT_FOUND:";
+const ACCOUNT_AMBIGUOUS: &str = "NIB_ACCOUNT_AMBIGUOUS:";
+const MANAGED_FOLDER_NOT_FOUND: &str = "NIB_MANAGED_FOLDER_NOT_FOUND:";
+const MANAGED_FOLDER_AMBIGUOUS: &str = "NIB_MANAGED_FOLDER_AMBIGUOUS:";
+const MANAGED_FOLDER_ALREADY_EXISTS: &str = "NIB_MANAGED_FOLDER_ALREADY_EXISTS:";
 const CREATE_SCRIPT: &str = r#"
 function folderNamed(notes, name) {
     const folders = notes.folders.whose({name: name})();
@@ -97,6 +105,157 @@ function run(argv) {
     return JSON.stringify({folders: folders, notes: result});
 }
 "#;
+const FOLDERS_SCRIPT: &str = r#"
+function appendFolders(result, seen, folders, accountName, accountId) {
+    for (const folder of folders()) {
+        const id = folder.id();
+        if (seen[id]) {
+            continue;
+        }
+        seen[id] = true;
+        result.push({id: id, name: folder.name(), account: accountName, account_id: accountId});
+        appendFolders(result, seen, folder.folders, accountName, accountId);
+    }
+}
+
+function run() {
+    const notes = Application("Notes");
+    const result = [];
+    const seen = Object.create(null);
+    for (const account of notes.accounts()) {
+        appendFolders(result, seen, account.folders, account.name(), account.id());
+    }
+    return JSON.stringify(result);
+}
+"#;
+const MANAGE_FOLDERS_SCRIPT: &str = r#"
+function accounts(notes) {
+    return notes.accounts().map(account => ({
+        value: account,
+        id: account.id(),
+        name: account.name()
+    }));
+}
+
+function accountNamed(notes, selector) {
+    const matches = accounts(notes).filter(account => account.id === selector || account.name === selector);
+    if (matches.length === 0) {
+        throw new Error("NIB_ACCOUNT_NOT_FOUND:" + JSON.stringify(selector));
+    }
+    if (matches.length > 1) {
+        throw new Error("NIB_ACCOUNT_AMBIGUOUS:" + JSON.stringify(matches.map(account => account.name + " [" + account.id + "]")));
+    }
+    return matches[0];
+}
+
+function appendFolders(result, seen, folders, account) {
+    for (const folder of folders()) {
+        const id = folder.id();
+        if (seen[id]) {
+            continue;
+        }
+        seen[id] = true;
+        result.push({
+            value: folder,
+            id: id,
+            name: folder.name(),
+            account: account.name,
+            account_id: account.id
+        });
+        appendFolders(result, seen, folder.folders, account);
+    }
+}
+
+function folders(notes) {
+    const result = [];
+    const seen = Object.create(null);
+    for (const account of accounts(notes)) {
+        appendFolders(result, seen, account.value.folders, account);
+    }
+    return result;
+}
+
+function selectedFolder(all, mode, selector, owner) {
+    let matches = all.filter(folder => mode === "id" ? folder.id === selector : folder.name === selector);
+    if (mode !== "id" && owner !== null) {
+        matches = matches.filter(folder => folder.account === owner || folder.account_id === owner);
+    }
+    if (matches.length === 0) {
+        throw new Error("NIB_MANAGED_FOLDER_NOT_FOUND:" + JSON.stringify(selector));
+    }
+    if (matches.length > 1) {
+        throw new Error("NIB_MANAGED_FOLDER_AMBIGUOUS:" + JSON.stringify(matches.map(folder => folder.account + " [" + folder.id + "]")));
+    }
+    return matches[0];
+}
+
+function record(folder) {
+    return {
+        id: folder.id,
+        name: folder.name,
+        account: folder.account,
+        account_id: folder.account_id
+    };
+}
+
+function alreadyExists(name, account) {
+    throw new Error("NIB_MANAGED_FOLDER_ALREADY_EXISTS:" + JSON.stringify([
+        name,
+        account.name + " [" + account.id + "]"
+    ]));
+}
+
+function response(notes, fallback) {
+    try {
+        const all = folders(notes);
+        const changed = all.filter(folder => folder.id === fallback.id)[0];
+        return JSON.stringify({
+            folder: changed === undefined ? fallback : record(changed),
+            folders: all.map(record)
+        });
+    } catch (error) {
+        // The mutation already succeeded. Return the captured resource rather than reporting a
+        // refresh failure as if the write itself had failed.
+        return JSON.stringify({folder: fallback, folders: null});
+    }
+}
+
+function run(argv) {
+    const notes = Application("Notes");
+    if (argv[0] === "create") {
+        const account = argv.length === 3
+            ? accountNamed(notes, argv[2])
+            : {value: notes.defaultAccount(), id: notes.defaultAccount().id(), name: notes.defaultAccount().name()};
+        if (folders(notes).some(folder => folder.account_id === account.id && folder.name === argv[1])) {
+            alreadyExists(argv[1], account);
+        }
+        const created = notes.Folder({name: argv[1]});
+        account.value.folders.push(created);
+        return response(notes, {
+            id: created.id(),
+            name: argv[1],
+            account: account.name,
+            account_id: account.id
+        });
+    }
+    const owner = argv.length === 5 ? argv[4] : null;
+    const all = folders(notes);
+    const selected = selectedFolder(all, argv[1], argv[2], owner);
+    if (all.some(folder => folder.id !== selected.id && folder.account_id === selected.account_id && folder.name === argv[3])) {
+        alreadyExists(argv[3], {name: selected.account, id: selected.account_id});
+    }
+    if (selected.name === argv[3]) {
+        return response(notes, record(selected));
+    }
+    selected.value.name = argv[3];
+    return response(notes, {
+        id: selected.id,
+        name: argv[3],
+        account: selected.account,
+        account_id: selected.account_id
+    });
+}
+"#;
 #[cfg(all(test, target_os = "macos"))]
 const DELETE_SCRIPT: &str = r#"
 function run(argv) {
@@ -169,6 +328,56 @@ impl Notes for AppleNotes {
         });
         Ok(notes)
     }
+
+    fn folders(&self) -> Result<Vec<NoteFolder>, BackendError> {
+        let mut folders: Vec<ScriptFolder> = self.execute(FOLDERS_SCRIPT, &[], None)?;
+        folders.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+        self.cache
+            .update_note_folders(folders.iter().map(|folder| folder.name.clone()).collect());
+        Ok(folders.into_iter().map(Into::into).collect())
+    }
+
+    fn create_folder(&self, folder: NewResource) -> Result<NoteFolder, BackendError> {
+        let account = folder.owner.clone();
+        let mut args = vec!["create".into(), folder.name];
+        if let Some(account) = folder.owner {
+            args.push(account);
+        }
+        let changed: ScriptFolderMutation =
+            self.execute(MANAGE_FOLDERS_SCRIPT, &args, account.as_deref())?;
+        Ok(self.finish_folder_mutation(changed))
+    }
+
+    fn rename_folder(
+        &self,
+        folder: ResourceSelector,
+        name: String,
+    ) -> Result<NoteFolder, BackendError> {
+        let (mode, resource, owner) = match folder {
+            ResourceSelector::Id(id) => ("id", id, None),
+            ResourceSelector::Name { name, owner } => ("name", name, owner),
+        };
+        let mut args = vec!["rename".into(), mode.into(), resource.clone(), name];
+        if let Some(owner) = owner {
+            args.push(owner);
+        }
+        let changed: ScriptFolderMutation =
+            self.execute(MANAGE_FOLDERS_SCRIPT, &args, Some(&resource))?;
+        Ok(self.finish_folder_mutation(changed))
+    }
+}
+
+impl AppleNotes {
+    fn finish_folder_mutation(&self, changed: ScriptFolderMutation) -> NoteFolder {
+        let folder = NoteFolder::from(changed.folder);
+        if let Some(folders) = changed.folders {
+            self.cache
+                .update_note_folders(folders.iter().map(|folder| folder.name.clone()).collect());
+        } else {
+            self.cache.record_note_folder(folder.name.clone());
+        }
+        folder
+    }
 }
 
 fn cache_note_folders(cache: &CacheFile, filtered: bool, folders: Vec<String>) {
@@ -238,6 +447,36 @@ fn script_error(stderr: &[u8], folder: Option<&str>, terminal: &str) -> BackendE
             app: APP,
             terminal: terminal.into(),
         }
+    } else if let Some(name) = encoded_string(&message, ACCOUNT_NOT_FOUND) {
+        BackendError::NotFound {
+            kind: "Notes account",
+            name,
+        }
+    } else if let Some(matches) = encoded_strings(&message, ACCOUNT_AMBIGUOUS) {
+        BackendError::Ambiguous {
+            kind: "Notes account",
+            name: folder.unwrap_or_default().into(),
+            matches,
+        }
+    } else if let Some(name) = encoded_string(&message, MANAGED_FOLDER_NOT_FOUND) {
+        BackendError::NotFound {
+            kind: "folder",
+            name,
+        }
+    } else if let Some(matches) = encoded_strings(&message, MANAGED_FOLDER_AMBIGUOUS) {
+        BackendError::Ambiguous {
+            kind: "folder",
+            name: folder.unwrap_or_default().into(),
+            matches,
+        }
+    } else if let Some([name, owner]) = encoded_strings(&message, MANAGED_FOLDER_ALREADY_EXISTS)
+        .and_then(|values| <[String; 2]>::try_from(values).ok())
+    {
+        BackendError::AlreadyExists {
+            kind: "folder",
+            name,
+            owner,
+        }
     } else if message.contains(FOLDER_NOT_FOUND) {
         BackendError::NotFound {
             kind: "folder",
@@ -255,6 +494,18 @@ fn script_error(stderr: &[u8], folder: Option<&str>, terminal: &str) -> BackendE
     } else {
         BackendError::Failed { app: APP, message }
     }
+}
+
+fn encoded_string(message: &str, prefix: &str) -> Option<String> {
+    let (_, encoded) = message.split_once(prefix)?;
+    let mut deserializer = serde_json::Deserializer::from_str(encoded);
+    String::deserialize(&mut deserializer).ok()
+}
+
+fn encoded_strings(message: &str, prefix: &str) -> Option<Vec<String>> {
+    let (_, encoded) = message.split_once(prefix)?;
+    let mut deserializer = serde_json::Deserializer::from_str(encoded);
+    Vec::deserialize(&mut deserializer).ok()
 }
 
 fn ambiguous_accounts(message: &str) -> Option<Vec<String>> {
@@ -308,6 +559,31 @@ struct ScriptList {
     #[serde(default)]
     folders: Vec<Option<String>>,
     notes: Vec<ScriptNote>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptFolder {
+    id: String,
+    name: String,
+    account: Option<String>,
+    account_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScriptFolderMutation {
+    folder: ScriptFolder,
+    folders: Option<Vec<ScriptFolder>>,
+}
+
+impl From<ScriptFolder> for NoteFolder {
+    fn from(folder: ScriptFolder) -> Self {
+        Self {
+            id: folder.id,
+            name: folder.name,
+            account: folder.account,
+            account_id: folder.account_id,
+        }
+    }
 }
 
 impl From<ScriptNote> for Note {
@@ -472,6 +748,43 @@ mod tests {
     }
 
     #[test]
+    fn parses_folders_with_accounts() {
+        let folders: Vec<ScriptFolder> = parse(
+            &output(
+                true,
+                r#"[{"id":"x-coredata://folder/1","name":"Work","account":"iCloud","account_id":"account-1"},{"id":"x-coredata://folder/2","name":"Work","account":"Exchange","account_id":"account-2"}]"#,
+                "",
+            ),
+            None,
+            "Terminal",
+        )
+        .unwrap();
+        let folders = folders
+            .into_iter()
+            .map(NoteFolder::from)
+            .collect::<Vec<_>>();
+        assert_eq!(folders[0].account.as_deref(), Some("iCloud"));
+        assert_eq!(folders[0].account_id.as_deref(), Some("account-1"));
+        assert_eq!(folders[1].account.as_deref(), Some("Exchange"));
+    }
+
+    #[test]
+    fn folder_discovery_recurses_from_each_account() {
+        assert!(FOLDERS_SCRIPT.contains("for (const account of notes.accounts())"));
+        assert!(
+            FOLDERS_SCRIPT
+                .contains("appendFolders(result, seen, folder.folders, accountName, accountId)")
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[ignore = "reads your real Notes folders; run with --ignored from a terminal that has access"]
+    fn lists_real_folders() {
+        AppleNotes::uncached().folders().unwrap();
+    }
+
+    #[test]
     fn folder_cache_fields_allow_missing_and_null_values() {
         let created: ScriptCreate = parse(
             &output(
@@ -584,6 +897,103 @@ mod tests {
                 if name == "Work"
                     && matches == ["account \"iCloud\"", "account \"On My Mac\""]
         ));
+    }
+
+    #[test]
+    fn managed_folder_errors_keep_the_requested_subject() {
+        let account: Result<ScriptFolderMutation, _> = parse(
+            &output(
+                false,
+                "",
+                "Error: NIB_ACCOUNT_AMBIGUOUS:[\"iCloud [a]\",\"iCloud [b]\"] (-2700)",
+            ),
+            Some("iCloud"),
+            "Ghostty",
+        );
+        assert!(matches!(
+            account,
+            Err(BackendError::Ambiguous {
+                kind: "Notes account",
+                name,
+                ..
+            }) if name == "iCloud"
+        ));
+
+        let folder: Result<ScriptFolderMutation, _> = parse(
+            &output(
+                false,
+                "",
+                "Error: NIB_MANAGED_FOLDER_NOT_FOUND:\"Archive\" (-2700)",
+            ),
+            Some("Archive"),
+            "Ghostty",
+        );
+        assert!(matches!(
+            folder,
+            Err(BackendError::NotFound { kind: "folder", name }) if name == "Archive"
+        ));
+
+        let collision: Result<ScriptFolderMutation, _> = parse(
+            &output(
+                false,
+                "",
+                "Error: NIB_MANAGED_FOLDER_ALREADY_EXISTS:[\"Work\",\"iCloud [account-1]\"] (-2700)",
+            ),
+            Some("Personal"),
+            "Ghostty",
+        );
+        assert!(matches!(
+            collision,
+            Err(BackendError::AlreadyExists {
+                kind: "folder",
+                name,
+                owner,
+            }) if name == "Work" && owner == "iCloud [account-1]"
+        ));
+    }
+
+    #[test]
+    fn folder_mutation_falls_back_when_post_write_refresh_is_unavailable() {
+        let changed: ScriptFolderMutation = parse(
+            &output(
+                true,
+                r#"{"folder":{"id":"folder-1","name":"Projects","account":"iCloud","account_id":"account-1"},"folders":null}"#,
+                "",
+            ),
+            None,
+            "Terminal",
+        )
+        .unwrap();
+        let folder = AppleNotes::uncached().finish_folder_mutation(changed);
+        assert_eq!(folder.id, "folder-1");
+        assert_eq!(folder.name, "Projects");
+        assert_eq!(folder.account_id.as_deref(), Some("account-1"));
+    }
+
+    #[test]
+    fn managed_folder_script_checks_collisions_and_preserves_write_errors() {
+        let rename = MANAGE_FOLDERS_SCRIPT
+            .rfind("const selected = selectedFolder")
+            .unwrap();
+        let collision = MANAGE_FOLDERS_SCRIPT[rename..]
+            .find("if (all.some")
+            .map(|offset| rename + offset)
+            .unwrap();
+        let no_op = MANAGE_FOLDERS_SCRIPT[rename..]
+            .find("if (selected.name === argv[3])")
+            .map(|offset| rename + offset)
+            .unwrap();
+        let write = MANAGE_FOLDERS_SCRIPT[rename..]
+            .find("selected.value.name = argv[3]")
+            .map(|offset| rename + offset)
+            .unwrap();
+        let response = MANAGE_FOLDERS_SCRIPT[write..]
+            .find("return response(notes")
+            .map(|offset| write + offset)
+            .unwrap();
+        assert!(collision < no_op);
+        assert!(no_op < write);
+        assert!(write < response);
     }
 
     #[test]

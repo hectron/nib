@@ -1,6 +1,8 @@
 # Contributing
 
-nib is a Rust CLI for macOS 26 and later. Install the stable Rust toolchain with `rustfmt` and Clippy, then build the checkout:
+nib is a Rust CLI for macOS 26 and later. It supports Rust 1.88 and newer. The checked-in `rust-toolchain.toml` selects the newer toolchain used for development and CI, including `rustfmt` and Clippy; rustup installs it automatically when needed.
+
+Build the checkout:
 
 ```bash
 git clone https://github.com/hectron/nib.git

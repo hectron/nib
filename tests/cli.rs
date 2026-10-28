@@ -176,6 +176,37 @@ fn run_shell(shell: &str, script: &str, path: &Path) -> std::process::Output {
 }
 
 #[test]
+fn zsh_quoted_quick_add_preserves_an_apostrophe_and_bang_token() {
+    if !Path::new("/bin/zsh").is_file() {
+        return;
+    }
+    let temporary = TempDir::new("zsh-quick-add-quotes");
+    let stub = temporary.0.join("nib");
+    fs::write(&stub, "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\n")
+        .expect("the nib argument stub should be written");
+    let mut permissions = fs::metadata(&stub)
+        .expect("the nib argument stub should exist")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&stub, permissions).expect("the nib argument stub should be executable");
+
+    let output = run_shell(
+        "/bin/zsh",
+        "nib t \"Get Apple Cider from the Farmer's Market\" tomorrow '!high'\n",
+        &temporary.0,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("zsh output should be UTF-8"),
+        "<t>\n<Get Apple Cider from the Farmer's Market>\n<tomorrow>\n<!high>\n"
+    );
+}
+
+#[test]
 fn bash_completion_behavior() {
     if !Path::new("/bin/bash").is_file() {
         return;
@@ -679,6 +710,50 @@ fn demo_backend_shows_sample_data() {
     let stdout = String::from_utf8(out.stdout).expect("stdout should be UTF-8");
     assert!(stdout.starts_with("TITLE"), "{stdout}");
     assert!(stdout.contains("Review pull request"), "{stdout}");
+}
+
+#[test]
+fn demo_backend_lists_resources_in_text_and_json() {
+    for (args, heading) in [
+        (&["note", "folders"][..], "ACCOUNT"),
+        (&["task", "lists"][..], "SOURCE"),
+        (&["cal", "calendars"][..], "SOURCE"),
+    ] {
+        let out = command()
+            .args(args)
+            .env("NIB_DEMO", "1")
+            .output()
+            .expect("the nib test process should start");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).expect("stdout should be UTF-8");
+        assert!(stdout.contains(heading), "{args:?}: {stdout}");
+
+        let out = command()
+            .args(args)
+            .arg("--json")
+            .env("NIB_DEMO", "1")
+            .output()
+            .expect("the nib test process should start");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).expect("stdout should be UTF-8");
+        assert!(stdout.contains("{\n    \"id\":"), "{args:?}: {stdout}");
+        let values: serde_json::Value =
+            serde_json::from_str(&stdout).expect("resource output should be JSON");
+        let first = values
+            .as_array()
+            .and_then(|values| values.first())
+            .and_then(serde_json::Value::as_object)
+            .expect("demo resources should contain an object");
+        assert!(first.contains_key("id"));
+    }
 }
 
 #[test]

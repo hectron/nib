@@ -2,6 +2,7 @@
 name = "nib"
 version = "0.4.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Fast CLI for Apple Notes, Reminders, and Calendar"
 license = "MIT"
 repository = "https://github.com/hectron/nib"
@@ -32,6 +33,7 @@ thiserror = "2.0.21"
 toml = "1.1.8"
 toml_edit = "0.25.17"
 unicode-normalization = "0.1.26"
+rustix = { version = "1.1.5", features = ["fs"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
@@ -42,7 +44,7 @@ proptest = "1.12.0"
 block2 = "0.6.2"
 libc = "0.2.177"
 objc2 = "0.6.5"
-objc2-event-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "EKAlarm", "EKCalendar", "EKCalendarItem", "EKEvent", "EKEventStore", "EKObject", "EKReminder", "EKTypes"] }
+objc2-event-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "EKAlarm", "EKCalendar", "EKCalendarItem", "EKEvent", "EKEventStore", "EKObject", "EKReminder", "EKSource", "EKTypes"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSCalendar", "NSDate", "NSEnumerator", "NSError", "NSPredicate", "NSString", "NSTimeZone", "NSURL"] }
 
 # The profile that 'dist' will build with
