@@ -77,41 +77,53 @@ pub(super) fn due(value: &str) -> Result<Due, String> {
         });
     }
     let words: Vec<&str> = value.split_whitespace().collect();
-    let (date, time) =
-        match words.as_slice() {
-            [word] if let Some(time) = parse_time(word)? => (None, Some(time)),
-            [word] => (
-                Some(parse_single_due(word)?.ok_or_else(|| DUE_EXPECTED.to_owned())?),
-                None,
-            ),
-            [date, time] if let Some(time) = parse_time(time)? => (
-                Some(parse_single_due(date)?.ok_or_else(|| DUE_EXPECTED.to_owned())?),
-                Some(time),
-            ),
-            [prefix, weekday] if prefix.eq_ignore_ascii_case("next") => (
-                Some(
-                    parse_weekday(weekday)
-                        .map(|weekday| DueDate::Weekday {
-                            weekday,
-                            next: true,
-                        })
-                        .ok_or_else(|| "expected a weekday after `next`".to_owned())?,
-                ),
-                None,
-            ),
-            [prefix, interval] if prefix.eq_ignore_ascii_case("in") => (
-                Some(parse_interval(interval)?.ok_or_else(|| {
-                    "expected a number followed by `d` or `w` after `in`".to_owned()
-                })?),
-                None,
-            ),
-            [prefix, value, time] if parse_time(time)?.is_some() => {
-                let phrase = format!("{prefix} {value}");
-                let parsed = due(&phrase)?;
-                (parsed.date, parse_time(time)?)
+    let (date, time) = match words.as_slice() {
+        [word] => {
+            if let Some(time) = parse_time(word)? {
+                (None, Some(time))
+            } else {
+                (
+                    Some(parse_single_due(word)?.ok_or_else(|| DUE_EXPECTED.to_owned())?),
+                    None,
+                )
             }
-            _ => return Err(DUE_EXPECTED.into()),
-        };
+        }
+        [prefix, value] => {
+            if let Some(time) = parse_time(value)? {
+                (
+                    Some(parse_single_due(prefix)?.ok_or_else(|| DUE_EXPECTED.to_owned())?),
+                    Some(time),
+                )
+            } else if prefix.eq_ignore_ascii_case("next") {
+                (
+                    Some(
+                        parse_weekday(value)
+                            .map(|weekday| DueDate::Weekday {
+                                weekday,
+                                next: true,
+                            })
+                            .ok_or_else(|| "expected a weekday after `next`".to_owned())?,
+                    ),
+                    None,
+                )
+            } else if prefix.eq_ignore_ascii_case("in") {
+                (
+                    Some(parse_interval(value)?.ok_or_else(|| {
+                        "expected a number followed by `d` or `w` after `in`".to_owned()
+                    })?),
+                    None,
+                )
+            } else {
+                return Err(DUE_EXPECTED.into());
+            }
+        }
+        [prefix, value, time] if parse_time(time)?.is_some() => {
+            let phrase = format!("{prefix} {value}");
+            let parsed = due(&phrase)?;
+            (parsed.date, parse_time(time)?)
+        }
+        _ => return Err(DUE_EXPECTED.into()),
+    };
     Ok(Due { date, time })
 }
 

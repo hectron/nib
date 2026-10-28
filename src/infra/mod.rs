@@ -10,8 +10,8 @@ mod notes;
 
 #[cfg(any(not(target_os = "macos"), test))]
 use crate::domain::{
-    ApplyResult, BackendError, Event, EventQuery, NewNote, NewReminder, Note, NoteQuery, Reminder,
-    ReminderChange, ReminderSnapshot,
+    ApplyResult, BackendError, CalendarInfo, Event, EventQuery, NewNote, NewReminder, Note,
+    NoteFolder, NoteQuery, Reminder, ReminderChange, ReminderSnapshot,
 };
 use crate::domain::{Backends, Calendar, Notes, Reminders};
 
@@ -74,6 +74,10 @@ impl Notes for Unimplemented {
     fn list(&self, _: NoteQuery) -> Result<Vec<Note>, BackendError> {
         self.fail()
     }
+
+    fn folders(&self) -> Result<Vec<NoteFolder>, BackendError> {
+        self.fail()
+    }
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -98,6 +102,10 @@ impl Reminders for Unimplemented {
 #[cfg(any(not(target_os = "macos"), test))]
 impl Calendar for Unimplemented {
     fn events(&self, _: EventQuery) -> Result<Vec<Event>, BackendError> {
+        self.fail()
+    }
+
+    fn calendars(&self) -> Result<Vec<CalendarInfo>, BackendError> {
         self.fail()
     }
 }

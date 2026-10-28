@@ -1,10 +1,11 @@
 use jiff::Zoned;
+use jiff::civil::Date;
 use miette::{IntoDiagnostic, Result};
 
 use crate::app::{edit, journal, undo};
 use crate::cli::Action;
 use crate::cli::output::{self, Style};
-use crate::domain::Backends;
+use crate::domain::{Backends, EventQuery};
 use crate::infra::host::Host;
 
 pub fn run(
@@ -22,22 +23,24 @@ pub fn run(
         Action::Config(_) => Err(miette::miette!(
             "config must be run through the configuration entry point"
         )),
-        Action::Today { date, query } => {
-            let reminders = backends.reminders.list()?;
-            let (overdue, remaining): (Vec<_>, Vec<_>) = reminders
-                .into_iter()
-                .partition(|reminder| output::reminder_is_overdue(reminder, now));
-            let due_today = remaining
-                .into_iter()
-                .filter(|reminder| output::reminder_is_due_today(reminder, date, now))
-                .collect::<Vec<_>>();
-            let events = backends.calendar.events(query)?;
-            output::today(&overdue, &due_today, &events, now, json, style)
-        }
+        Action::Today { date, query } => today(date, query, json, now, backends, style),
         Action::NewNote(note) => {
             output::single(&backends.notes.create(note)?, "Created note", json, style)
         }
         Action::ListNotes(query) => output::list(&backends.notes.list(query)?, json, now, style),
+        Action::ListNoteFolders => output::list(&backends.notes.folders()?, json, now, style),
+        Action::CreateNoteFolder(folder) => output::single(
+            &backends.notes.create_folder(folder)?,
+            "Created folder",
+            json,
+            style,
+        ),
+        Action::RenameNoteFolder { folder, name } => output::single(
+            &backends.notes.rename_folder(folder, name)?,
+            "Renamed folder",
+            json,
+            style,
+        ),
         Action::AddTask(reminder) => output::single_at(
             &backends.reminders.add(reminder)?,
             "Added",
@@ -46,10 +49,36 @@ pub fn run(
             now,
         ),
         Action::ListTasks => output::list(&backends.reminders.list()?, json, now, style),
+        Action::ListReminderLists => output::list(&backends.reminders.lists()?, json, now, style),
+        Action::CreateReminderList(list) => output::single(
+            &backends.reminders.create_list(list)?,
+            "Created list",
+            json,
+            style,
+        ),
+        Action::RenameReminderList { list, name } => output::single(
+            &backends.reminders.rename_list(list, name)?,
+            "Renamed list",
+            json,
+            style,
+        ),
         Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
         Action::ListEvents(query) => {
             output::list(&backends.calendar.events(query)?, json, now, style)
         }
+        Action::ListCalendars => output::list(&backends.calendar.calendars()?, json, now, style),
+        Action::CreateCalendar(calendar) => output::single(
+            &backends.calendar.create_calendar(calendar)?,
+            "Created calendar",
+            json,
+            style,
+        ),
+        Action::RenameCalendar { calendar, name } => output::single(
+            &backends.calendar.rename_calendar(calendar, name)?,
+            "Renamed calendar",
+            json,
+            style,
+        ),
         Action::Log => {
             let _lock = host.lock_journal().into_diagnostic()?;
             output::journal(
@@ -84,6 +113,26 @@ pub fn run(
     }
 }
 
+fn today(
+    date: Date,
+    query: EventQuery,
+    json: bool,
+    now: &Zoned,
+    backends: &Backends,
+    style: Style,
+) -> Result<String> {
+    let reminders = backends.reminders.list()?;
+    let (overdue, remaining): (Vec<_>, Vec<_>) = reminders
+        .into_iter()
+        .partition(|reminder| output::reminder_is_overdue(reminder, now));
+    let due_today = remaining
+        .into_iter()
+        .filter(|reminder| output::reminder_is_due_today(reminder, date, now))
+        .collect::<Vec<_>>();
+    let events = backends.calendar.events(query)?;
+    output::today(&overdue, &due_today, &events, now, json, style)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -96,15 +145,23 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        ApplyResult, AutomationStatus, BackendError, Calendar, ChangeCounts, ConfigEntry,
-        ConfigKey, ConfigOrigin, ConfigValue, DoctorProbe, EditorSetting, Event, EventQuery,
-        NewNote, NewReminder, Note, NoteQuery, Notes, PermissionStatus, Priority, Reminder,
-        ReminderChange, ReminderSnapshot, Reminders,
+        ApplyResult, AutomationStatus, BackendError, Calendar, CalendarInfo, CalendarKind,
+        ChangeCounts, ConfigEntry, ConfigKey, ConfigOrigin, ConfigValue, DoctorProbe,
+        EditorSetting, Event, EventQuery, NewNote, NewReminder, NewResource, Note, NoteFolder,
+        NoteQuery, Notes, PermissionStatus, Priority, Reminder, ReminderChange, ReminderListInfo,
+        ReminderSnapshot, Reminders, ResourceSelector,
     };
     use crate::infra::host::Scripted;
     use crate::{Cli, Config};
 
     struct Fake;
+
+    fn selector_id(selector: &ResourceSelector, fallback: &str) -> String {
+        match selector {
+            ResourceSelector::Id(id) => id.clone(),
+            ResourceSelector::Name { .. } => fallback.into(),
+        }
+    }
 
     struct FakeDoctor;
 
@@ -174,6 +231,51 @@ mod tests {
                 })
                 .collect())
         }
+
+        fn folders(&self) -> Result<Vec<NoteFolder>, BackendError> {
+            Ok(vec![
+                NoteFolder {
+                    id: "folder-personal".into(),
+                    name: "Personal".into(),
+                    account: Some("iCloud".into()),
+                    account_id: Some("account-icloud".into()),
+                },
+                NoteFolder {
+                    id: "folder-work".into(),
+                    name: "Work".into(),
+                    account: Some("Work Account".into()),
+                    account_id: Some("account-work".into()),
+                },
+            ])
+        }
+
+        fn create_folder(&self, folder: NewResource) -> Result<NoteFolder, BackendError> {
+            if let Some(owner) = folder.owner.as_deref().filter(|owner| *owner != "iCloud") {
+                return Err(BackendError::NotFound {
+                    kind: "Notes account",
+                    name: owner.into(),
+                });
+            }
+            Ok(NoteFolder {
+                id: "folder-created".into(),
+                name: folder.name,
+                account: Some("iCloud".into()),
+                account_id: Some("account-icloud".into()),
+            })
+        }
+
+        fn rename_folder(
+            &self,
+            folder: ResourceSelector,
+            name: String,
+        ) -> Result<NoteFolder, BackendError> {
+            Ok(NoteFolder {
+                id: selector_id(&folder, "folder-renamed"),
+                name,
+                account: Some("iCloud".into()),
+                account_id: Some("account-icloud".into()),
+            })
+        }
     }
 
     impl Reminders for Fake {
@@ -224,6 +326,63 @@ mod tests {
 
         fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
             Ok(ReminderSnapshot::default())
+        }
+
+        fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
+            Ok(vec![
+                ReminderListInfo {
+                    id: "list-reminders".into(),
+                    name: "Reminders".into(),
+                    source: Some("iCloud".into()),
+                    source_id: Some("source-icloud".into()),
+                    kind: CalendarKind::Local,
+                    writable: true,
+                    default: true,
+                },
+                ReminderListInfo {
+                    id: "list-work".into(),
+                    name: "Work".into(),
+                    source: Some("Work Account".into()),
+                    source_id: Some("source-work".into()),
+                    kind: CalendarKind::CalDav,
+                    writable: false,
+                    default: false,
+                },
+            ])
+        }
+
+        fn create_list(&self, list: NewResource) -> Result<ReminderListInfo, BackendError> {
+            if let Some(owner) = list.owner.as_deref().filter(|owner| *owner != "iCloud") {
+                return Err(BackendError::NotFound {
+                    kind: "writable EventKit source",
+                    name: owner.into(),
+                });
+            }
+            Ok(ReminderListInfo {
+                id: "list-created".into(),
+                name: list.name,
+                source: Some("iCloud".into()),
+                source_id: Some("source-icloud".into()),
+                kind: CalendarKind::CalDav,
+                writable: true,
+                default: false,
+            })
+        }
+
+        fn rename_list(
+            &self,
+            list: ResourceSelector,
+            name: String,
+        ) -> Result<ReminderListInfo, BackendError> {
+            Ok(ReminderListInfo {
+                id: selector_id(&list, "list-renamed"),
+                name,
+                source: Some("iCloud".into()),
+                source_id: Some("source-icloud".into()),
+                kind: CalendarKind::CalDav,
+                writable: true,
+                default: false,
+            })
         }
 
         fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
@@ -293,6 +452,63 @@ mod tests {
                 })
                 .collect())
         }
+
+        fn calendars(&self) -> Result<Vec<CalendarInfo>, BackendError> {
+            Ok(vec![
+                CalendarInfo {
+                    id: "calendar-personal".into(),
+                    name: "Personal".into(),
+                    source: Some("iCloud".into()),
+                    source_id: Some("source-icloud".into()),
+                    kind: CalendarKind::Local,
+                    writable: true,
+                    default: true,
+                },
+                CalendarInfo {
+                    id: "calendar-work".into(),
+                    name: "Work".into(),
+                    source: Some("Work Account".into()),
+                    source_id: Some("source-work".into()),
+                    kind: CalendarKind::CalDav,
+                    writable: false,
+                    default: false,
+                },
+            ])
+        }
+
+        fn create_calendar(&self, calendar: NewResource) -> Result<CalendarInfo, BackendError> {
+            if let Some(owner) = calendar.owner.as_deref().filter(|owner| *owner != "iCloud") {
+                return Err(BackendError::NotFound {
+                    kind: "writable EventKit source",
+                    name: owner.into(),
+                });
+            }
+            Ok(CalendarInfo {
+                id: "calendar-created".into(),
+                name: calendar.name,
+                source: Some("iCloud".into()),
+                source_id: Some("source-icloud".into()),
+                kind: CalendarKind::CalDav,
+                writable: true,
+                default: false,
+            })
+        }
+
+        fn rename_calendar(
+            &self,
+            calendar: ResourceSelector,
+            name: String,
+        ) -> Result<CalendarInfo, BackendError> {
+            Ok(CalendarInfo {
+                id: selector_id(&calendar, "calendar-renamed"),
+                name,
+                source: Some("iCloud".into()),
+                source_id: Some("source-icloud".into()),
+                kind: CalendarKind::CalDav,
+                writable: true,
+                default: false,
+            })
+        }
     }
 
     struct AgendaReminders(Vec<Reminder>);
@@ -325,6 +541,10 @@ mod tests {
                 .filter(|event| query.range.contains(&event.start))
                 .cloned()
                 .collect())
+        }
+
+        fn calendars(&self) -> Result<Vec<CalendarInfo>, BackendError> {
+            unreachable!()
         }
     }
 
@@ -813,6 +1033,50 @@ mod tests {
     }
 
     #[test]
+    fn note_folders() {
+        assert_snapshot!(nib(&["note", "folders"]), @r"
+        NAME      ACCOUNT
+        Personal  iCloud
+        Work      Work Account
+        ");
+        assert_snapshot!(nib(&["--json", "note", "folders"]), @r#"
+        [
+          {
+            "id": "folder-personal",
+            "name": "Personal",
+            "account": "iCloud",
+            "account_id": "account-icloud"
+          },
+          {
+            "id": "folder-work",
+            "name": "Work",
+            "account": "Work Account",
+            "account_id": "account-work"
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn note_folder_mutations() {
+        assert_snapshot!(
+            nib(&["note", "folders", "create", "Archive", "--account", "iCloud"]),
+            @r#"Created folder "Archive" in iCloud"#
+        );
+        assert_snapshot!(
+            nib(&["--json", "note", "folders", "rename", "folder-work", "Projects", "--id"]),
+            @r#"
+        {
+          "id": "folder-work",
+          "name": "Projects",
+          "account": "iCloud",
+          "account_id": "account-icloud"
+        }
+        "#
+        );
+    }
+
+    #[test]
     fn quick_capture_task() {
         assert_snapshot!(nib(&["t", "Buy groceries"]), @r#"Added "Buy groceries""#);
         assert_snapshot!(
@@ -884,6 +1148,59 @@ mod tests {
     }
 
     #[test]
+    fn reminder_lists() {
+        assert_snapshot!(nib(&["task", "lists"]), @r"
+        NAME       SOURCE        TYPE    WRITABLE  DEFAULT
+        Reminders  iCloud        local   yes       yes
+        Work       Work Account  caldav
+        ");
+        assert_snapshot!(nib(&["--json", "task", "lists"]), @r#"
+        [
+          {
+            "id": "list-reminders",
+            "name": "Reminders",
+            "source": "iCloud",
+            "source_id": "source-icloud",
+            "type": "local",
+            "writable": true,
+            "default": true
+          },
+          {
+            "id": "list-work",
+            "name": "Work",
+            "source": "Work Account",
+            "source_id": "source-work",
+            "type": "caldav",
+            "writable": false,
+            "default": false
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn reminder_list_mutations() {
+        assert_snapshot!(
+            nib(&["task", "lists", "create", "Errands", "--source", "iCloud"]),
+            @r#"Created list "Errands" in iCloud"#
+        );
+        assert_snapshot!(
+            nib(&["--json", "task", "lists", "rename", "list-work", "Projects", "--id"]),
+            @r#"
+        {
+          "id": "list-work",
+          "name": "Projects",
+          "source": "iCloud",
+          "source_id": "source-icloud",
+          "type": "caldav",
+          "writable": true,
+          "default": false
+        }
+        "#
+        );
+    }
+
+    #[test]
     fn created_item_json_is_an_object() {
         assert_snapshot!(nib(&["--json", "n", "Idea", "-f", "Inbox"]), @r#"
         {
@@ -934,6 +1251,102 @@ mod tests {
           }
         ]
         "#);
+    }
+
+    #[test]
+    fn calendars() {
+        assert_snapshot!(nib(&["cal", "calendars"]), @r"
+        NAME      SOURCE        TYPE    WRITABLE  DEFAULT
+        Personal  iCloud        local   yes       yes
+        Work      Work Account  caldav
+        ");
+        assert_snapshot!(nib(&["--json", "cal", "calendars"]), @r#"
+        [
+          {
+            "id": "calendar-personal",
+            "name": "Personal",
+            "source": "iCloud",
+            "source_id": "source-icloud",
+            "type": "local",
+            "writable": true,
+            "default": true
+          },
+          {
+            "id": "calendar-work",
+            "name": "Work",
+            "source": "Work Account",
+            "source_id": "source-work",
+            "type": "caldav",
+            "writable": false,
+            "default": false
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn calendar_mutations() {
+        assert_snapshot!(
+            nib(&["cal", "calendars", "create", "Travel", "--source", "iCloud"]),
+            @r#"Created calendar "Travel" in iCloud"#
+        );
+        assert_snapshot!(
+            nib(&["--json", "cal", "calendars", "rename", "calendar-work", "Projects", "--id"]),
+            @r#"
+        {
+          "id": "calendar-work",
+          "name": "Projects",
+          "source": "iCloud",
+          "source_id": "source-icloud",
+          "type": "caldav",
+          "writable": true,
+          "default": false
+        }
+        "#
+        );
+    }
+
+    #[test]
+    fn unsupported_resource_owners_are_errors() {
+        assert!(matches!(
+            Notes::create_folder(
+                &Fake,
+                NewResource {
+                    name: "Archive".into(),
+                    owner: Some("Missing".into()),
+                }
+            ),
+            Err(BackendError::NotFound {
+                kind: "Notes account",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Reminders::create_list(
+                &Fake,
+                NewResource {
+                    name: "Errands".into(),
+                    owner: Some("Missing".into()),
+                }
+            ),
+            Err(BackendError::NotFound {
+                kind: "writable EventKit source",
+                ..
+            })
+        ));
+        assert!(matches!(
+            Calendar::create_calendar(
+                &Fake,
+                NewResource {
+                    name: "Travel".into(),
+                    owner: Some("Missing".into()),
+                }
+            ),
+            Err(BackendError::NotFound {
+                kind: "writable EventKit source",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1042,6 +1455,10 @@ mod tests {
             fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
                 self.0.replace(Some(query));
                 Ok(Vec::new())
+            }
+
+            fn calendars(&self) -> Result<Vec<CalendarInfo>, BackendError> {
+                unreachable!()
             }
         }
 

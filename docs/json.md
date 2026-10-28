@@ -55,6 +55,14 @@ Event objects contain `id`, `title`, `start`, and `all_day`. Starts use RFC 3339
 
 Apple can reuse one identifier for every occurrence of a recurring event. nib appends the occurrence's UTC start to make each event ID distinct.
 
+## Folders, lists, and calendars
+
+`nib note folders --json` returns folder objects with `id`, `name`, `account_id`, and `account`. `nib task lists --json` and `nib cal calendars --json` return objects with `id`, `name`, `source_id`, `source`, `type`, `writable`, and `default`.
+
+The account or source name distinguishes duplicate resource names for people, while `account_id` or `source_id` is the stable owner selector for scripts. Owner fields may be `null` if the bridge does not report them. EventKit resource types are `local`, `caldav`, `exchange`, `subscription`, `birthday`, or `unknown`.
+
+Resource create and rename commands return the same single-object shape as their corresponding discovery command. For example, `nib --json task lists create Errands --source iCloud` returns the new reminder-list object.
+
 ## Today's agenda
 
 ```json

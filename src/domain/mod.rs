@@ -44,6 +44,71 @@ pub struct Event {
     pub all_day: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoteFolder {
+    pub id: String,
+    pub name: String,
+    pub account: Option<String>,
+    pub account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewResource {
+    pub name: String,
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceSelector {
+    Id(String),
+    Name { name: String, owner: Option<String> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarKind {
+    Local,
+    CalDav,
+    Exchange,
+    Subscription,
+    Birthday,
+    Unknown,
+}
+
+impl CalendarKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::CalDav => "caldav",
+            Self::Exchange => "exchange",
+            Self::Subscription => "subscription",
+            Self::Birthday => "birthday",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderListInfo {
+    pub id: String,
+    pub name: String,
+    pub source: Option<String>,
+    pub source_id: Option<String>,
+    pub kind: CalendarKind,
+    pub writable: bool,
+    pub default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarInfo {
+    pub id: String,
+    pub name: String,
+    pub source: Option<String>,
+    pub source_id: Option<String>,
+    pub kind: CalendarKind,
+    pub writable: bool,
+    pub default: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
@@ -383,6 +448,34 @@ pub enum BackendError {
     )]
     AutomationDenied { app: &'static str, terminal: String },
 
+    #[error("{kind} \"{name}\" already exists in {owner}")]
+    #[diagnostic(
+        code(nib::backend::already_exists),
+        help("choose a unique name or rename the existing resource")
+    )]
+    AlreadyExists {
+        kind: &'static str,
+        name: String,
+        owner: String,
+    },
+
+    #[error("{kind} \"{name}\" can't be renamed because it is immutable")]
+    #[diagnostic(
+        code(nib::backend::immutable),
+        help("choose a resource that can be changed in its Apple app")
+    )]
+    Immutable { kind: &'static str, name: String },
+
+    #[error("{app} doesn't support {operation}")]
+    #[diagnostic(
+        code(nib::backend::unsupported),
+        help("use the Apple app to make this change")
+    )]
+    Unsupported {
+        app: &'static str,
+        operation: &'static str,
+    },
+
     #[error("{kind} \"{name}\" not found")]
     #[diagnostic(
         code(nib::backend::not_found),
@@ -484,12 +577,67 @@ pub trait DoctorProbe {
 pub trait Notes {
     fn create(&self, note: NewNote) -> Result<Note, BackendError>;
     fn list(&self, query: NoteQuery) -> Result<Vec<Note>, BackendError>;
+    fn folders(&self) -> Result<Vec<NoteFolder>, BackendError> {
+        Err(BackendError::Unsupported {
+            app: "Apple Notes",
+            operation: "listing folders",
+        })
+    }
+    fn create_folder(&self, _folder: NewResource) -> Result<NoteFolder, BackendError> {
+        Err(BackendError::Unsupported {
+            app: "Apple Notes",
+            operation: "creating folders",
+        })
+    }
+    fn rename_folder(
+        &self,
+        _folder: ResourceSelector,
+        _name: String,
+    ) -> Result<NoteFolder, BackendError> {
+        Err(BackendError::Unsupported {
+            app: "Apple Notes",
+            operation: "renaming folders",
+        })
+    }
 }
 
 pub trait Reminders {
     fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError>;
     fn list(&self) -> Result<Vec<Reminder>, BackendError>;
     fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError>;
+    fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
+        self.snapshot(None).map(|snapshot| {
+            snapshot
+                .lists
+                .into_iter()
+                .map(|list| ReminderListInfo {
+                    id: list.id,
+                    name: list.name,
+                    source: None,
+                    source_id: None,
+                    kind: CalendarKind::Unknown,
+                    writable: list.writable,
+                    default: false,
+                })
+                .collect()
+        })
+    }
+    fn create_list(&self, _list: NewResource) -> Result<ReminderListInfo, BackendError> {
+        Err(BackendError::Unsupported {
+            app: "Reminders",
+            operation: "creating lists",
+        })
+    }
+    fn rename_list(
+        &self,
+        _list: ResourceSelector,
+        _name: String,
+    ) -> Result<ReminderListInfo, BackendError> {
+        Err(BackendError::Unsupported {
+            app: "Reminders",
+            operation: "renaming lists",
+        })
+    }
     fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError>;
     fn validate_time_zone(&self, _name: &str) -> Result<(), BackendError> {
         Ok(())
@@ -533,6 +681,28 @@ fn fixed_offset_name_at(
 
 pub trait Calendar {
     fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError>;
+    fn calendars(&self) -> Result<Vec<CalendarInfo>, BackendError> {
+        Err(BackendError::Unsupported {
+            app: "Calendar",
+            operation: "listing calendars",
+        })
+    }
+    fn create_calendar(&self, _calendar: NewResource) -> Result<CalendarInfo, BackendError> {
+        Err(BackendError::Unsupported {
+            app: "Calendar",
+            operation: "creating calendars",
+        })
+    }
+    fn rename_calendar(
+        &self,
+        _calendar: ResourceSelector,
+        _name: String,
+    ) -> Result<CalendarInfo, BackendError> {
+        Err(BackendError::Unsupported {
+            app: "Calendar",
+            operation: "renaming calendars",
+        })
+    }
 }
 
 pub type Lazy<T> = LazyCell<Box<T>, Box<dyn FnOnce() -> Box<T>>>;

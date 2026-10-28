@@ -8,15 +8,15 @@ use serde::{Serialize, Serializer};
 
 use crate::app::doctor::{Check, CheckStatus};
 use crate::domain::{
-    ChangeCounts, ConfigEntry, ConfigOrigin, ConfigValue, Event, JournalSummary, Note, Priority,
-    Reminder, time_zone_is_local_at,
+    CalendarInfo, ChangeCounts, ConfigEntry, ConfigOrigin, ConfigValue, Event, JournalStatus,
+    JournalSummary, Note, NoteFolder, Priority, Reminder, ReminderListInfo, time_zone_is_local_at,
 };
 
 pub trait Tabular: Serialize {
     const HEADER: &'static [&'static str];
     const TITLE_COLUMN: usize;
     fn row(&self, now: &Zoned) -> Vec<String>;
-    fn cell_style(&self, column: usize, now: &Zoned) -> Option<CellStyle>;
+    fn cell_style(&self, column: usize, now: &Zoned) -> Option<Tone>;
 }
 
 pub trait Summary: Serialize {
@@ -37,20 +37,65 @@ impl Style {
     pub fn detect() -> Self {
         let probe = Table::new();
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+        let dumb_terminal = std::env::var_os("TERM").is_some_and(|v| v == "dumb");
+        Self::from_terminal(probe.is_tty(), no_color, dumb_terminal, probe.width())
+    }
+
+    fn from_terminal(
+        is_tty: bool,
+        no_color: bool,
+        dumb_terminal: bool,
+        width: Option<u16>,
+    ) -> Self {
         Self {
-            color: probe.is_tty() && !no_color,
-            width: probe.width(),
+            color: is_tty && !no_color && !dumb_terminal,
+            width,
+        }
+    }
+
+    fn paint(self, text: &str, tone: Tone) -> String {
+        if self.color {
+            ansi(text, tone.code())
+        } else {
+            text.into()
         }
     }
 }
 
 #[derive(Clone, Copy)]
-pub enum CellStyle {
-    Red,
-    Yellow,
-    Blue,
-    Cyan,
-    Dim,
+pub enum Tone {
+    Heading,
+    Muted,
+    Success,
+    Warning,
+    Danger,
+    Urgent,
+    Accent,
+}
+
+impl Tone {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Heading => "1",
+            Self::Muted => "2",
+            Self::Success => "32",
+            Self::Warning => "33",
+            Self::Danger => "31",
+            Self::Urgent => "1;31",
+            Self::Accent => "36",
+        }
+    }
+
+    fn emphasized_code(self) -> &'static str {
+        match self {
+            Self::Heading => "1",
+            Self::Muted => "2",
+            Self::Success => "1;32",
+            Self::Warning => "1;33",
+            Self::Danger | Self::Urgent => "1;31",
+            Self::Accent => "1;36",
+        }
+    }
 }
 
 pub fn list<T: Tabular>(items: &[T], json: bool, now: &Zoned, style: Style) -> Result<String> {
@@ -125,11 +170,24 @@ fn single_with_now<T: Summary>(
     if json {
         to_json(item, style)
     } else {
-        let detail = item
-            .detail_at(now)
-            .map(|d| format!(" {d}"))
-            .unwrap_or_default();
-        Ok(clean(&format!("{verb} \"{}\"{detail}", item.title())))
+        let verb = clean(verb);
+        let title = clean(item.title());
+        let detail = item.detail_at(now).map(|detail| clean(&detail));
+        if style.color {
+            let detail = detail
+                .map(|detail| format!(" {}", style.paint(&detail, Tone::Muted)))
+                .unwrap_or_default();
+            Ok(format!(
+                "{} \"{}\"{detail}",
+                style.paint(&verb, Tone::Success),
+                style.paint(&title, Tone::Heading)
+            ))
+        } else {
+            let detail = detail
+                .map(|detail| format!(" {detail}"))
+                .unwrap_or_default();
+            Ok(format!("{verb} \"{title}\"{detail}"))
+        }
     }
 }
 
@@ -152,14 +210,18 @@ pub fn today(
         );
     }
     let sections = [
-        ("Overdue", list(overdue, false, now, style)?),
-        ("Due today", list(due_today, false, now, style)?),
-        ("Events", list(events, false, now, style)?),
+        (Tone::Danger, "Overdue", list(overdue, false, now, style)?),
+        (
+            Tone::Warning,
+            "Due today",
+            list(due_today, false, now, style)?,
+        ),
+        (Tone::Accent, "Events", list(events, false, now, style)?),
     ];
     let rendered = sections
         .into_iter()
-        .filter(|(_, table)| !table.is_empty())
-        .map(|(heading, table)| format!("{}\n{table}", styled_heading(heading, style)))
+        .filter(|(_, _, table)| !table.is_empty())
+        .map(|(tone, heading, table)| format!("{}\n{table}", styled_heading(heading, tone, style)))
         .collect::<Vec<_>>();
     if rendered.is_empty() {
         Ok("Nothing due today.".into())
@@ -198,10 +260,10 @@ pub fn undo(
             style,
         );
     }
-    Ok(format!(
+    Ok(clean(&format!(
         "Undid {} from {id}.",
         count(counts.total(), "change")
-    ))
+    )))
 }
 
 pub fn undo_cancelled(id: &str, json: bool, style: Style) -> Result<String> {
@@ -238,11 +300,11 @@ pub fn undo_resolution(
             style,
         );
     }
-    Ok(match applied {
+    Ok(clean(&match applied {
         Some(true) => format!("Marked pending undo {id} as applied."),
         Some(false) => format!("Removed pending undo {id}."),
         None => format!("Nothing was changed. Undo {id} is still pending."),
-    })
+    }))
 }
 
 fn count(n: usize, noun: &str) -> String {
@@ -268,14 +330,22 @@ pub fn doctor(checks: &[Check], json: bool, style: Style) -> Result<String> {
     Ok(checks
         .iter()
         .map(|check| {
-            let symbol = match check.status {
-                CheckStatus::Pass => styled_symbol("✓", "32", style),
-                CheckStatus::Warning => styled_symbol("!", "33", style),
-                CheckStatus::Fail => styled_symbol("✗", "31", style),
+            let (symbol, tone) = match check.status {
+                CheckStatus::Pass => ("✓", Tone::Success),
+                CheckStatus::Warning => ("!", Tone::Warning),
+                CheckStatus::Fail => ("✗", Tone::Danger),
             };
+            let symbol = style.paint(symbol, tone);
             check.fix.as_ref().map_or_else(
                 || format!("{symbol} {}", clean(&check.message)),
-                |fix| format!("{symbol} {}\n  Fix: {}", clean(&check.message), clean(fix)),
+                |fix| {
+                    format!(
+                        "{symbol} {}\n  {} {}",
+                        clean(&check.message),
+                        style.paint("Fix:", Tone::Accent),
+                        clean(fix)
+                    )
+                },
             )
         })
         .collect::<Vec<_>>()
@@ -450,31 +520,25 @@ fn config_origin_text(origin: &ConfigOrigin) -> String {
     }
 }
 
-fn styled_symbol(symbol: &str, color: &str, style: Style) -> String {
+fn styled_heading(heading: &str, tone: Tone, style: Style) -> String {
     if style.color {
-        ansi(symbol, color)
-    } else {
-        symbol.into()
-    }
-}
-
-fn styled_heading(heading: &str, style: Style) -> String {
-    if style.color {
-        ansi(heading, "1")
+        ansi(heading, tone.emphasized_code())
     } else {
         heading.into()
     }
 }
 
-// comfy-table renders named colors as 256-color codes (`38;5;N`), so cells are marked with
-// attributes it renders as plain SGR codes, which `resolve_color_markers` swaps for 16-color codes.
-fn marked_cell(cell: Cell, style: Option<CellStyle>) -> Cell {
-    match style {
-        Some(CellStyle::Red) => cell.add_attribute(Attribute::Underlined),
-        Some(CellStyle::Yellow) => cell.add_attribute(Attribute::Italic),
-        Some(CellStyle::Blue) => cell.add_attribute(Attribute::Reverse),
-        Some(CellStyle::Cyan) => cell.add_attribute(Attribute::CrossedOut),
-        Some(CellStyle::Dim) => cell.add_attribute(Attribute::Dim),
+fn marked_cell(cell: Cell, tone: Option<Tone>) -> Cell {
+    match tone {
+        Some(Tone::Heading) => cell.add_attribute(Attribute::Bold),
+        Some(Tone::Muted) => cell.add_attribute(Attribute::Dim),
+        Some(Tone::Danger) => cell.add_attribute(Attribute::Underlined),
+        Some(Tone::Urgent) => cell
+            .add_attribute(Attribute::Bold)
+            .add_attribute(Attribute::Underlined),
+        Some(Tone::Warning) => cell.add_attribute(Attribute::Italic),
+        Some(Tone::Accent) => cell.add_attribute(Attribute::CrossedOut),
+        Some(Tone::Success) => cell.add_attribute(Attribute::Reverse),
         None => cell,
     }
 }
@@ -486,7 +550,7 @@ fn ansi(text: &str, code: &str) -> String {
 fn resolve_color_markers(text: &str) -> String {
     text.replace("\u{1b}[4m", "\u{1b}[31m")
         .replace("\u{1b}[3m", "\u{1b}[33m")
-        .replace("\u{1b}[7m", "\u{1b}[34m")
+        .replace("\u{1b}[7m", "\u{1b}[32m")
         .replace("\u{1b}[9m", "\u{1b}[36m")
 }
 
@@ -571,10 +635,17 @@ pub fn clean(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\n' | '\r' | '\t' => ' ',
-            c if c.is_control() => '\u{fffd}',
+            c if c.is_control() || is_bidi_override_or_isolate(c) => '\u{fffd}',
             c => c,
         })
         .collect()
+}
+
+fn is_bidi_override_or_isolate(character: char) -> bool {
+    matches!(
+        character,
+        '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 pub fn clean_lines(text: &str) -> String {
@@ -597,10 +668,10 @@ impl Tabular for Note {
         ]
     }
 
-    fn cell_style(&self, column: usize, _: &Zoned) -> Option<CellStyle> {
+    fn cell_style(&self, column: usize, _: &Zoned) -> Option<Tone> {
         match column {
-            1 if self.folder.is_some() => Some(CellStyle::Cyan),
-            2 if self.locked => Some(CellStyle::Yellow),
+            1 if self.folder.is_some() => Some(Tone::Muted),
+            2 if self.locked => Some(Tone::Warning),
             _ => None,
         }
     }
@@ -614,6 +685,97 @@ impl Summary for Note {
     fn detail(&self) -> Option<String> {
         self.folder.as_ref().map(|folder| format!("in {folder}"))
     }
+}
+
+impl Tabular for NoteFolder {
+    const HEADER: &'static [&'static str] = &["NAME", "ACCOUNT"];
+    const TITLE_COLUMN: usize = 0;
+
+    fn row(&self, _: &Zoned) -> Vec<String> {
+        vec![self.name.clone(), self.account.clone().unwrap_or_default()]
+    }
+
+    fn cell_style(&self, _: usize, _: &Zoned) -> Option<Tone> {
+        None
+    }
+}
+
+impl Summary for NoteFolder {
+    fn title(&self) -> &str {
+        &self.name
+    }
+
+    fn detail(&self) -> Option<String> {
+        self.account.as_ref().map(|account| format!("in {account}"))
+    }
+}
+
+impl Tabular for ReminderListInfo {
+    const HEADER: &'static [&'static str] = &["NAME", "SOURCE", "TYPE", "WRITABLE", "DEFAULT"];
+    const TITLE_COLUMN: usize = 0;
+
+    fn row(&self, _: &Zoned) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            self.source.clone().unwrap_or_default(),
+            self.kind.as_str().into(),
+            yes(self.writable),
+            yes(self.default),
+        ]
+    }
+
+    fn cell_style(&self, column: usize, _: &Zoned) -> Option<Tone> {
+        match column {
+            4 if self.default => Some(Tone::Accent),
+            _ => None,
+        }
+    }
+}
+
+impl Summary for ReminderListInfo {
+    fn title(&self) -> &str {
+        &self.name
+    }
+
+    fn detail(&self) -> Option<String> {
+        self.source.as_ref().map(|source| format!("in {source}"))
+    }
+}
+
+impl Tabular for CalendarInfo {
+    const HEADER: &'static [&'static str] = &["NAME", "SOURCE", "TYPE", "WRITABLE", "DEFAULT"];
+    const TITLE_COLUMN: usize = 0;
+
+    fn row(&self, _: &Zoned) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            self.source.clone().unwrap_or_default(),
+            self.kind.as_str().into(),
+            yes(self.writable),
+            yes(self.default),
+        ]
+    }
+
+    fn cell_style(&self, column: usize, _: &Zoned) -> Option<Tone> {
+        match column {
+            4 if self.default => Some(Tone::Accent),
+            _ => None,
+        }
+    }
+}
+
+impl Summary for CalendarInfo {
+    fn title(&self) -> &str {
+        &self.name
+    }
+
+    fn detail(&self) -> Option<String> {
+        self.source.as_ref().map(|source| format!("in {source}"))
+    }
+}
+
+fn yes(value: bool) -> String {
+    if value { "yes".into() } else { String::new() }
 }
 
 impl Tabular for Reminder {
@@ -630,14 +792,14 @@ impl Tabular for Reminder {
         ]
     }
 
-    fn cell_style(&self, column: usize, now: &Zoned) -> Option<CellStyle> {
+    fn cell_style(&self, column: usize, now: &Zoned) -> Option<Tone> {
         match column {
-            1 if reminder_is_overdue(self, now) => Some(CellStyle::Red),
-            1 if reminder_is_due_today(self, now.date(), now) => Some(CellStyle::Yellow),
+            1 if reminder_is_overdue(self, now) => Some(Tone::Danger),
+            1 if reminder_is_due_today(self, now.date(), now) => Some(Tone::Warning),
             2 => match self.priority {
-                Some(Priority::High) => Some(CellStyle::Red),
-                Some(Priority::Medium) => Some(CellStyle::Yellow),
-                Some(Priority::Low) => Some(CellStyle::Blue),
+                Some(Priority::High) => Some(Tone::Urgent),
+                Some(Priority::Medium) => Some(Tone::Warning),
+                Some(Priority::Low) => Some(Tone::Muted),
                 None => None,
             },
             _ => None,
@@ -746,8 +908,8 @@ impl Tabular for Event {
         vec![start.to_string(), self.title.clone()]
     }
 
-    fn cell_style(&self, column: usize, _: &Zoned) -> Option<CellStyle> {
-        (column == 0).then_some(CellStyle::Dim)
+    fn cell_style(&self, column: usize, _: &Zoned) -> Option<Tone> {
+        (column == 0).then_some(Tone::Accent)
     }
 }
 
@@ -758,6 +920,78 @@ struct NoteJson<'a> {
     folder: Option<&'a str>,
     modified: Option<Timestamp>,
     locked: bool,
+}
+
+#[derive(Serialize)]
+struct NoteFolderJson<'a> {
+    id: &'a str,
+    name: &'a str,
+    account: Option<&'a str>,
+    account_id: Option<&'a str>,
+}
+
+impl Serialize for NoteFolder {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        NoteFolderJson {
+            id: &self.id,
+            name: &self.name,
+            account: self.account.as_deref(),
+            account_id: self.account_id.as_deref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Serialize)]
+struct ReminderListInfoJson<'a> {
+    id: &'a str,
+    name: &'a str,
+    source: Option<&'a str>,
+    source_id: Option<&'a str>,
+    r#type: &'static str,
+    writable: bool,
+    default: bool,
+}
+
+impl Serialize for ReminderListInfo {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ReminderListInfoJson {
+            id: &self.id,
+            name: &self.name,
+            source: self.source.as_deref(),
+            source_id: self.source_id.as_deref(),
+            r#type: self.kind.as_str(),
+            writable: self.writable,
+            default: self.default,
+        }
+        .serialize(serializer)
+    }
+}
+
+#[derive(Serialize)]
+struct CalendarInfoJson<'a> {
+    id: &'a str,
+    name: &'a str,
+    source: Option<&'a str>,
+    source_id: Option<&'a str>,
+    r#type: &'static str,
+    writable: bool,
+    default: bool,
+}
+
+impl Serialize for CalendarInfo {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        CalendarInfoJson {
+            id: &self.id,
+            name: &self.name,
+            source: self.source.as_deref(),
+            source_id: self.source_id.as_deref(),
+            r#type: self.kind.as_str(),
+            writable: self.writable,
+            default: self.default,
+        }
+        .serialize(serializer)
+    }
 }
 
 impl Serialize for Note {
@@ -909,8 +1143,15 @@ impl Tabular for JournalSummary {
         ]
     }
 
-    fn cell_style(&self, _: usize, _: &Zoned) -> Option<CellStyle> {
-        None
+    fn cell_style(&self, column: usize, _: &Zoned) -> Option<Tone> {
+        match column {
+            0 => Some(Tone::Muted),
+            3 if self.status == JournalStatus::Pending => Some(Tone::Warning),
+            3 => Some(Tone::Success),
+            5 if self.undone => Some(Tone::Muted),
+            10 if self.unrecorded > 0 => Some(Tone::Warning),
+            _ => None,
+        }
     }
 }
 
@@ -1053,6 +1294,18 @@ mod tests {
 
     fn style(color: bool) -> Style {
         Style { color, width: None }
+    }
+
+    #[test]
+    fn terminal_capabilities_gate_color() {
+        assert!(Style::from_terminal(true, false, false, Some(80)).color);
+        assert!(!Style::from_terminal(false, false, false, Some(80)).color);
+        assert!(!Style::from_terminal(true, true, false, Some(80)).color);
+        assert!(!Style::from_terminal(true, false, true, Some(80)).color);
+        assert_eq!(
+            Style::from_terminal(true, false, false, Some(80)).width,
+            Some(80)
+        );
     }
 
     fn strip_ansi(text: &str) -> String {
@@ -1341,11 +1594,14 @@ mod tests {
         let colored = list(&reminders, false, &test_now(), style(true)).unwrap();
         assert_snapshot!(visible_escapes(&colored), @r"
         \x1b[1mTITLE\x1b[0m                  \x1b[1mDUE\x1b[0m         \x1b[1mPRIORITY\x1b[0m
-        Submit expense report  \x1b[31m2026-10-24\x1b[0m  \x1b[31mhigh\x1b[0m
+        Submit expense report  \x1b[31m2026-10-24\x1b[0m  \x1b[1m\x1b[31mhigh\x1b[0m
         Review pull request    \x1b[33m2026-10-26\x1b[0m  \x1b[33mmedium\x1b[0m
-        Plan team retreat      2026-11-02  \x1b[34mlow\x1b[0m
+        Plan team retreat      2026-11-02  \x1b[2mlow\x1b[0m
         ");
         assert!(!colored.contains("[38;5;"));
+        for marker in ["\u{1b}[3m", "\u{1b}[4m", "\u{1b}[7m", "\u{1b}[9m"] {
+            assert!(!colored.contains(marker));
+        }
     }
 
     #[test]
@@ -1383,7 +1639,7 @@ mod tests {
             locked: true,
         };
         let note_table = list(&[note], false, &test_now(), style(true)).unwrap();
-        assert!(note_table.contains("\u{1b}[36mWork\u{1b}[0m"));
+        assert!(note_table.contains("\u{1b}[2mWork\u{1b}[0m"));
         assert!(note_table.contains("\u{1b}[33myes\u{1b}[0m"));
 
         let event = Event {
@@ -1396,11 +1652,67 @@ mod tests {
             all_day: false,
         };
         let event_table = list(&[event], false, &test_now(), style(true)).unwrap();
-        assert!(event_table.contains("\u{1b}[2m2026-10-26 14:00\u{1b}[0m"));
+        assert!(event_table.contains("\u{1b}[36m2026-10-26 14:00\u{1b}[0m"));
         assert_eq!(
-            styled_heading("Events", style(true)),
-            "\u{1b}[1mEvents\u{1b}[0m"
+            styled_heading("Events", Tone::Accent, style(true)),
+            "\u{1b}[1;36mEvents\u{1b}[0m"
         );
+        assert_eq!(
+            styled_heading("Overdue", Tone::Danger, style(true)),
+            "\u{1b}[1;31mOverdue\u{1b}[0m"
+        );
+        assert_eq!(
+            styled_heading("Due today", Tone::Warning, style(true)),
+            "\u{1b}[1;33mDue today\u{1b}[0m"
+        );
+    }
+
+    #[test]
+    fn colored_single_output_has_clear_hierarchy() {
+        let note = Note {
+            id: "note-1".into(),
+            title: "Launch plan".into(),
+            folder: Some("Work".into()),
+            modified: None,
+            locked: false,
+        };
+        let plain = single(&note, "Created note", false, style(false)).unwrap();
+        let colored = single(&note, "Created note", false, style(true)).unwrap();
+        assert_snapshot!(visible_escapes(&colored), @r#"\x1b[32mCreated note\x1b[0m "\x1b[1mLaunch plan\x1b[0m" \x1b[2min Work\x1b[0m"#);
+        assert_eq!(strip_ansi(&colored), plain);
+    }
+
+    #[test]
+    fn colored_doctor_output_uses_status_and_fix_tones() {
+        let checks = [
+            Check {
+                id: "ready".into(),
+                status: CheckStatus::Pass,
+                message: "Reminders is ready".into(),
+                fix: None,
+            },
+            Check {
+                id: "warning".into(),
+                status: CheckStatus::Warning,
+                message: "Editor is not configured".into(),
+                fix: Some("Set VISUAL or EDITOR.".into()),
+            },
+            Check {
+                id: "failed".into(),
+                status: CheckStatus::Fail,
+                message: "Calendar access is denied".into(),
+                fix: None,
+            },
+        ];
+        let plain = doctor(&checks, false, style(false)).unwrap();
+        let colored = doctor(&checks, false, style(true)).unwrap();
+        assert_snapshot!(visible_escapes(&colored), @r"
+        \x1b[32m✓\x1b[0m Reminders is ready
+        \x1b[33m!\x1b[0m Editor is not configured
+          \x1b[36mFix:\x1b[0m Set VISUAL or EDITOR.
+        \x1b[31m✗\x1b[0m Calendar access is denied
+        ");
+        assert_eq!(strip_ansi(&colored), plain);
     }
 
     #[test]
@@ -1412,10 +1724,16 @@ mod tests {
             modified: None,
             locked: false,
         };
-        assert_snapshot!(
-            single(&note, "Created note", false, Style::default()).unwrap(),
-            @r#"Created note "Hi�]0;pwned� there""#
-        );
+        let plain = single(&note, "Created note", false, Style::default()).unwrap();
+        assert_snapshot!(plain, @r#"Created note "Hi�]0;pwned� there""#);
+        let colored = single(&note, "Created note", false, style(true)).unwrap();
+        assert_eq!(strip_ansi(&colored), plain);
+        assert!(!strip_ansi(&colored).contains('\u{1b}'));
+        assert_eq!(clean("before\u{202e}after"), "before�after");
+        assert_eq!(clean("before\u{2067}after"), "before�after");
+        assert_eq!(clean("👩\u{200d}💻"), "👩\u{200d}💻");
+        assert_eq!(clean("می\u{200c}روم"), "می\u{200c}روم");
+        assert_eq!(clean("\u{200f}مرحبا"), "\u{200f}مرحبا");
         assert_snapshot!(list(std::slice::from_ref(&note), false, &test_now(), Style::default()).unwrap(), @r"
         TITLE               FOLDER  LOCKED
         Hi�]0;pwned� there

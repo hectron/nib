@@ -6,7 +6,9 @@ use jiff::civil::Date;
 use jiff::{ToSpan, Zoned};
 use thiserror::Error;
 
-use crate::domain::{Config, EventQuery, NewNote, NewReminder, NoteQuery, Priority};
+use crate::domain::{
+    Config, EventQuery, NewNote, NewReminder, NewResource, NoteQuery, Priority, ResourceSelector,
+};
 
 pub(crate) mod completions;
 pub mod output;
@@ -36,12 +38,30 @@ pub enum Action {
     },
     NewNote(NewNote),
     ListNotes(NoteQuery),
+    ListNoteFolders,
+    CreateNoteFolder(NewResource),
+    RenameNoteFolder {
+        folder: ResourceSelector,
+        name: String,
+    },
     AddTask(NewReminder),
     ListTasks,
+    ListReminderLists,
+    CreateReminderList(NewResource),
+    RenameReminderList {
+        list: ResourceSelector,
+        name: String,
+    },
     EditTasks {
         list: Option<String>,
     },
     ListEvents(EventQuery),
+    ListCalendars,
+    CreateCalendar(NewResource),
+    RenameCalendar {
+        calendar: ResourceSelector,
+        name: String,
+    },
     Log,
     Undo {
         entry: Option<String>,
@@ -200,6 +220,39 @@ enum NoteAction {
     /// List notes (the default)
     #[command(visible_alias = "ls")]
     List,
+    /// List and manage note folders
+    Folders(NoteFoldersArgs),
+}
+
+#[derive(Debug, Args)]
+struct NoteFoldersArgs {
+    #[command(subcommand)]
+    action: Option<NoteFolderAction>,
+}
+
+#[derive(Debug, Subcommand)]
+enum NoteFolderAction {
+    /// Create a note folder
+    Create {
+        #[arg(value_parser = resource_value)]
+        name: String,
+        /// Account name or identifier; defaults to the Notes default account
+        #[arg(long, value_parser = resource_value)]
+        account: Option<String>,
+    },
+    /// Rename a note folder
+    Rename {
+        #[arg(value_parser = resource_value)]
+        resource: String,
+        #[arg(value_parser = resource_value)]
+        new_name: String,
+        /// Interpret `RESOURCE` as a folder identifier instead of a name
+        #[arg(long, conflicts_with = "account")]
+        id: bool,
+        /// Account name or identifier used to disambiguate `RESOURCE`
+        #[arg(long, value_parser = resource_value)]
+        account: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -236,11 +289,44 @@ enum TaskAction {
     /// List reminders (the default)
     #[command(visible_alias = "ls")]
     List,
+    /// List and manage reminder lists
+    Lists(ReminderListsArgs),
     /// Edit reminders as a Markdown file in $VISUAL or $EDITOR
     Edit {
         /// Only edit this list
         #[arg(short, long)]
         list: Option<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+struct ReminderListsArgs {
+    #[command(subcommand)]
+    action: Option<ReminderListAction>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ReminderListAction {
+    /// Create a reminder list
+    Create {
+        #[arg(value_parser = resource_value)]
+        name: String,
+        /// `EventKit` source name or identifier; defaults to the current default list's source
+        #[arg(long, value_parser = resource_value)]
+        source: Option<String>,
+    },
+    /// Rename a reminder list
+    Rename {
+        #[arg(value_parser = resource_value)]
+        resource: String,
+        #[arg(value_parser = resource_value)]
+        new_name: String,
+        /// Interpret `RESOURCE` as a list identifier instead of a name
+        #[arg(long, conflicts_with = "source")]
+        id: bool,
+        /// `EventKit` source name or identifier used to disambiguate `RESOURCE`
+        #[arg(long, value_parser = resource_value)]
+        source: Option<String>,
     },
 }
 
@@ -282,6 +368,39 @@ enum CalAction {
     /// List events (the default)
     #[command(visible_alias = "ls")]
     List,
+    /// List and manage calendars
+    Calendars(CalendarsArgs),
+}
+
+#[derive(Debug, Args)]
+struct CalendarsArgs {
+    #[command(subcommand)]
+    action: Option<CalendarResourceAction>,
+}
+
+#[derive(Debug, Subcommand)]
+enum CalendarResourceAction {
+    /// Create a calendar
+    Create {
+        #[arg(value_parser = resource_value)]
+        name: String,
+        /// `EventKit` source name or identifier; defaults to the current default calendar's source
+        #[arg(long, value_parser = resource_value)]
+        source: Option<String>,
+    },
+    /// Rename a calendar
+    Rename {
+        #[arg(value_parser = resource_value)]
+        resource: String,
+        #[arg(value_parser = resource_value)]
+        new_name: String,
+        /// Interpret `RESOURCE` as a calendar identifier instead of a name
+        #[arg(long, conflicts_with = "source")]
+        id: bool,
+        /// `EventKit` source name or identifier used to disambiguate `RESOURCE`
+        #[arg(long, value_parser = resource_value)]
+        source: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -296,6 +415,29 @@ fn word(s: &str) -> Result<String, &'static str> {
         Err("title can't be blank")
     } else {
         Ok(s.to_owned())
+    }
+}
+
+fn resource_value(value: &str) -> Result<String, &'static str> {
+    if value.trim().is_empty() {
+        Err("value can't be blank")
+    } else if value.trim() != value {
+        Err("value can't start or end with whitespace")
+    } else if value.chars().any(char::is_control) {
+        Err("value can't contain control characters")
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn resource_selector(resource: String, id: bool, owner: Option<String>) -> ResourceSelector {
+    if id {
+        ResourceSelector::Id(resource)
+    } else {
+        ResourceSelector::Name {
+            name: resource,
+            owner,
+        }
     }
 }
 
@@ -345,6 +487,124 @@ pub(crate) enum ActionError {
     Date(#[from] jiff::Error),
     #[error(transparent)]
     Inline(#[from] task::InlineError),
+    #[error("--folder can't be used with `nib note folders`")]
+    NoteFoldersFilter,
+    #[error("--week and --calendar can't be used with `nib cal calendars`")]
+    CalendarResourceFilter,
+}
+
+fn note_action(
+    action: Option<NoteAction>,
+    folder: Option<String>,
+    config: &Config,
+) -> Result<Action, ActionError> {
+    Ok(match action {
+        Some(NoteAction::New(Title { words })) => Action::NewNote(NewNote {
+            title: words.join(" "),
+            folder: folder.or_else(|| config.note.folder.clone()),
+        }),
+        Some(NoteAction::List) | None => Action::ListNotes(NoteQuery { folder }),
+        Some(NoteAction::Folders(NoteFoldersArgs { action })) => {
+            if folder.is_some() {
+                return Err(ActionError::NoteFoldersFilter);
+            }
+            match action {
+                None => Action::ListNoteFolders,
+                Some(NoteFolderAction::Create { name, account }) => {
+                    Action::CreateNoteFolder(NewResource {
+                        name,
+                        owner: account,
+                    })
+                }
+                Some(NoteFolderAction::Rename {
+                    resource,
+                    new_name,
+                    id,
+                    account,
+                }) => Action::RenameNoteFolder {
+                    folder: resource_selector(resource, id, account),
+                    name: new_name,
+                },
+            }
+        }
+    })
+}
+
+fn task_action(
+    action: Option<TaskAction>,
+    now: &Zoned,
+    config: &Config,
+) -> Result<Action, ActionError> {
+    Ok(match action {
+        Some(TaskAction::Add {
+            title: Title { words },
+            opts,
+        }) => opts.add(&words, now, config)?,
+        Some(TaskAction::List) | None => Action::ListTasks,
+        Some(TaskAction::Lists(ReminderListsArgs { action })) => match action {
+            None => Action::ListReminderLists,
+            Some(ReminderListAction::Create { name, source }) => {
+                Action::CreateReminderList(NewResource {
+                    name,
+                    owner: source,
+                })
+            }
+            Some(ReminderListAction::Rename {
+                resource,
+                new_name,
+                id,
+                source,
+            }) => Action::RenameReminderList {
+                list: resource_selector(resource, id, source),
+                name: new_name,
+            },
+        },
+        Some(TaskAction::Edit { list }) => Action::EditTasks {
+            list: list.or_else(|| config.task.list.clone()),
+        },
+    })
+}
+
+fn calendar_action(
+    action: Option<CalAction>,
+    week: bool,
+    calendar: Vec<String>,
+    now: &Zoned,
+    config: &Config,
+) -> Result<Action, ActionError> {
+    Ok(match action {
+        Some(CalAction::List) | None => Action::ListEvents(EventQuery {
+            range: days_from_today(now, if week { 7 } else { 1 })?,
+            calendars: if calendar.is_empty() {
+                config.cal.calendars.clone()
+            } else {
+                calendar
+            },
+        }),
+        Some(CalAction::Calendars(CalendarsArgs { action })) => {
+            if week || !calendar.is_empty() {
+                return Err(ActionError::CalendarResourceFilter);
+            }
+            match action {
+                None => Action::ListCalendars,
+                Some(CalendarResourceAction::Create { name, source }) => {
+                    Action::CreateCalendar(NewResource {
+                        name,
+                        owner: source,
+                    })
+                }
+                Some(CalendarResourceAction::Rename {
+                    resource,
+                    new_name,
+                    id,
+                    source,
+                }) => Action::RenameCalendar {
+                    calendar: resource_selector(resource, id, source),
+                    name: new_name,
+                },
+            }
+        }
+    })
 }
 
 impl Command {
@@ -371,13 +631,7 @@ impl Command {
             Command::Note(NoteArgs {
                 action,
                 folder: Folder { folder },
-            }) => match action {
-                Some(NoteAction::New(Title { words })) => Action::NewNote(NewNote {
-                    title: words.join(" "),
-                    folder: folder.or_else(|| config.note.folder.clone()),
-                }),
-                Some(NoteAction::List) | None => Action::ListNotes(NoteQuery { folder }),
-            },
+            }) => note_action(action, folder, config)?,
             Command::N(NoteCapture {
                 words,
                 folder: Folder { folder },
@@ -391,16 +645,7 @@ impl Command {
                     })
                 }
             }
-            Command::Task(TaskArgs { action }) => match action {
-                Some(TaskAction::Add {
-                    title: Title { words },
-                    opts,
-                }) => opts.add(&words, now, config)?,
-                Some(TaskAction::List) | None => Action::ListTasks,
-                Some(TaskAction::Edit { list }) => Action::EditTasks {
-                    list: list.or_else(|| config.task.list.clone()),
-                },
-            },
+            Command::Task(TaskArgs { action }) => task_action(action, now, config)?,
             Command::T(TaskCapture { words, opts }) => {
                 if words.is_empty() {
                     Action::ListTasks
@@ -412,16 +657,7 @@ impl Command {
                 action,
                 week,
                 calendar,
-            }) => match action {
-                Some(CalAction::List) | None => Action::ListEvents(EventQuery {
-                    range: days_from_today(now, if week { 7 } else { 1 })?,
-                    calendars: if calendar.is_empty() {
-                        config.cal.calendars.clone()
-                    } else {
-                        calendar
-                    },
-                }),
-            },
+            }) => calendar_action(action, week, calendar, now, config)?,
             Command::Log => Action::Log,
             Command::Undo(UndoArgs { entry, resolve }) => Action::Undo { entry, resolve },
         }))
@@ -647,6 +883,40 @@ mod tests {
             (&["note", "-f", "Work", "ls"], notes(Some("Work"))),
             (&["note", "list", "--folder", "Work"], notes(Some("Work"))),
             (&["note", "--json", "list"], notes(None)),
+            (&["note", "folders"], Action::ListNoteFolders),
+            (&["--json", "note", "folders"], Action::ListNoteFolders),
+            (
+                &[
+                    "note",
+                    "folders",
+                    "create",
+                    "Archive",
+                    "--account",
+                    "iCloud",
+                ],
+                Action::CreateNoteFolder(NewResource {
+                    name: "Archive".into(),
+                    owner: Some("iCloud".into()),
+                }),
+            ),
+            (
+                &[
+                    "note",
+                    "folders",
+                    "rename",
+                    "Work",
+                    "Projects",
+                    "--account",
+                    "iCloud",
+                ],
+                Action::RenameNoteFolder {
+                    folder: ResourceSelector::Name {
+                        name: "Work".into(),
+                        owner: Some("iCloud".into()),
+                    },
+                    name: "Projects".into(),
+                },
+            ),
             (
                 &["note", "new", "Meeting with Team", "-f", "Work"],
                 note("Meeting with Team", Some("Work")),
@@ -680,6 +950,22 @@ mod tests {
             (&["task"], Action::ListTasks),
             (&["todo", "ls"], Action::ListTasks),
             (&["task", "--json", "list"], Action::ListTasks),
+            (&["task", "lists"], Action::ListReminderLists),
+            (&["--json", "todo", "lists"], Action::ListReminderLists),
+            (
+                &["task", "lists", "create", "Errands"],
+                Action::CreateReminderList(NewResource {
+                    name: "Errands".into(),
+                    owner: None,
+                }),
+            ),
+            (
+                &["task", "lists", "rename", "list-work", "Projects", "--id"],
+                Action::RenameReminderList {
+                    list: ResourceSelector::Id("list-work".into()),
+                    name: "Projects".into(),
+                },
+            ),
         ]);
     }
 
@@ -722,7 +1008,89 @@ mod tests {
             (&["cal", "--week"], week.clone()),
             (&["c", "-w", "ls"], week.clone()),
             (&["cal", "list", "-w"], week),
+            (&["cal", "calendars"], Action::ListCalendars),
+            (&["--json", "c", "calendars"], Action::ListCalendars),
+            (
+                &["cal", "calendars", "create", "Travel", "--source", "iCloud"],
+                Action::CreateCalendar(NewResource {
+                    name: "Travel".into(),
+                    owner: Some("iCloud".into()),
+                }),
+            ),
+            (
+                &[
+                    "cal",
+                    "calendars",
+                    "rename",
+                    "Work",
+                    "Projects",
+                    "--source",
+                    "iCloud",
+                ],
+                Action::RenameCalendar {
+                    calendar: ResourceSelector::Name {
+                        name: "Work".into(),
+                        owner: Some("iCloud".into()),
+                    },
+                    name: "Projects".into(),
+                },
+            ),
         ]);
+    }
+
+    #[test]
+    fn resource_ids_conflict_with_owner_disambiguation() {
+        for args in [
+            &[
+                "note",
+                "folders",
+                "rename",
+                "folder-1",
+                "Archive",
+                "--id",
+                "--account",
+                "iCloud",
+            ][..],
+            &[
+                "task", "lists", "rename", "list-1", "Archive", "--id", "--source", "iCloud",
+            ][..],
+            &[
+                "cal",
+                "calendars",
+                "rename",
+                "calendar-1",
+                "Archive",
+                "--id",
+                "--source",
+                "iCloud",
+            ][..],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(["nib"].into_iter().chain(args.iter().copied()))
+                    .unwrap_err()
+                    .kind(),
+                ErrorKind::ArgumentConflict
+            );
+        }
+    }
+
+    #[test]
+    fn resource_commands_reject_item_filters() {
+        let now = at(date(2026, 10, 26), 9, 30);
+        let config = Config::default();
+        assert!(matches!(
+            action_with_config(&now, &["note", "folders", "--folder", "Work"], &config),
+            Err(ActionError::NoteFoldersFilter)
+        ));
+        for args in [
+            &["cal", "calendars", "--week"][..],
+            &["cal", "calendars", "--calendar", "Work"][..],
+        ] {
+            assert!(matches!(
+                action_with_config(&now, args, &config),
+                Err(ActionError::CalendarResourceFilter)
+            ));
+        }
     }
 
     #[test]
@@ -765,6 +1133,20 @@ mod tests {
     #[test]
     fn blank_titles_are_rejected() {
         for args in [&["n", ""][..], &["t", "  "], &["note", "new", ""]] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ValueValidation, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn blank_or_padded_resource_values_are_rejected() {
+        for args in [
+            &["note", "folders", "create", ""][..],
+            &["task", "lists", "create", " Work"],
+            &["cal", "calendars", "rename", "Work", "Projects "],
+            &["task", "lists", "create", "Work", "--source", "  "],
+            &["note", "folders", "rename", "Work", "Projects\nArchive"],
+        ] {
             let err = parse(args).unwrap_err();
             assert_eq!(err.kind(), ErrorKind::ValueValidation, "{args:?}");
         }

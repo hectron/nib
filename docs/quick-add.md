@@ -3,7 +3,7 @@
 Add a reminder with a title followed by a due date, priority, or list:
 
 ```bash
-nib t Pay rent fri !high '#bills'
+nib t Pay rent fri '!high' '#bills'
 ```
 
 This creates “Pay rent,” due Friday, with high priority in the existing `bills` list. The same trailing tokens work with `nib task add`.
@@ -45,13 +45,21 @@ Quick-add reads these fields only from the end of the title:
 - `!low`, `!medium`, or `!high` for priority.
 - `#NAME` for a reminder list.
 
-The tokens can appear in any order. Quote a `#NAME` token so your shell does not treat it as a comment. Explicit flags take precedence over inline fields:
+The tokens can appear in any order. Quote `!PRIORITY` and `#NAME` tokens so your shell does not expand `!` as history or treat `#` as a comment. Explicit flags take precedence over inline fields:
 
 ```bash
-nib t Pay rent fri !low '#bills' --due tomorrow --priority high --list home
+nib t Pay rent fri '!low' '#bills' --due tomorrow --priority high --list home
 ```
 
 That reminder is due tomorrow, with high priority in the `home` list.
+
+The shell also parses quotes and other special characters in titles before nib starts. Double-quote a title containing an apostrophe, then leave due-date tokens outside the title so quick-add can recognize them:
+
+```bash
+nib t "Get Apple Cider from the Farmer's Market" tomorrow '!high'
+```
+
+An unmatched apostrophe leaves an interactive shell waiting for the rest of a quote; nib cannot report that error because it has not been started yet.
 
 To keep a recognized trailing token in the title, prefix it with a backslash. Quote the token so the shell passes that backslash to nib:
 
