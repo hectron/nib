@@ -1,6 +1,6 @@
 use jiff::Zoned;
 use jiff::civil::Date;
-use miette::{IntoDiagnostic, Result};
+use miette::Result;
 
 use crate::app::{edit, journal, undo};
 use crate::cli::Action;
@@ -79,15 +79,7 @@ pub fn run(
             json,
             style,
         ),
-        Action::Log => {
-            let _lock = host.lock_journal().into_diagnostic()?;
-            output::journal(
-                &journal::summaries(now.timestamp(), host)?,
-                json,
-                now,
-                style,
-            )
-        }
+        Action::Log => output::journal(&journal::log(now.timestamp(), host)?, json, now, style),
         Action::Undo {
             entry: _,
             resolve: Some(id),

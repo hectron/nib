@@ -849,9 +849,8 @@ fn format_reminder_due(reminder: &Reminder, now: Option<&Zoned>) -> String {
     };
     let mut due = format!("{date} {}", time.strftime("%H:%M"));
     if let Some(zone) = reminder.due_time_zone.as_deref() {
-        let is_local = now.is_some_and(|now| {
-            time_zone_is_local_at(zone, now.time_zone(), date, time).is_ok_and(|local| local)
-        });
+        let is_local =
+            now.is_some_and(|now| time_zone_is_local_at(zone, now.time_zone(), date, time));
         if !is_local {
             due.push(' ');
             due.push_str(zone);
@@ -1457,6 +1456,31 @@ mod tests {
         assert_eq!(
             single_at(&reminders[1], "Added", false, Style::default(), &now).unwrap(),
             "Added \"foreign\" (due 2026-12-01 09:00 GMT-0500)"
+        );
+    }
+
+    #[test]
+    fn gap_time_zone_is_hidden_when_it_matches_the_local_offset() {
+        let reminder = Reminder {
+            id: "gap".into(),
+            title: "Gap call".into(),
+            due: Some(date(2027, 3, 14)),
+            due_time: Some(jiff::civil::time(2, 30, 0, 0)),
+            due_time_zone: Some("GMT-0600".into()),
+            due_at: None,
+            priority: None,
+        };
+        let now = date(2027, 3, 13)
+            .at(9, 0, 0, 0)
+            .to_zoned(TimeZone::posix("CST6CDT,M3.2.0,M11.1.0").unwrap())
+            .unwrap();
+        assert_snapshot!(list(std::slice::from_ref(&reminder), false, &now, Style::default()).unwrap(), @r"
+        TITLE     DUE               PRIORITY
+        Gap call  2027-03-14 02:30
+        ");
+        assert_eq!(
+            single_at(&reminder, "Added", false, Style::default(), &now).unwrap(),
+            "Added \"Gap call\" (due 2027-03-14 02:30)"
         );
     }
 

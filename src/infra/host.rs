@@ -28,7 +28,9 @@ pub trait Host {
     fn replace_journal(&mut self, id: &str, contents: &str) -> io::Result<PathBuf>;
     fn remove_journal(&mut self, id: &str) -> io::Result<()>;
     fn journal_files(&mut self, now: Timestamp) -> io::Result<Vec<JournalFile>>;
+    fn journal_files_without_cleanup(&mut self) -> io::Result<Vec<JournalFile>>;
     fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>>;
+    fn try_lock_journal(&mut self) -> io::Result<Option<Box<dyn JournalLock>>>;
 }
 
 pub struct System;
@@ -119,6 +121,28 @@ fn random_token() -> String {
 
 fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+fn open_journal_lock(dir: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join("journal.lock"))
+}
+
+fn try_lock_journal_in(dir: &Path) -> io::Result<Option<Box<dyn JournalLock>>> {
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let file = open_journal_lock(dir)?;
+    match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(Some(Box::new(file))),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn lock_exclusive(file: &File, waiting: impl FnOnce()) -> io::Result<()> {
@@ -427,6 +451,10 @@ fn backups_dir() -> io::Result<PathBuf> {
 }
 
 fn journal_files_in(dir: &Path, now: Timestamp) -> io::Result<Vec<JournalFile>> {
+    list_journal_files(dir, Some(now))
+}
+
+fn list_journal_files(dir: &Path, cleanup_at: Option<Timestamp>) -> io::Result<Vec<JournalFile>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -436,7 +464,7 @@ fn journal_files_in(dir: &Path, now: Timestamp) -> io::Result<Vec<JournalFile>> 
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if is_stale_journal_temporary(&path, now) {
+        if cleanup_at.is_some_and(|now| is_stale_journal_temporary(&path, now)) {
             let _ = std::fs::remove_file(&path);
             continue;
         }
@@ -566,20 +594,22 @@ impl Host for System {
         journal_files_in(&backups_dir()?, now)
     }
 
+    fn journal_files_without_cleanup(&mut self) -> io::Result<Vec<JournalFile>> {
+        list_journal_files(&backups_dir()?, None)
+    }
+
     fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>> {
         let dir = backups_dir()?;
         std::fs::create_dir_all(&dir)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(dir.join("journal.lock"))?;
+        let file = open_journal_lock(&dir)?;
         lock_exclusive(&file, || {
             self.say("Waiting for another nib command to finish…");
         })?;
         Ok(Box::new(file))
+    }
+
+    fn try_lock_journal(&mut self) -> io::Result<Option<Box<dyn JournalLock>>> {
+        try_lock_journal_in(&backups_dir()?)
     }
 }
 
@@ -650,6 +680,10 @@ impl Host for Memory {
     }
 
     fn journal_files(&mut self, _now: Timestamp) -> io::Result<Vec<JournalFile>> {
+        self.journal_files_without_cleanup()
+    }
+
+    fn journal_files_without_cleanup(&mut self) -> io::Result<Vec<JournalFile>> {
         Ok(self
             .journals
             .iter()
@@ -666,6 +700,10 @@ impl Host for Memory {
     fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>> {
         Ok(Box::new(()))
     }
+
+    fn try_lock_journal(&mut self) -> io::Result<Option<Box<dyn JournalLock>>> {
+        Ok(Some(Box::new(())))
+    }
 }
 
 #[cfg(test)]
@@ -680,8 +718,12 @@ pub struct Scripted {
     fail_replace_once: bool,
     fail_remove_once: bool,
     journal_replacement_on_answer: Option<(String, String)>,
+    journal_removal_on_answer: Option<String>,
+    journal_unreadable_on_answer: Option<(String, String)>,
     active_journal_locks: std::rc::Rc<std::cell::Cell<usize>>,
     pub journal_lock_count: usize,
+    pub journal_listings_with_cleanup: usize,
+    pub journal_listings_without_cleanup: usize,
 }
 
 #[cfg(test)]
@@ -713,8 +755,12 @@ impl Scripted {
             fail_replace_once: false,
             fail_remove_once: false,
             journal_replacement_on_answer: None,
+            journal_removal_on_answer: None,
+            journal_unreadable_on_answer: None,
             active_journal_locks: std::rc::Rc::new(std::cell::Cell::new(0)),
             journal_lock_count: 0,
+            journal_listings_with_cleanup: 0,
+            journal_listings_without_cleanup: 0,
         }
     }
 
@@ -744,6 +790,16 @@ impl Scripted {
         self
     }
 
+    pub fn remove_journal_on_answer(mut self, id: &str) -> Self {
+        self.journal_removal_on_answer = Some(id.into());
+        self
+    }
+
+    pub fn unreadable_journal_on_answer(mut self, id: &str, error: &str) -> Self {
+        self.journal_unreadable_on_answer = Some((id.into(), error.into()));
+        self
+    }
+
     pub fn journal_lock_state(&self) -> std::rc::Rc<std::cell::Cell<usize>> {
         self.active_journal_locks.clone()
     }
@@ -754,6 +810,38 @@ impl Scripted {
 
     pub fn fail_next_journal_remove(&mut self) {
         self.fail_remove_once = true;
+    }
+
+    fn listed_journals(&self) -> Vec<JournalFile> {
+        let readable = self
+            .journals
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _))| {
+                !self
+                    .unreadable_journals
+                    .iter()
+                    .any(|(unreadable, _)| unreadable == name)
+            })
+            .map(|(index, (name, contents))| JournalFile {
+                id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
+                path: PathBuf::from("/backups").join(name),
+                written: u128::try_from(index).unwrap_or_default(),
+                written_at: None,
+                contents: Ok(contents.clone()),
+            });
+        let unreadable =
+            self.unreadable_journals
+                .iter()
+                .enumerate()
+                .map(|(index, (name, error))| JournalFile {
+                    id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
+                    path: PathBuf::from("/backups").join(name),
+                    written: u128::try_from(self.journals.len() + index).unwrap_or_default(),
+                    written_at: None,
+                    contents: Err(error.clone()),
+                });
+        readable.chain(unreadable).collect()
     }
 }
 
@@ -770,17 +858,17 @@ impl Host for Scripted {
     }
 
     fn ask(&mut self, prompt: &str) -> io::Result<String> {
+        assert_eq!(
+            self.active_journal_locks.get(),
+            0,
+            "the journal lock must not be held while waiting for an answer"
+        );
         self.said.push(prompt.into());
         let answer = self
             .answers
             .pop_front()
             .expect("nib asked a question unexpectedly");
         if let Some((id, contents)) = self.journal_replacement_on_answer.take() {
-            if self.active_journal_locks.get() > 0 {
-                return Err(io::Error::other(
-                    "journal lock was held while waiting for an answer",
-                ));
-            }
             let entry = self
                 .journals
                 .iter_mut()
@@ -789,6 +877,26 @@ impl Host for Scripted {
                     io::Error::new(io::ErrorKind::NotFound, "journal entry not found")
                 })?;
             entry.1 = contents;
+        }
+        if let Some((id, error)) = self.journal_unreadable_on_answer.take() {
+            let (name, _) = self
+                .journals
+                .iter()
+                .find(|(name, _)| name.strip_suffix(".json").unwrap_or(name) == id)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "journal entry not found")
+                })?;
+            self.unreadable_journals.push((name.clone(), error));
+        }
+        if let Some(id) = self.journal_removal_on_answer.take() {
+            let index = self
+                .journals
+                .iter()
+                .position(|(name, _)| name.strip_suffix(".json").unwrap_or(name) == id)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "journal entry not found")
+                })?;
+            self.journals.remove(index);
         }
         Ok(answer)
     }
@@ -844,38 +952,34 @@ impl Host for Scripted {
     }
 
     fn journal_files(&mut self, _now: Timestamp) -> io::Result<Vec<JournalFile>> {
-        let readable = self
-            .journals
-            .iter()
-            .enumerate()
-            .map(|(index, (name, contents))| JournalFile {
-                id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
-                path: PathBuf::from("/backups").join(name),
-                written: u128::try_from(index).unwrap_or_default(),
-                written_at: None,
-                contents: Ok(contents.clone()),
-            });
-        let unreadable =
-            self.unreadable_journals
-                .iter()
-                .enumerate()
-                .map(|(index, (name, error))| JournalFile {
-                    id: name.strip_suffix(".json").unwrap_or(name).to_owned(),
-                    path: PathBuf::from("/backups").join(name),
-                    written: u128::try_from(self.journals.len() + index).unwrap_or_default(),
-                    written_at: None,
-                    contents: Err(error.clone()),
-                });
-        Ok(readable.chain(unreadable).collect())
+        self.journal_listings_with_cleanup += 1;
+        Ok(self.listed_journals())
+    }
+
+    fn journal_files_without_cleanup(&mut self) -> io::Result<Vec<JournalFile>> {
+        self.journal_listings_without_cleanup += 1;
+        Ok(self.listed_journals())
     }
 
     fn lock_journal(&mut self) -> io::Result<Box<dyn JournalLock>> {
+        assert_eq!(
+            self.active_journal_locks.get(),
+            0,
+            "journal lock is already held; a second lock would deadlock"
+        );
         self.journal_lock_count += 1;
         self.active_journal_locks
             .set(self.active_journal_locks.get() + 1);
         Ok(Box::new(ScriptedJournalLock {
             active: self.active_journal_locks.clone(),
         }))
+    }
+
+    fn try_lock_journal(&mut self) -> io::Result<Option<Box<dyn JournalLock>>> {
+        if self.active_journal_locks.get() > 0 {
+            return Ok(None);
+        }
+        self.lock_journal().map(Some)
     }
 }
 
@@ -1150,6 +1254,55 @@ mod tests {
         journal_files_in(&dir.0, now).unwrap();
 
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn journal_listing_without_cleanup_keeps_old_temporary_files() {
+        let dir = TestDir::new();
+        let path = dir
+            .0
+            .join("20261024T090000-journal-deadbeef.json.feedface.tmp");
+        secure_new(&path).unwrap();
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+
+        list_journal_files(&dir.0, None).unwrap();
+
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn try_lock_creates_nothing_for_a_missing_folder() {
+        let dir = TestDir::new();
+        let missing = dir.0.join("backups");
+
+        assert!(try_lock_journal_in(&missing).unwrap().is_none());
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn try_lock_reports_a_held_lock_without_waiting() {
+        let dir = TestDir::new();
+        let held = try_lock_journal_in(&dir.0).unwrap();
+        assert!(held.is_some());
+        assert!(try_lock_journal_in(&dir.0).unwrap().is_none());
+
+        drop(held);
+        assert!(try_lock_journal_in(&dir.0).unwrap().is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "journal lock is already held")]
+    fn scripted_host_rejects_a_second_journal_lock() {
+        let mut host = Scripted::new();
+        let _first = host.lock_journal().unwrap();
+
+        let _second = host.lock_journal();
     }
 
     #[test]
