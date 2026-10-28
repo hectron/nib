@@ -1682,6 +1682,7 @@ mod tests {
                 error: None,
             }],
             None,
+            &[],
         );
         assert!(crate::app::doctor::failed(&checks));
         assert_snapshot!(output::doctor(&checks, false, Style::default()).unwrap(), @r###"
@@ -1693,8 +1694,155 @@ mod tests {
         ! Apple Notes Automation access is checked on first use
           Fix: When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation.
         ✓ config is valid: /Users/me/project/nib.toml
+        ✓ no configuration lock files are left behind
         ! $VISUAL uses `code` without a wait flag
           Fix: Set VISUAL="code --wait".
+        "###);
+    }
+
+    #[test]
+    fn doctor_reports_stale_and_held_config_locks() {
+        let checks = crate::app::doctor::checks(
+            &FakeDoctor,
+            &[],
+            None,
+            &[
+                crate::app::doctor::ConfigLockFile {
+                    path: "/Users/me/project/nib.toml.lock".into(),
+                    age: std::time::Duration::from_secs(600),
+                },
+                crate::app::doctor::ConfigLockFile {
+                    path: "/Users/me/project/.nib.local.toml.lock".into(),
+                    age: std::time::Duration::from_secs(2),
+                },
+            ],
+        );
+        let lock = checks
+            .iter()
+            .find(|check| check.id == "config_lock")
+            .unwrap();
+        assert_eq!(lock.status, crate::app::doctor::CheckStatus::Fail);
+        assert_eq!(
+            lock.message,
+            "stale configuration lock: /Users/me/project/nib.toml.lock; held by another nib config command: /Users/me/project/.nib.local.toml.lock"
+        );
+        assert_eq!(
+            lock.fix.as_deref(),
+            Some("Remove /Users/me/project/nib.toml.lock if no nib config command is running.")
+        );
+
+        let held = crate::app::doctor::checks(
+            &FakeDoctor,
+            &[],
+            None,
+            &[crate::app::doctor::ConfigLockFile {
+                path: "/Users/me/project/nib.toml.lock".into(),
+                age: std::time::Duration::from_secs(2),
+            }],
+        );
+        let lock = held.iter().find(|check| check.id == "config_lock").unwrap();
+        assert_eq!(lock.status, crate::app::doctor::CheckStatus::Warning);
+        assert_eq!(
+            lock.message,
+            "configuration lock is held by another nib config command: /Users/me/project/nib.toml.lock"
+        );
+    }
+
+    fn mixed_config_lock_checks() -> Vec<crate::app::doctor::Check> {
+        crate::app::doctor::checks(
+            &FakeDoctor,
+            &[],
+            None,
+            &[
+                crate::app::doctor::ConfigLockFile {
+                    path: "/Users/me/project/nib.toml.lock".into(),
+                    age: std::time::Duration::from_secs(600),
+                },
+                crate::app::doctor::ConfigLockFile {
+                    path: "/Users/me/project/.nib.local.toml.lock".into(),
+                    age: std::time::Duration::from_secs(2),
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn doctor_text_reports_stale_and_held_config_locks() {
+        let checks = mixed_config_lock_checks();
+        assert_snapshot!(output::doctor(&checks, false, Style::default()).unwrap(), @r###"
+        ✓ macOS 26.1 is supported
+        ✓ macOS attributes permissions to Ghostty
+        ✓ Ghostty has full access to Reminders
+        ✗ Ghostty access to Calendars is denied
+          Fix: Turn on Ghostty in System Settings > Privacy & Security > Calendars.
+        ! Apple Notes Automation access is checked on first use
+          Fix: When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation.
+        ✓ no config files loaded; built-in defaults are valid
+        ✗ stale configuration lock: /Users/me/project/nib.toml.lock; held by another nib config command: /Users/me/project/.nib.local.toml.lock
+          Fix: Remove /Users/me/project/nib.toml.lock if no nib config command is running.
+        ! $VISUAL uses `code` without a wait flag
+          Fix: Set VISUAL="code --wait".
+        "###);
+    }
+
+    #[test]
+    fn doctor_json_reports_stale_and_held_config_locks() {
+        let checks = mixed_config_lock_checks();
+        assert_snapshot!(output::doctor(&checks, true, Style::default()).unwrap(), @r###"
+        {
+          "id": "doctor",
+          "ok": false,
+          "checks": [
+            {
+              "id": "macos",
+              "status": "pass",
+              "message": "macOS 26.1 is supported",
+              "fix": null
+            },
+            {
+              "id": "terminal",
+              "status": "pass",
+              "message": "macOS attributes permissions to Ghostty",
+              "fix": null
+            },
+            {
+              "id": "reminders",
+              "status": "pass",
+              "message": "Ghostty has full access to Reminders",
+              "fix": null
+            },
+            {
+              "id": "calendars",
+              "status": "fail",
+              "message": "Ghostty access to Calendars is denied",
+              "fix": "Turn on Ghostty in System Settings > Privacy & Security > Calendars."
+            },
+            {
+              "id": "notes",
+              "status": "warning",
+              "message": "Apple Notes Automation access is checked on first use",
+              "fix": "When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation."
+            },
+            {
+              "id": "config",
+              "status": "pass",
+              "message": "no config files loaded; built-in defaults are valid",
+              "fix": null
+            },
+            {
+              "id": "config_lock",
+              "status": "fail",
+              "message": "stale configuration lock: /Users/me/project/nib.toml.lock; held by another nib config command: /Users/me/project/.nib.local.toml.lock",
+              "fix": "Remove /Users/me/project/nib.toml.lock if no nib config command is running."
+            },
+            {
+              "id": "editor",
+              "status": "warning",
+              "message": "$VISUAL uses `code` without a wait flag",
+              "fix": "Set VISUAL=\"code --wait\"."
+            }
+          ]
+        }
         "###);
     }
 
@@ -1707,6 +1855,7 @@ mod tests {
                 error: None,
             }],
             None,
+            &[],
         );
         assert_snapshot!(output::doctor(&checks, true, Style::default()).unwrap(), @r###"
         {
@@ -1747,6 +1896,12 @@ mod tests {
               "id": "config_1",
               "status": "pass",
               "message": "config is valid: /Users/me/project/nib.toml",
+              "fix": null
+            },
+            {
+              "id": "config_lock",
+              "status": "pass",
+              "message": "no configuration lock files are left behind",
               "fix": null
             },
             {

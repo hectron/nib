@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use serde::Deserialize;
@@ -132,12 +133,18 @@ pub enum ConfigCommandError {
         path: PathBuf,
         source: std::io::Error,
     },
+
+    #[error("another nib config command is running, or remove {} if it's stale", path.display())]
+    #[diagnostic(code(nib::config::locked))]
+    Locked { path: PathBuf },
 }
 
 #[derive(Debug)]
 pub struct ConfigInspection {
     result: Result<(Config, Origins), ConfigError>,
     files: Vec<ConfigFileInspection>,
+    start: PathBuf,
+    user_config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +156,34 @@ pub(crate) struct ConfigFileInspection {
 impl ConfigInspection {
     pub fn into_config(self) -> Result<Config, ConfigError> {
         self.result.map(|(config, _)| config)
+    }
+
+    pub(crate) fn config_lock_files(&self) -> Vec<(PathBuf, SystemTime)> {
+        let mut candidates = Vec::new();
+        if let Some(user) = &self.user_config {
+            candidates.push(user.clone());
+        }
+        if let Ok(project) = project_config_path(&self.start) {
+            candidates.push(project);
+        }
+        candidates.push(self.start.join(".nib.local.toml"));
+
+        let mut locks: Vec<PathBuf> = Vec::new();
+        for candidate in candidates {
+            let Ok(lock) = crate::infra::host::config_lock_path(&candidate) else {
+                continue;
+            };
+            if !locks.contains(&lock) {
+                locks.push(lock);
+            }
+        }
+        locks
+            .into_iter()
+            .filter_map(|lock| {
+                let modified = fs::metadata(&lock).ok()?.modified().ok()?;
+                Some((lock, modified))
+            })
+            .collect()
     }
 
     pub(crate) fn error(&self) -> Option<&ConfigError> {
@@ -273,6 +308,8 @@ pub fn inspect(
     ConfigInspection {
         result: load_inspected(start, user_config, env, &mut files),
         files,
+        start: start.to_owned(),
+        user_config: user_config.map(Path::to_owned),
     }
 }
 
@@ -583,7 +620,8 @@ pub(crate) fn unset(path: &Path, key: ConfigKey) -> Result<ConfigEdit<bool>, Con
         });
     };
     let (section, name) = key.parts();
-    let empty = {
+    let next = next_root_key(&editable.document, section);
+    let (empty, key_comments) = {
         let Some(table) = editable
             .document
             .get_mut(section)
@@ -594,21 +632,36 @@ pub(crate) fn unset(path: &Path, key: ConfigKey) -> Result<ConfigEdit<bool>, Con
                 warning: None,
             });
         };
+        let key_comments = table
+            .key(name)
+            .map(|key| leading_comments(key.leaf_decor()))
+            .unwrap_or_default();
         if table.remove(name).is_none() {
             return Ok(ConfigEdit {
                 value: false,
                 warning: None,
             });
         }
-        table.is_empty()
+        (table.is_empty(), key_comments)
     };
-    if empty
-        && !editable
+    if empty {
+        let section_comments = if editable
             .document
             .get(section)
             .is_some_and(item_has_comments)
-    {
-        editable.document.remove(section);
+        {
+            String::new()
+        } else {
+            let comments = editable
+                .document
+                .key(section)
+                .map(|key| leading_comments(key.leaf_decor()))
+                .unwrap_or_default();
+            editable.document.remove(section);
+            comments
+        };
+        let comments = format!("{section_comments}{key_comments}");
+        place_comments(&mut editable.document, next.as_deref(), &comments);
     }
     let warning = write_document(path, &editable)?;
     Ok(ConfigEdit {
@@ -684,10 +737,74 @@ fn create_config_directory(path: &Path) -> Result<(), ConfigCommandError> {
 }
 
 fn config_lock(path: &Path) -> Result<crate::infra::host::ConfigLock, ConfigCommandError> {
-    crate::infra::host::config_lock(path).map_err(|source| ConfigCommandError::Write {
-        path: path.to_owned(),
-        source,
+    crate::infra::host::config_lock(path).map_err(|error| match error {
+        crate::infra::host::ConfigLockError::Held { path } => ConfigCommandError::Locked { path },
+        crate::infra::host::ConfigLockError::Io(source) => ConfigCommandError::Write {
+            path: path.to_owned(),
+            source,
+        },
     })
+}
+
+fn next_root_key(document: &DocumentMut, section: &str) -> Option<String> {
+    document
+        .iter()
+        .skip_while(|(key, _)| *key != section)
+        .nth(1)
+        .map(|(key, _)| key.to_owned())
+}
+
+fn leading_comments(decor: &Decor) -> String {
+    decor
+        .prefix()
+        .and_then(toml_edit::RawString::as_str)
+        .filter(|text| text.contains('#'))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn place_comments(document: &mut DocumentMut, next: Option<&str>, comments: &str) {
+    if comments.is_empty() {
+        return;
+    }
+    if let Some(next) = next {
+        match document.get_mut(next) {
+            Some(Item::Table(table)) if !table.is_dotted() => {
+                prepend_prefix(table.decor_mut(), comments);
+                return;
+            }
+            Some(Item::Table(table)) => {
+                let first = table.iter().next().map(|(key, _)| key.to_owned());
+                if let Some(first) = first
+                    && let Some(mut key) = table.key_mut(&first)
+                {
+                    prepend_prefix(key.leaf_decor_mut(), comments);
+                    return;
+                }
+            }
+            _ => {}
+        }
+        if let Some(mut key) = document.key_mut(next) {
+            prepend_prefix(key.leaf_decor_mut(), comments);
+            return;
+        }
+    }
+    let trailing = document.trailing().as_str().unwrap_or_default().to_owned();
+    let separator = if trailing.is_empty() || trailing.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    document.set_trailing(format!("{trailing}{separator}{comments}"));
+}
+
+fn prepend_prefix(decor: &mut Decor, comments: &str) {
+    let existing = decor
+        .prefix()
+        .and_then(toml_edit::RawString::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    decor.set_prefix(format!("{comments}{existing}"));
 }
 
 fn write_document(
@@ -1313,19 +1430,187 @@ mod tests {
         write(&path, "[task]\nlist = \"Inbox\"\n");
         write(&lock, "");
 
-        let error = set(&path, ConfigKey::TaskList, "Work")
-            .unwrap_err()
-            .to_string();
+        let error = set(&path, ConfigKey::TaskList, "Work").unwrap_err();
+        let message = error.to_string();
 
-        assert!(
-            error.contains("another nib config command is running"),
-            "{error}"
+        assert_eq!(
+            message,
+            format!(
+                "another nib config command is running, or remove {} if it's stale",
+                fs::canonicalize(&lock).unwrap().display()
+            )
         );
-        assert!(error.contains(&lock.display().to_string()), "{error}");
-        assert!(error.contains("if it's stale"), "{error}");
+        let mut rendered = String::new();
+        GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor())
+            .render_report(&mut rendered, &error)
+            .unwrap();
+        assert!(!rendered.contains('▶'), "{rendered}");
         assert_eq!(
             fs::read_to_string(path).unwrap(),
             "[task]\nlist = \"Inbox\"\n"
+        );
+    }
+
+    #[test]
+    fn config_lock_files_report_existing_locks_for_each_target() {
+        let temp = TempDir::new();
+        let user = temp.join("user/config.toml");
+        let project = temp.join("project");
+        let user_lock = temp.join("user/config.toml.lock");
+        let local_lock = project.join(".nib.local.toml.lock");
+        write(&user_lock, "");
+        write(&local_lock, "");
+
+        let locks = inspect(&project, Some(&user), no_env).config_lock_files();
+
+        assert_eq!(
+            locks.into_iter().map(|(path, _)| path).collect::<Vec<_>>(),
+            [user_lock, local_lock]
+        );
+        assert_eq!(
+            inspect(&temp.0, Some(&temp.join("absent.toml")), no_env).config_lock_files(),
+            []
+        );
+    }
+
+    #[test]
+    fn unset_moves_comments_from_inline_tables_to_the_next_item() {
+        let temp = TempDir::new();
+        let path = temp.join("inline.toml");
+        write(
+            &path,
+            "# Inbox\ntask = { list = \"Inbox\" }\n\n[note]\nfolder = \"Notes\"\n",
+        );
+
+        assert!(unset(&path, ConfigKey::TaskList).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "# Inbox\n\n[note]\nfolder = \"Notes\"\n"
+        );
+    }
+
+    #[test]
+    fn unset_moves_comments_from_dotted_keys_to_the_next_root_key() {
+        let temp = TempDir::new();
+        let path = temp.join("dotted.toml");
+        write(
+            &path,
+            "# Inbox\ntask.list = \"Inbox\"\nnote.folder = \"Notes\"\n",
+        );
+
+        assert!(unset(&path, ConfigKey::TaskList).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "# Inbox\nnote.folder = \"Notes\"\n"
+        );
+    }
+
+    #[test]
+    fn unset_moves_comments_to_the_end_of_the_file_when_no_item_follows() {
+        let temp = TempDir::new();
+        let inline = temp.join("inline.toml");
+        write(&inline, "# Inbox\ntask = { list = \"Inbox\" }\n");
+
+        assert!(unset(&inline, ConfigKey::TaskList).unwrap().value);
+
+        assert_eq!(fs::read_to_string(inline).unwrap(), "# Inbox\n");
+
+        let schema = temp.join("schema.toml");
+        write(
+            &schema,
+            "#:schema https://example.com/config.schema.json\ntask = { list = \"Inbox\" }\n",
+        );
+
+        assert!(unset(&schema, ConfigKey::TaskList).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(schema).unwrap(),
+            "#:schema https://example.com/config.schema.json\n"
+        );
+
+        let dotted = temp.join("dotted.toml");
+        write(&dotted, "# Inbox\ntask.list = \"Inbox\"\n");
+
+        assert!(unset(&dotted, ConfigKey::TaskList).unwrap().value);
+
+        assert_eq!(fs::read_to_string(dotted).unwrap(), "# Inbox\n");
+    }
+
+    #[test]
+    fn unset_separates_moved_comments_from_an_eof_comment_without_newline() {
+        let temp = TempDir::new();
+        let path = temp.join("eof.toml");
+        write(
+            &path,
+            "[task]\nlist = \"Inbox\"\n[note]\n# folder doc\nfolder = \"Notes\"\n# footer",
+        );
+
+        assert!(unset(&path, ConfigKey::NoteFolder).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "[task]\nlist = \"Inbox\"\n# footer\n# folder doc\n"
+        );
+    }
+
+    #[test]
+    fn unset_keeps_removed_key_comments_when_the_section_stays() {
+        let temp = TempDir::new();
+        let path = temp.join("section-comment.toml");
+        write(&path, "# Header\n[note]\n# folder doc\nfolder = \"x\"\n");
+
+        assert!(unset(&path, ConfigKey::NoteFolder).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# Header\n[note]\n# folder doc\n"
+        );
+
+        let followed = temp.join("section-comment-followed.toml");
+        write(
+            &followed,
+            "# Header\n[note]\n# folder doc\nfolder = \"x\"\n\n[task]\nlist = \"Inbox\"\n",
+        );
+
+        assert!(unset(&followed, ConfigKey::NoteFolder).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(followed).unwrap(),
+            "# Header\n[note]\n# folder doc\n\n[task]\nlist = \"Inbox\"\n"
+        );
+    }
+
+    #[test]
+    fn set_after_unsetting_a_kept_section_key_places_the_moved_comment_below_the_key() {
+        let temp = TempDir::new();
+        let path = temp.join("unset-then-set.toml");
+        write(&path, "# Header\n[note]\n# folder doc\nfolder = \"x\"\n");
+
+        assert!(unset(&path, ConfigKey::NoteFolder).unwrap().value);
+        set(&path, ConfigKey::NoteFolder, "Notes").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "# Header\n[note]\nfolder = \"Notes\"\n# folder doc\n"
+        );
+    }
+
+    #[test]
+    fn unset_moves_key_comments_from_a_plain_section_to_the_next_item() {
+        let temp = TempDir::new();
+        let path = temp.join("key-comment.toml");
+        write(
+            &path,
+            "[task]\n# doc\nlist = \"Inbox\"\n\n[note]\nfolder = \"Notes\"\n",
+        );
+
+        assert!(unset(&path, ConfigKey::TaskList).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "# doc\n\n[note]\nfolder = \"Notes\"\n"
         );
     }
 
