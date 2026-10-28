@@ -2,6 +2,8 @@ mod app;
 mod cli;
 mod domain;
 mod infra;
+#[cfg(test)]
+mod test_support;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
