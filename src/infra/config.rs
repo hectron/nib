@@ -1568,16 +1568,32 @@ mod tests {
             "# Header\n[note]\n# folder doc\n"
         );
 
+        let followed = temp.join("section-comment-followed.toml");
         write(
-            &path,
+            &followed,
             "# Header\n[note]\n# folder doc\nfolder = \"x\"\n\n[task]\nlist = \"Inbox\"\n",
         );
 
+        assert!(unset(&followed, ConfigKey::NoteFolder).unwrap().value);
+
+        assert_eq!(
+            fs::read_to_string(followed).unwrap(),
+            "# Header\n[note]\n# folder doc\n\n[task]\nlist = \"Inbox\"\n"
+        );
+    }
+
+    #[test]
+    fn set_after_unsetting_a_kept_section_key_places_the_moved_comment_below_the_key() {
+        let temp = TempDir::new();
+        let path = temp.join("unset-then-set.toml");
+        write(&path, "# Header\n[note]\n# folder doc\nfolder = \"x\"\n");
+
         assert!(unset(&path, ConfigKey::NoteFolder).unwrap().value);
+        set(&path, ConfigKey::NoteFolder, "Notes").unwrap();
 
         assert_eq!(
             fs::read_to_string(path).unwrap(),
-            "# Header\n[note]\n# folder doc\n\n[task]\nlist = \"Inbox\"\n"
+            "# Header\n[note]\nfolder = \"Notes\"\n# folder doc\n"
         );
     }
 

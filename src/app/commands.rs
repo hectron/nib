@@ -1756,6 +1756,104 @@ mod tests {
         );
     }
 
+    fn mixed_config_lock_checks() -> Vec<crate::app::doctor::Check> {
+        crate::app::doctor::checks(
+            &FakeDoctor,
+            &[],
+            None,
+            &[
+                crate::app::doctor::ConfigLockFile {
+                    path: "/Users/me/project/nib.toml.lock".into(),
+                    age: std::time::Duration::from_secs(600),
+                },
+                crate::app::doctor::ConfigLockFile {
+                    path: "/Users/me/project/.nib.local.toml.lock".into(),
+                    age: std::time::Duration::from_secs(2),
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn doctor_text_reports_stale_and_held_config_locks() {
+        let checks = mixed_config_lock_checks();
+        assert_snapshot!(output::doctor(&checks, false, Style::default()).unwrap(), @r###"
+        ✓ macOS 26.1 is supported
+        ✓ macOS attributes permissions to Ghostty
+        ✓ Ghostty has full access to Reminders
+        ✗ Ghostty access to Calendars is denied
+          Fix: Turn on Ghostty in System Settings > Privacy & Security > Calendars.
+        ! Apple Notes Automation access is checked on first use
+          Fix: When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation.
+        ✓ no config files loaded; built-in defaults are valid
+        ✗ stale configuration lock: /Users/me/project/nib.toml.lock; held by another nib config command: /Users/me/project/.nib.local.toml.lock
+          Fix: Remove /Users/me/project/nib.toml.lock if no nib config command is running.
+        ! $VISUAL uses `code` without a wait flag
+          Fix: Set VISUAL="code --wait".
+        "###);
+    }
+
+    #[test]
+    fn doctor_json_reports_stale_and_held_config_locks() {
+        let checks = mixed_config_lock_checks();
+        assert_snapshot!(output::doctor(&checks, true, Style::default()).unwrap(), @r###"
+        {
+          "id": "doctor",
+          "ok": false,
+          "checks": [
+            {
+              "id": "macos",
+              "status": "pass",
+              "message": "macOS 26.1 is supported",
+              "fix": null
+            },
+            {
+              "id": "terminal",
+              "status": "pass",
+              "message": "macOS attributes permissions to Ghostty",
+              "fix": null
+            },
+            {
+              "id": "reminders",
+              "status": "pass",
+              "message": "Ghostty has full access to Reminders",
+              "fix": null
+            },
+            {
+              "id": "calendars",
+              "status": "fail",
+              "message": "Ghostty access to Calendars is denied",
+              "fix": "Turn on Ghostty in System Settings > Privacy & Security > Calendars."
+            },
+            {
+              "id": "notes",
+              "status": "warning",
+              "message": "Apple Notes Automation access is checked on first use",
+              "fix": "When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation."
+            },
+            {
+              "id": "config",
+              "status": "pass",
+              "message": "no config files loaded; built-in defaults are valid",
+              "fix": null
+            },
+            {
+              "id": "config_lock",
+              "status": "fail",
+              "message": "stale configuration lock: /Users/me/project/nib.toml.lock; held by another nib config command: /Users/me/project/.nib.local.toml.lock",
+              "fix": "Remove /Users/me/project/nib.toml.lock if no nib config command is running."
+            },
+            {
+              "id": "editor",
+              "status": "warning",
+              "message": "$VISUAL uses `code` without a wait flag",
+              "fix": "Set VISUAL=\"code --wait\"."
+            }
+          ]
+        }
+        "###);
+    }
+
     #[test]
     fn doctor_json_has_stable_check_objects() {
         let checks = crate::app::doctor::checks(
