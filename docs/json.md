@@ -65,11 +65,16 @@ Reminder objects contain `id`, `title`, `due`, `due_time`, `due_time_zone`, and 
   "title": "Design review",
   "start": "2026-10-27T10:00:00-04:00",
   "all_day": false,
-  "calendar": "Work"
+  "calendar": "Work",
+  "location": "Room 4B",
+  "notes": "Review the mockups.\nJoin: https://zoom.us/j/5551234567",
+  "meeting_url": "https://zoom.us/j/5551234567"
 }
 ```
 
-Event objects contain `id`, `title`, `start`, `all_day`, and `calendar`. Starts use RFC 3339 with the local UTC offset. `calendar` is the name of the event's calendar and is always present, whether or not `--show-calendar` or `cal.show_calendar` is set.
+Event objects contain `id`, `title`, `start`, `all_day`, `calendar`, `location`, `notes`, and `meeting_url`. Starts use RFC 3339 with the local UTC offset. `calendar` is the name of the event's calendar and is always present, whether or not `--show-calendar` or `cal.show_calendar` is set. `location` and `notes` are the event's text as stored in Calendar, or `null` when empty.
+
+`meeting_url` is the event's URL when it points to a known meeting provider. Otherwise it is the first such `https` link in `location`, then `notes`, with trailing punctuation removed. It is `null` when there is none. Known providers are Zoom (`zoom.us`), Google Meet (`meet.google.com`), Microsoft Teams (`teams.microsoft.com` and `teams.live.com`), Webex (`webex.com`), and Whereby (`whereby.com`), including their subdomains. These fields are read from EventKit but have not yet been checked against real calendars from every provider.
 
 Apple can reuse one identifier for every occurrence of a recurring event. nib appends the occurrence's UTC start to make each event ID distinct.
 
@@ -102,7 +107,10 @@ Resource create and rename commands return the same single-object shape as their
       "title": "Standup",
       "start": "2026-10-26T09:30:00-04:00",
       "all_day": false,
-      "calendar": "Work"
+      "calendar": "Work",
+      "location": null,
+      "notes": null,
+      "meeting_url": null
     }
   ]
 }
