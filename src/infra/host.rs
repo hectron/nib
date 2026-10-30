@@ -292,11 +292,13 @@ pub(crate) enum ConfigLockError {
     #[error("configuration {} is already locked", path.display())]
     Held { path: PathBuf },
     #[error(transparent)]
-    Io(#[from] io::Error),
+    Target(#[from] io::Error),
+    #[error("couldn't lock configuration with {}: {source}", path.display())]
+    Lock { path: PathBuf, source: io::Error },
 }
 
-pub(crate) fn config_lock_dir() -> io::Result<PathBuf> {
-    backups_dir()
+pub(crate) fn config_lock_dir() -> Option<PathBuf> {
+    backups_dir().ok()
 }
 
 pub(crate) fn legacy_config_lock_path(path: &Path) -> io::Result<PathBuf> {
@@ -334,20 +336,34 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     })
 }
 
-pub(crate) fn config_lock(path: &Path, dir: &Path) -> Result<ConfigLock, ConfigLockError> {
+pub(crate) fn config_lock(path: &Path, dir: Option<&Path>) -> Result<ConfigLock, ConfigLockError> {
     let target = config_lock_target(path)?;
-    std::fs::create_dir_all(dir)?;
+    let dir = dir
+        .or_else(|| target.parent())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|source| ConfigLockError::Lock {
+        path: dir.to_owned(),
+        source,
+    })?;
+    let lock_path = dir.join(config_lock_name(&target));
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(dir.join(config_lock_name(&target)))?;
+        .open(&lock_path)
+        .map_err(|source| ConfigLockError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
     match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
         Ok(()) => Ok(ConfigLock { _file: file }),
         Err(rustix::io::Errno::WOULDBLOCK) => Err(ConfigLockError::Held { path: target }),
-        Err(error) => Err(io::Error::from(error).into()),
+        Err(error) => Err(ConfigLockError::Lock {
+            path: lock_path,
+            source: error.into(),
+        }),
     }
 }
 
@@ -1324,15 +1340,15 @@ mod tests {
         let config = dir.0.join("config.toml");
         std::fs::write(&config, "").unwrap();
 
-        let first = config_lock(&config, &locks).unwrap();
-        let error = config_lock(&config, &locks).err().unwrap();
+        let first = config_lock(&config, Some(&locks)).unwrap();
+        let error = config_lock(&config, Some(&locks)).err().unwrap();
         assert!(
             matches!(&error, ConfigLockError::Held { path } if *path == std::fs::canonicalize(&config).unwrap()),
             "{error:?}"
         );
 
         drop(first);
-        let _second = config_lock(&config, &locks).unwrap();
+        let _second = config_lock(&config, Some(&locks)).unwrap();
     }
 
     #[test]
@@ -1345,10 +1361,10 @@ mod tests {
             .join(config_lock_name(&std::fs::canonicalize(&config).unwrap()));
         std::fs::write(&lock_file, "").unwrap();
 
-        drop(config_lock(&config, &dir.0).unwrap());
+        drop(config_lock(&config, Some(&dir.0)).unwrap());
 
         assert!(lock_file.exists());
-        let _again = config_lock(&config, &dir.0).unwrap();
+        let _again = config_lock(&config, Some(&dir.0)).unwrap();
     }
 
     #[test]

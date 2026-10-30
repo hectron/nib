@@ -116,14 +116,16 @@ pub fn run_config(
             warning = inspection
                 .origin(key)
                 .and_then(|origin| override_warning(key, origin, target, &path, current_dir));
-            let edit = infra::config::set(&path, key, &value, &config_lock_dir(&path)?)?;
+            let lock_dir = infra::host::config_lock_dir();
+            let edit = infra::config::set(&path, key, &value, lock_dir.as_deref())?;
             append_warning(&mut warning, edit.warning);
             cli::output::config_set(key.as_str(), &edit.value, &path, json, style)?
         }
         cli::ConfigAction::Unset { key, target } => {
             let key = infra::config::key(&key)?;
             let path = config_target(current_dir, user_config, target)?;
-            let edit = infra::config::unset(&path, key, &config_lock_dir(&path)?)?;
+            let lock_dir = infra::host::config_lock_dir();
+            let edit = infra::config::unset(&path, key, lock_dir.as_deref())?;
             append_warning(&mut warning, edit.warning);
             cli::output::config_unset(key.as_str(), &path, edit.value, json, style)?
         }
@@ -149,13 +151,6 @@ fn append_warning(warning: &mut Option<String>, added: Option<String>) {
     } else {
         *warning = Some(added);
     }
-}
-
-fn config_lock_dir(path: &Path) -> Result<PathBuf, infra::config::ConfigCommandError> {
-    infra::host::config_lock_dir().map_err(|source| infra::config::ConfigCommandError::Write {
-        path: path.to_owned(),
-        source,
-    })
 }
 
 fn config_target(
