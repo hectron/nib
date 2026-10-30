@@ -1,3 +1,27 @@
+## [0.5.0] - 2026-10-30
+
+### 🚀 Features
+
+- Show each event's calendar on request
+
+### 🐛 Bug Fixes
+
+- Lock configuration edits with flock so a crash can't leave a stale lock
+- Don't require HOME for config edits and name the right path on lock errors
+- Resolve the config lock folder in main and treat an empty HOME as unset
+- Re-pin a hidden due-time zone when a date edit crosses a daylight saving change
+
+### 📚 Documentation
+
+- Fix a broken paragraph break and describe the symlink fallback
+- Say the config lock is per user only when HOME is set
+- State that a typed zone equal to the stored one is kept
+
+### 🧪 Testing
+
+- Snapshot the new setting in `config list` and cover more calendar cases
+- Cover named local zones in the hidden-zone re-pin and snapshot its preview
+- Pass the lock folder in the show_calendar config test
 ## [0.4.1] - 2026-10-28
 
 ### 🐛 Bug Fixes
@@ -13,6 +37,10 @@
 - Snapshot mixed doctor locks and pin set-after-unset comment order
 - Tighten the pending undo resolve tests
 - Cover fall-back times and gap display for unnamed zones
+
+### ⚙️ Miscellaneous Tasks
+
+- *(release)* V0.4.1
 ## [0.4.0] - 2026-10-27
 
 ### 🚀 Features
