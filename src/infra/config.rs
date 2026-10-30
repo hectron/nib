@@ -1172,9 +1172,14 @@ mod tests {
         );
 
         assert_eq!(
-            set(&path, ConfigKey::CalShowCalendar, "true")
-                .unwrap()
-                .value,
+            set(
+                &path,
+                ConfigKey::CalShowCalendar,
+                "true",
+                Some(&temp.locks())
+            )
+            .unwrap()
+            .value,
             ConfigValue::Bool(true)
         );
         assert_eq!(
@@ -1187,9 +1192,21 @@ mod tests {
                 .cal
                 .show_calendar
         );
-        assert!(set(&path, ConfigKey::CalShowCalendar, "yes").is_err());
+        assert!(
+            set(
+                &path,
+                ConfigKey::CalShowCalendar,
+                "yes",
+                Some(&temp.locks())
+            )
+            .is_err()
+        );
 
-        assert!(unset(&path, ConfigKey::CalShowCalendar).unwrap().value);
+        assert!(
+            unset(&path, ConfigKey::CalShowCalendar, Some(&temp.locks()))
+                .unwrap()
+                .value
+        );
         assert!(
             !load(&temp.0, Some(&path), no_env)
                 .unwrap()
