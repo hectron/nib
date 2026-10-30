@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::panic::{self, PanicHookInfo};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread;
 
 use crossterm::cursor::{Hide, Show};
@@ -25,7 +25,7 @@ static PANIC_HOOK: Mutex<()> = Mutex::new(());
 pub(super) fn run(board: &mut Board, session: &mut Session<'_>, color: bool) -> io::Result<()> {
     let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
     let screen = Screen::enter(tty.try_clone()?)?;
-    let _hook = RestoreOnPanic::install(screen.tty.try_clone()?, Arc::clone(&screen.active));
+    let _hook = RestoreOnPanic::install(screen.tty.try_clone()?, Arc::clone(&screen.active))?;
     let mut terminal = Terminal::new(TtyBackend::new(tty)?)?;
     terminal.clear()?;
     loop {
@@ -134,25 +134,30 @@ struct RestoreOnPanic {
 }
 
 impl RestoreOnPanic {
-    fn install(tty: File, active: Arc<AtomicBool>) -> Self {
-        let installed = PANIC_HOOK.lock().unwrap_or_else(PoisonError::into_inner);
+    fn install(tty: File, active: Arc<AtomicBool>) -> io::Result<Self> {
+        let installed = match PANIC_HOOK.try_lock() {
+            Ok(installed) => installed,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                return Err(io::Error::other(
+                    "the board is already open in this process",
+                ));
+            }
+        };
         let tty = Arc::new(Mutex::new(Some(tty)));
         let previous: Arc<PanicHook> = Arc::new(panic::take_hook());
-        let owner = thread::current().id();
         let (hook_tty, chained) = (Arc::clone(&tty), Arc::clone(&previous));
         panic::set_hook(Box::new(move |info| {
-            if thread::current().id() == owner
-                && let Some(tty) = lock(&hook_tty).as_ref()
-            {
+            if let Some(tty) = lock(&hook_tty).as_ref() {
                 let _ = restore(tty, &active);
             }
             chained(info);
         }));
-        Self {
+        Ok(Self {
             tty,
             previous: Some(previous),
             _installed: installed,
-        }
+        })
     }
 }
 
@@ -283,13 +288,14 @@ mod tests {
     }
 
     #[test]
-    fn the_panic_hook_restores_only_for_the_owner_thread_and_is_removed_on_drop() {
+    fn the_panic_hook_restores_for_a_panic_on_any_thread_and_is_removed_on_drop() {
         let seen = with_recording_hook(|| {
             let active = Arc::new(AtomicBool::new(true));
-            let hook = RestoreOnPanic::install(tty(), Arc::clone(&active));
+            let hook = RestoreOnPanic::install(tty(), Arc::clone(&active)).unwrap();
             let joined = thread::spawn(|| panic!("{MARKER} other thread")).join();
             assert!(joined.is_err());
-            assert!(active.load(Ordering::SeqCst));
+            assert!(!active.load(Ordering::SeqCst));
+            active.store(true, Ordering::SeqCst);
             panic_here("owner");
             assert!(!active.load(Ordering::SeqCst));
             drop(hook);
@@ -312,7 +318,7 @@ mod tests {
         let seen = with_recording_hook(|| {
             let active = Arc::new(AtomicBool::new(true));
             let unwound = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                let _hook = RestoreOnPanic::install(tty(), Arc::clone(&active));
+                let _hook = RestoreOnPanic::install(tty(), Arc::clone(&active)).unwrap();
                 panic!("{MARKER} while running");
             }));
             assert!(unwound.is_err());
@@ -321,7 +327,7 @@ mod tests {
             panic_here("after unwinding");
             assert!(active.load(Ordering::SeqCst));
             let second = Arc::new(AtomicBool::new(true));
-            let hook = RestoreOnPanic::install(tty(), Arc::clone(&second));
+            let hook = RestoreOnPanic::install(tty(), Arc::clone(&second)).unwrap();
             panic_here("second board");
             assert!(!second.load(Ordering::SeqCst));
             drop(hook);
@@ -334,6 +340,32 @@ mod tests {
                 format!("{MARKER} second board"),
             ]
         );
+    }
+
+    #[test]
+    fn a_second_hook_is_refused_while_one_is_installed() {
+        let seen = with_recording_hook(|| {
+            let active = Arc::new(AtomicBool::new(true));
+            let hook = RestoreOnPanic::install(tty(), Arc::clone(&active)).unwrap();
+            let same_thread = RestoreOnPanic::install(tty(), Arc::clone(&active));
+            assert_eq!(
+                same_thread.err().map(|error| error.to_string()).as_deref(),
+                Some("the board is already open in this process")
+            );
+            let other_thread = {
+                let active = Arc::clone(&active);
+                thread::spawn(move || RestoreOnPanic::install(tty(), active).is_err())
+                    .join()
+                    .unwrap()
+            };
+            assert!(other_thread);
+            drop(hook);
+            let again = RestoreOnPanic::install(tty(), Arc::clone(&active)).unwrap();
+            panic_here("after reinstall");
+            assert!(!active.load(Ordering::SeqCst));
+            drop(again);
+        });
+        assert_eq!(seen, [format!("{MARKER} after reinstall")]);
     }
 
     #[test]

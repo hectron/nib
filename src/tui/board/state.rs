@@ -1079,10 +1079,11 @@ impl Board {
             }
             Response::Added(mut item) => {
                 if item.list_id.is_none()
-                    && let Some(list) = self.data.lists.iter().find(|list| {
-                        item.list.as_deref() == Some(list.name.as_str())
-                            || item.list.as_deref() == Some(list.id.as_str())
-                    })
+                    && let Some(list) = self
+                        .data
+                        .lists
+                        .iter()
+                        .find(|list| item.list.as_deref() == Some(list.name.as_str()))
                 {
                     item.list = Some(list.name.clone());
                     item.list_id = Some(list.id.clone());
@@ -1174,19 +1175,23 @@ impl Board {
         self.selected.retain(loaded);
         self.targets.retain(loaded);
         let mut scopes = self.scopes();
-        if scopes.contains(&self.scope) {
-            return;
-        }
-        let same_name = match &self.scope {
+        let kept = match &self.scope {
             Scope::List(list) => scopes
                 .iter()
-                .enumerate()
-                .filter(|(_, scope)| matches!(scope, Scope::List(other) if other.name == list.name))
-                .min_by_key(|(position, _)| position.abs_diff(index))
-                .map(|(position, _)| position),
-            _ => None,
+                .position(|scope| matches!(scope, Scope::List(other) if other.id == list.id))
+                .or_else(|| {
+                    scopes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, scope)| {
+                            matches!(scope, Scope::List(other) if other.name == list.name)
+                        })
+                        .min_by_key(|(position, _)| position.abs_diff(index))
+                        .map(|(position, _)| position)
+                }),
+            scope => scopes.iter().position(|other| other == scope),
         };
-        let next = same_name.unwrap_or_else(|| index.min(scopes.len() - 1));
+        let next = kept.unwrap_or_else(|| index.min(scopes.len() - 1));
         self.scope = scopes.swap_remove(next);
     }
 
@@ -1708,6 +1713,86 @@ pub(crate) mod tests {
         board.resolve(Response::Loaded(moved));
         assert_eq!(board.scope_cursor(), 4);
         assert_eq!(ids(&board), ["rem-4"]);
+    }
+
+    fn twin_work_lists() -> Data {
+        let mut twins = data();
+        twins.lists.push(ListChoice {
+            id: "list-work-2".into(),
+            name: "Work".into(),
+        });
+        let mut other = item("rem-4", "Expense lunch", "Work", None, None);
+        other.list_id = Some("list-work-2".into());
+        twins.items.push(other);
+        twins
+    }
+
+    #[test]
+    fn a_renamed_list_stays_highlighted_even_when_another_list_has_its_old_name() {
+        let twins = twin_work_lists();
+        let mut board = board_with(twins.clone(), Config::default());
+        act(&mut board, Action::PrevPane);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        assert_eq!(board.scope_cursor(), 3);
+        assert_eq!(ids(&board), ["rem-2", "rem-3"]);
+
+        let mut renamed = twins;
+        renamed.lists.swap(1, 2);
+        renamed.lists[2].name = "Office".into();
+        for item in &mut renamed.items {
+            if item.list_id.as_deref() == Some("list-work") {
+                item.list = Some("Office".into());
+            }
+        }
+        board.resolve(Response::Loaded(renamed));
+        assert_eq!(
+            scope_names(&board),
+            ["All", "Today", "Home", "Work", "Office", "Events"]
+        );
+        assert_eq!(board.scope_cursor(), 4);
+        assert_eq!(
+            board.current_scope(),
+            Scope::List(ListScope {
+                id: "list-work".into(),
+                name: "Office".into(),
+            })
+        );
+        assert_eq!(ids(&board), ["rem-2", "rem-3"]);
+    }
+
+    #[test]
+    fn a_list_whose_id_disappears_falls_back_to_the_nearest_same_named_list_then_its_position() {
+        let twins = twin_work_lists();
+        let mut board = board_with(twins.clone(), Config::default());
+        act(&mut board, Action::PrevPane);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        assert_eq!(board.scope_cursor(), 4);
+        assert_eq!(ids(&board), ["rem-4"]);
+
+        let mut gone = twins.clone();
+        gone.lists.remove(2);
+        gone.items.retain(|item| item.id != "rem-4");
+        board.resolve(Response::Loaded(gone));
+        assert_eq!(board.scope_cursor(), 3);
+        assert_eq!(board.current_scope(), list_scope("Work"));
+
+        let mut renamed_and_gone = twins;
+        renamed_and_gone.lists.remove(1);
+        renamed_and_gone.lists[1].name = "Office".into();
+        renamed_and_gone
+            .items
+            .retain(|item| item.list.as_deref() != Some("Work"));
+        board.resolve(Response::Loaded(renamed_and_gone));
+        assert_eq!(
+            scope_names(&board),
+            ["All", "Today", "Home", "Office", "Events"]
+        );
+        assert_eq!(board.scope_cursor(), 3);
     }
 
     #[test]
