@@ -57,6 +57,25 @@ Reminder objects contain `id`, `title`, `due`, `due_time`, `due_time_zone`, and 
 
 `nib task done`, `reopen`, `priority`, and `move` return an array with one object per changed reminder, in selector order. Each object contains `id`, `title`, `list`, `completed`, `priority`, and `change`, with the values after the change. `list` is the reminder list's name. `change` is `completed`, `reopened`, `priority`, or `moved`. Reminders that didn't need to change are left out, so the array can be `[]`.
 
+## Picked reminders
+
+```json
+[
+  {
+    "id": "reminder-3",
+    "title": "Renew passport",
+    "list": "Reminders",
+    "due": "2026-11-09",
+    "due_time": "09:00",
+    "due_time_zone": "America/New_York",
+    "priority": "low",
+    "completed": false
+  }
+]
+```
+
+`nib pick --json` returns an array with one object per chosen reminder, in the order they were selected. Each object contains `id`, `title`, `list`, `due`, `due_time`, `due_time_zone`, `priority`, and `completed`. `due`, `due_time`, `due_time_zone`, and `priority` use the same forms as reminder objects. `list` is the reminder list's name, or `null` for a reminder added from the prompt without a `#list` token or a configured default list. Cancelling the prompt prints nothing.
+
 ## Calendar events
 
 ```json
@@ -65,11 +84,16 @@ Reminder objects contain `id`, `title`, `due`, `due_time`, `due_time_zone`, and 
   "title": "Design review",
   "start": "2026-10-27T10:00:00-04:00",
   "all_day": false,
-  "calendar": "Work"
+  "calendar": "Work",
+  "location": "Room 4B",
+  "notes": "Review the mockups.\nJoin: https://zoom.us/j/5551234567",
+  "meeting_url": "https://zoom.us/j/5551234567"
 }
 ```
 
-Event objects contain `id`, `title`, `start`, `all_day`, and `calendar`. Starts use RFC 3339 with the local UTC offset. `calendar` is the name of the event's calendar and is always present, whether or not `--show-calendar` or `cal.show_calendar` is set.
+Event objects contain `id`, `title`, `start`, `all_day`, `calendar`, `location`, `notes`, and `meeting_url`. Starts use RFC 3339 with the local UTC offset. `calendar` is the name of the event's calendar and is always present, whether or not `--show-calendar` or `cal.show_calendar` is set. `location` and `notes` are the event's text as stored in Calendar, or `null` when empty.
+
+`meeting_url` is the event's URL when it points to a known meeting provider. Otherwise it is the first such `https` link in `location`, then `notes`, with trailing punctuation removed. It is `null` when there is none. Known providers are Zoom (`zoom.us`), Google Meet (`meet.google.com`), Microsoft Teams (`teams.microsoft.com` and `teams.live.com`), Webex (`webex.com`), and Whereby (`whereby.com`), including their subdomains. These fields are read from EventKit but have not yet been checked against real calendars from every provider.
 
 Apple can reuse one identifier for every occurrence of a recurring event. nib appends the occurrence's UTC start to make each event ID distinct.
 
@@ -102,7 +126,10 @@ Resource create and rename commands return the same single-object shape as their
       "title": "Standup",
       "start": "2026-10-26T09:30:00-04:00",
       "all_day": false,
-      "calendar": "Work"
+      "calendar": "Work",
+      "location": null,
+      "notes": null,
+      "meeting_url": null
     }
   ]
 }

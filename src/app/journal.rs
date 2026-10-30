@@ -38,6 +38,7 @@ enum Action {
     TaskReopen,
     TaskPriority,
     TaskMove,
+    TaskDelete,
     Undo,
 }
 
@@ -276,6 +277,9 @@ pub fn record_edit(
 ) -> Result<String> {
     record_action(now, JournalAction::TaskEdit, changes, result, host)
 }
+
+pub(crate) const UNRECORDED: &str =
+    "The changes were applied, but nib couldn't record the journal entry.";
 
 pub fn record_action(
     now: &Zoned,
@@ -740,6 +744,7 @@ fn action(value: Action) -> JournalAction {
         Action::TaskReopen => JournalAction::TaskReopen,
         Action::TaskPriority => JournalAction::TaskPriority,
         Action::TaskMove => JournalAction::TaskMove,
+        Action::TaskDelete => JournalAction::TaskDelete,
         Action::Undo => JournalAction::Undo,
     }
 }
@@ -752,6 +757,7 @@ impl From<JournalAction> for Action {
             JournalAction::TaskReopen => Self::TaskReopen,
             JournalAction::TaskPriority => Self::TaskPriority,
             JournalAction::TaskMove => Self::TaskMove,
+            JournalAction::TaskDelete => Self::TaskDelete,
             JournalAction::Undo => Self::Undo,
         }
     }

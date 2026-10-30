@@ -28,6 +28,7 @@ nib note list -f Work
 nib t Pay rent fri '!high' '#bills'
 nib today
 nib task done "pay rent"
+nib pick
 nib task edit
 nib task lists
 nib note folders
@@ -45,9 +46,10 @@ nib note new "Meeting with Team" --folder Work
 nib task add "Review pull request" --due tomorrow --priority high
 nib cal --calendar Work --week
 nib cal --week --show-calendar
+nib cal --details
 ```
 
-Quick-add recognizes natural due dates and trailing priority and list tokens. See [Quick-add reminders](docs/quick-add.md) for every form. `nib task done`, `reopen`, `priority`, and `move` change reminders by ID or title in one step, and `nib undo` reverses them; see [One-step reminder changes](docs/task-commands.md). `nib today` combines overdue and due-today reminders with today's events. Add `--show-calendar` to `nib cal` or `nib today`, or set `cal.show_calendar = true`, to show each event's calendar. `nib doctor` checks permissions and configuration without prompting.
+Quick-add recognizes natural due dates and trailing priority and list tokens. See [Quick-add reminders](docs/quick-add.md) for every form. `nib task done`, `reopen`, `priority`, and `move` change reminders by ID or title in one step, and `nib undo` reverses them; see [One-step reminder changes](docs/task-commands.md). `nib pick` opens an fzf-style prompt to filter, select, add, and act on reminders, and prints the chosen IDs for scripts; see [Picking reminders](docs/pick.md). `nib today` combines overdue and due-today reminders with today's events. Add `--show-calendar` to `nib cal` or `nib today`, or set `cal.show_calendar = true`, to show each event's calendar. `nib cal --details` lists each event with its calendar, location, meeting link, and notes. `nib doctor` checks permissions and configuration without prompting.
 
 Use `nib note folders`, `nib task lists`, and `nib cal calendars` to discover the names accepted by `--folder`, `--list`, and `--calendar`. Their `create` and `rename` subcommands manage those resources with account or source disambiguation; see [Folders, lists, and calendars](docs/resources.md). Add `--json` for stable resource and owner identifiers. The list and calendar `type` is EventKit's calendar type, such as `local`, `caldav`, or `exchange`; Apple's public EventKit API does not expose the Reminders app's list, sections, or columns view layout.
 
@@ -137,6 +139,7 @@ Nothing is saved while `NIB_DEMO=1` is set, including backups and undo history.
 - [Keymap configuration](docs/keymap.md)
 - [Quick-add reminders](docs/quick-add.md)
 - [One-step reminder changes](docs/task-commands.md)
+- [Picking reminders](docs/pick.md)
 - [Editing reminders as Markdown](docs/task-edit.md)
 - [macOS permissions](docs/permissions.md)
 - [JSON output](docs/json.md)

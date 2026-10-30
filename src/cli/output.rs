@@ -37,6 +37,12 @@ pub struct Style {
 }
 
 impl Style {
+    pub fn detect_interactive() -> Self {
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+        let dumb_terminal = std::env::var_os("TERM").is_some_and(|v| v == "dumb");
+        Self::from_terminal(true, no_color, dumb_terminal, None)
+    }
+
     pub fn detect() -> Self {
         let probe = Table::new();
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
@@ -197,15 +203,60 @@ fn single_with_now<T: Summary>(
 pub fn events(
     events: &[Event],
     show_calendar: bool,
+    details: bool,
     json: bool,
     now: &Zoned,
     style: Style,
 ) -> Result<String> {
-    if show_calendar && !json {
+    if details && !json {
+        Ok(events
+            .iter()
+            .map(|event| event_block(event, style))
+            .collect::<Vec<_>>()
+            .join("\n\n"))
+    } else if show_calendar && !json {
         let rows = events.iter().map(EventWithCalendar).collect::<Vec<_>>();
         list(&rows, json, now, style)
     } else {
         list(events, json, now, style)
+    }
+}
+
+fn event_block(event: &Event, style: Style) -> String {
+    let heading = format!(
+        "{}  {}",
+        style.paint(&event_start(event), Tone::Accent),
+        style.paint(&clean(&event.title), Tone::Heading)
+    );
+    let fields = [
+        (
+            "calendar",
+            Some(event.calendar.as_str()).filter(|c| !c.is_empty()),
+        ),
+        ("location", event.location.as_deref()),
+        ("meeting", event.meeting_url.as_deref()),
+        ("notes", event.notes.as_deref()),
+    ];
+    let mut lines = vec![heading];
+    for (label, value) in fields {
+        let Some(value) = value else { continue };
+        let text = clean_lines(value.trim());
+        let mut values = text.lines();
+        let first = values.next().unwrap_or_default();
+        lines.push(format!(
+            "  {}  {first}",
+            style.paint(&format!("{label:<8}"), Tone::Muted)
+        ));
+        lines.extend(values.map(|line| format!("            {line}").trim_end().to_owned()));
+    }
+    lines.join("\n")
+}
+
+fn event_start(event: &Event) -> String {
+    if event.all_day {
+        event.start.strftime("%Y-%m-%d all day").to_string()
+    } else {
+        event.start.strftime("%Y-%m-%d %H:%M").to_string()
     }
 }
 
@@ -238,7 +289,7 @@ pub fn today(
         (
             Tone::Accent,
             "Events",
-            self::events(events, show_calendar, false, now, style)?,
+            self::events(events, show_calendar, false, false, now, style)?,
         ),
     ];
     let rendered = sections
@@ -320,6 +371,31 @@ pub fn changed_reminders(changed: &[Changed], json: bool, style: Style) -> Resul
                 format!("{verb} \"{title}\"{suffix}")
             }
         })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+#[cfg(feature = "tui")]
+pub(crate) struct PickedReminder<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub list: Option<&'a str>,
+    pub due: Option<Date>,
+    pub due_time: Option<jiff::civil::Time>,
+    pub due_time_zone: Option<&'a str>,
+    pub priority: Option<Priority>,
+    pub completed: bool,
+}
+
+#[cfg(feature = "tui")]
+pub(crate) fn picked(items: &[PickedReminder<'_>], json: bool, style: Style) -> Result<String> {
+    if json {
+        let items = items.iter().map(PickedJson::from).collect::<Vec<_>>();
+        return to_json(&items, style);
+    }
+    Ok(items
+        .iter()
+        .map(|item| clean(item.id))
         .collect::<Vec<_>>()
         .join("\n"))
 }
@@ -947,12 +1023,7 @@ impl Tabular for Event {
     const TITLE_COLUMN: usize = 1;
 
     fn row(&self, _: &Zoned) -> Vec<String> {
-        let start = if self.all_day {
-            self.start.strftime("%Y-%m-%d all day")
-        } else {
-            self.start.strftime("%Y-%m-%d %H:%M")
-        };
-        vec![start.to_string(), self.title.clone()]
+        vec![event_start(self), self.title.clone()]
     }
 
     fn cell_style(&self, column: usize, _: &Zoned) -> Option<Tone> {
@@ -1115,6 +1186,9 @@ struct EventJson<'a> {
     start: &'a Zoned,
     all_day: bool,
     calendar: &'a str,
+    location: Option<&'a str>,
+    notes: Option<&'a str>,
+    meeting_url: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -1164,6 +1238,38 @@ impl<'a> From<&'a Changed> for ChangedJson<'a> {
                 TaskChange::Priority(_) => "priority",
                 TaskChange::Move(_) => "moved",
             },
+        }
+    }
+}
+
+#[cfg(feature = "tui")]
+#[derive(Serialize)]
+struct PickedJson<'a> {
+    id: &'a str,
+    title: &'a str,
+    list: Option<&'a str>,
+    due: Option<Date>,
+    due_time: Option<String>,
+    due_time_zone: Option<&'a str>,
+    priority: Option<&'static str>,
+    completed: bool,
+}
+
+#[cfg(feature = "tui")]
+impl<'a> From<&PickedReminder<'a>> for PickedJson<'a> {
+    fn from(item: &PickedReminder<'a>) -> Self {
+        Self {
+            id: item.id,
+            title: item.title,
+            list: item.list,
+            due: item.due,
+            due_time: item
+                .due
+                .and(item.due_time)
+                .map(|time| time.strftime("%H:%M").to_string()),
+            due_time_zone: item.due.and(item.due_time).and(item.due_time_zone),
+            priority: item.priority.map(Priority::as_str),
+            completed: item.completed,
         }
     }
 }
@@ -1362,6 +1468,9 @@ impl Serialize for Event {
             start: &self.start,
             all_day: self.all_day,
             calendar: &self.calendar,
+            location: self.location.as_deref(),
+            notes: self.notes.as_deref(),
+            meeting_url: self.meeting_url.as_deref(),
         }
         .serialize(serializer)
     }
@@ -1537,12 +1646,15 @@ mod tests {
                 .unwrap(),
             all_day: false,
             calendar: "Personal".into(),
+            location: None,
+            notes: None,
+            meeting_url: None,
         };
         let style = Style {
             color: false,
             width: Some(44),
         };
-        assert_snapshot!(events(&[event], true, false, &test_now(), style).unwrap(), @r"
+        assert_snapshot!(events(&[event], true, false, false, &test_now(), style).unwrap(), @r"
         START             TITLE           CALENDAR
         2026-10-26 14:00  Quarterly…      Personal
         ");
@@ -1831,6 +1943,9 @@ mod tests {
                 .unwrap(),
             all_day: false,
             calendar: "Work".into(),
+            location: None,
+            notes: None,
+            meeting_url: None,
         };
         let event_table = list(&[event], false, &test_now(), style(true)).unwrap();
         assert!(event_table.contains("\u{1b}[36m2026-10-26 14:00\u{1b}[0m"));

@@ -23,7 +23,7 @@ use crate::domain::{
     ApplyResult, AutomationStatus, BackendError, Calendar, CalendarInfo, CalendarKind, Event,
     EventQuery, FieldEdit, NewReminder, NewResource, PermissionStatus, Priority, Reminder,
     ReminderChange, ReminderDueComponents, ReminderEdit, ReminderList, ReminderListInfo,
-    ReminderSnapshot, Reminders, ResourceSelector, StoredReminder, terminal_name,
+    ReminderSnapshot, Reminders, ResourceSelector, StoredReminder, meeting_url, terminal_name,
 };
 use crate::infra::completions::CacheFile;
 
@@ -1623,6 +1623,12 @@ fn to_event(event: &EKEvent, zone: &TimeZone) -> Option<Event> {
         let identifier = event
             .eventIdentifier()
             .unwrap_or_else(|| event.calendarItemIdentifier());
+        let location = event.location().and_then(|value| non_empty(&value));
+        let notes = event.notes().and_then(|value| non_empty(&value));
+        let url = event
+            .URL()
+            .and_then(|value| value.absoluteString())
+            .map(|value| value.to_string());
         Some(Event {
             id: event_id(&identifier.to_string(), start.timestamp()),
             title: event.title().to_string(),
@@ -1632,8 +1638,16 @@ fn to_event(event: &EKEvent, zone: &TimeZone) -> Option<Event> {
                 .calendar()
                 .map(|calendar| calendar_title(&calendar))
                 .unwrap_or_default(),
+            meeting_url: meeting_url(url.as_deref(), location.as_deref(), notes.as_deref()),
+            location,
+            notes,
         })
     }
+}
+
+fn non_empty(value: &NSString) -> Option<String> {
+    let value = value.to_string();
+    (!value.trim().is_empty()).then_some(value)
 }
 
 fn event_id(identifier: &str, start: Timestamp) -> String {

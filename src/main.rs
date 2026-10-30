@@ -53,6 +53,21 @@ fn main() -> miette::Result<()> {
     }
     let config = inspection.into_config()?;
     let now = Zoned::new(now, local_zone());
+    if cli.is_pick() {
+        let result = nib::pick(
+            cli,
+            &config,
+            &now,
+            demo,
+            cache_directory.as_deref(),
+            nib::Style::detect(),
+            nib::Style::detect_interactive(),
+        )?;
+        if result.cancelled {
+            std::process::exit(130);
+        }
+        return print_output(&result.text);
+    }
     let out = nib::run(
         cli,
         &config,

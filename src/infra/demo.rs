@@ -5,7 +5,7 @@ use crate::domain::{
     ApplyResult, BackendError, Backends, Calendar, CalendarInfo, CalendarKind, Event, EventQuery,
     FieldEdit, NewNote, NewReminder, NewResource, Note, NoteFolder, NoteQuery, Notes, Priority,
     Reminder, ReminderChange, ReminderList, ReminderListInfo, ReminderSnapshot, Reminders,
-    ResourceSelector, StoredReminder,
+    ResourceSelector, StoredReminder, meeting_url,
 };
 
 const DEMO_LIST: &str = "demo-list";
@@ -501,43 +501,94 @@ fn demo_field<T: Clone>(value: &mut Option<T>, edit: &FieldEdit<T>) {
     }
 }
 
+fn with_details(
+    event: Event,
+    location: Option<&str>,
+    notes: Option<&str>,
+    url: Option<&str>,
+) -> Event {
+    Event {
+        meeting_url: meeting_url(url, location, notes),
+        location: location.map(Into::into),
+        notes: notes.map(Into::into),
+        ..event
+    }
+}
+
 impl Calendar for Demo {
     fn events(&self, query: EventQuery) -> Result<Vec<Event>, BackendError> {
+        let event = |id: &str, title: &str, start: Zoned, all_day: bool, calendar: &str| Event {
+            id: id.into(),
+            title: title.into(),
+            start,
+            all_day,
+            calendar: calendar.into(),
+            location: None,
+            notes: None,
+            meeting_url: None,
+        };
         let events = [
-            (
-                "event-1",
-                "Book club",
-                self.at(-1, 18, 0)?,
-                false,
-                "Personal",
+            with_details(
+                event(
+                    "event-1",
+                    "Book club",
+                    self.at(-1, 18, 0)?,
+                    false,
+                    "Personal",
+                ),
+                Some("Corner Books, 12 Elm St"),
+                None,
+                None,
             ),
-            ("event-2", "Standup", self.at(0, 9, 30)?, false, "Work"),
-            (
-                "event-3",
-                "Design review",
-                self.at(0, 14, 0)?,
-                false,
-                "Work",
+            with_details(
+                event("event-2", "Standup", self.at(0, 9, 30)?, false, "Work"),
+                None,
+                Some("Daily check-in.\nJoin Zoom: https://zoom.us/j/5551234567?pwd=demo"),
+                None,
             ),
-            (
+            with_details(
+                event(
+                    "event-3",
+                    "Design review",
+                    self.at(0, 14, 0)?,
+                    false,
+                    "Work",
+                ),
+                Some("Room 4B"),
+                Some("Review the onboarding mockups before the meeting."),
+                Some("https://meet.google.com/abc-defg-hij"),
+            ),
+            event(
                 "event-4",
                 "Lunch with Sam",
                 self.at(2, 12, 0)?,
                 false,
                 "Personal",
             ),
-            ("event-5", "Team offsite", self.at(3, 0, 0)?, true, "Work"),
-            (
-                "event-6",
-                "Sprint planning",
-                self.at(5, 10, 0)?,
-                false,
-                "Work",
+            with_details(
+                event("event-5", "Team offsite", self.at(3, 0, 0)?, true, "Work"),
+                Some("Lakeside Lodge"),
+                None,
+                None,
             ),
-            ("event-7", "Retro", self.at(9, 16, 0)?, false, "Work"),
+            with_details(
+                event(
+                    "event-6",
+                    "Sprint planning",
+                    self.at(5, 10, 0)?,
+                    false,
+                    "Work",
+                ),
+                Some("Microsoft Teams Meeting"),
+                Some(
+                    "Agenda: https://example.com/sprint\nJoin: https://teams.microsoft.com/l/meetup-join/demo",
+                ),
+                None,
+            ),
+            event("event-7", "Retro", self.at(9, 16, 0)?, false, "Work"),
         ];
         for name in &query.calendars {
-            if !events.iter().any(|event| event.4 == name) {
+            if !events.iter().any(|event| &event.calendar == name) {
                 return Err(BackendError::NotFound {
                     kind: "calendar",
                     name: name.clone(),
@@ -546,16 +597,9 @@ impl Calendar for Demo {
         }
         Ok(events
             .into_iter()
-            .filter(|(_, _, start, _, calendar)| {
-                query.range.contains(start)
-                    && (query.calendars.is_empty() || query.calendars.iter().any(|c| c == calendar))
-            })
-            .map(|(id, title, start, all_day, calendar)| Event {
-                id: id.into(),
-                title: title.into(),
-                start,
-                all_day,
-                calendar: calendar.into(),
+            .filter(|event| {
+                query.range.contains(&event.start)
+                    && (query.calendars.is_empty() || query.calendars.contains(&event.calendar))
             })
             .collect())
     }

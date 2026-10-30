@@ -12,6 +12,10 @@ use thiserror::Error;
 
 use keymap::{DEFAULT_PRESET, Keymap};
 
+mod meeting;
+
+pub use meeting::meeting_url;
+
 fn ambiguity_details(matches: &[String]) -> String {
     if matches.is_empty() {
         String::new()
@@ -66,6 +70,9 @@ pub struct Event {
     pub start: Zoned,
     pub all_day: bool,
     pub calendar: String,
+    pub location: Option<String>,
+    pub notes: Option<String>,
+    pub meeting_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +476,7 @@ pub enum JournalAction {
     TaskReopen,
     TaskPriority,
     TaskMove,
+    TaskDelete,
     Undo,
 }
 
@@ -480,6 +488,7 @@ impl JournalAction {
             Self::TaskReopen => "task_reopen",
             Self::TaskPriority => "task_priority",
             Self::TaskMove => "task_move",
+            Self::TaskDelete => "task_delete",
             Self::Undo => "undo",
         }
     }

@@ -16,7 +16,7 @@ pub mod output;
 mod quick;
 mod task;
 
-use task::{Due, InlineTask, due, parse_inline};
+use task::{Due, InlineTask, due, inline_title_len, parse_inline};
 
 /// Fast CLI for Apple Notes, Reminders, and Calendar
 #[derive(Debug, Parser)]
@@ -63,6 +63,7 @@ pub enum Action {
     ListEvents {
         query: EventQuery,
         show_calendar: bool,
+        details: bool,
     },
     ListCalendars,
     CreateCalendar(NewResource),
@@ -74,6 +75,9 @@ pub enum Action {
     Undo {
         entry: Option<String>,
         resolve: Option<String>,
+    },
+    Pick {
+        query: String,
     },
 }
 
@@ -113,6 +117,15 @@ pub enum Command {
     Log,
     /// Undo a journal entry, or the latest entry when omitted
     Undo(UndoArgs),
+    /// Pick reminders in an inline prompt and print their ids
+    Pick(PickArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PickArgs {
+    /// Start with this filter expression as the query
+    #[arg(short, long, value_name = "EXPR")]
+    filter: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -401,6 +414,9 @@ pub struct CalArgs {
     /// Show each event's calendar
     #[arg(long, global = true)]
     show_calendar: bool,
+    /// Show each event's location, meeting link, and notes
+    #[arg(long, global = true)]
+    details: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -486,8 +502,43 @@ fn days_from_today(now: &Zoned, count: i32) -> Result<Range<Zoned>, jiff::Error>
     Ok(now.start_of_day()?..end.to_zoned(now.time_zone().clone())?)
 }
 
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub(crate) fn quick_add(
+    text: &str,
+    now: &Zoned,
+    config: &Config,
+) -> Result<NewReminder, ActionError> {
+    let words: Vec<String> = text.split_whitespace().map(ToOwned::to_owned).collect();
+    TaskOpts {
+        list: None,
+        due: None,
+        priority: None,
+    }
+    .reminder(&words, now, config)
+}
+
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub(crate) fn quick_add_title(text: &str, parse_inline: bool) -> String {
+    let words: Vec<String> = text.split_whitespace().map(ToOwned::to_owned).collect();
+    let end = if parse_inline {
+        inline_title_len(&words)
+    } else {
+        words.len()
+    };
+    words[..end].join(" ")
+}
+
 impl TaskOpts {
     fn add(self, words: &[String], now: &Zoned, config: &Config) -> Result<Action, ActionError> {
+        self.reminder(words, now, config).map(Action::AddTask)
+    }
+
+    fn reminder(
+        self,
+        words: &[String],
+        now: &Zoned,
+        config: &Config,
+    ) -> Result<NewReminder, ActionError> {
         let inline = if config.task.parse_inline {
             parse_inline(words)?
         } else {
@@ -506,7 +557,7 @@ impl TaskOpts {
         let due_time_zone = due.zip(due_time).map(|(date, time)| {
             crate::domain::local_time_zone_name_at(now.time_zone(), date, time)
         });
-        Ok(Action::AddTask(NewReminder {
+        Ok(NewReminder {
             title: inline.title,
             list: self
                 .list
@@ -516,7 +567,7 @@ impl TaskOpts {
             due_time,
             due_time_zone,
             priority: self.priority.or(inline.priority).or(config.task.priority),
-        }))
+        })
     }
 }
 
@@ -528,7 +579,9 @@ pub(crate) enum ActionError {
     Inline(#[from] task::InlineError),
     #[error("--folder can't be used with `nib note folders`")]
     NoteFoldersFilter,
-    #[error("--week, --calendar, and --show-calendar can't be used with `nib cal calendars`")]
+    #[error(
+        "--week, --calendar, --show-calendar, and --details can't be used with `nib cal calendars`"
+    )]
     CalendarResourceFilter,
     #[error("--filter can only be used with `nib task` or `nib task list`")]
     TaskFilter,
@@ -633,6 +686,7 @@ fn calendar_action(args: CalArgs, now: &Zoned, config: &Config) -> Result<Action
         week,
         calendar,
         show_calendar,
+        details,
     } = args;
     Ok(match action {
         Some(CalAction::List) | None => Action::ListEvents {
@@ -645,9 +699,10 @@ fn calendar_action(args: CalArgs, now: &Zoned, config: &Config) -> Result<Action
                 },
             },
             show_calendar: show_calendar || config.cal.show_calendar,
+            details,
         },
         Some(CalAction::Calendars(CalendarsArgs { action })) => {
-            if week || !calendar.is_empty() || show_calendar {
+            if week || !calendar.is_empty() || show_calendar || details {
                 return Err(ActionError::CalendarResourceFilter);
             }
             match action {
@@ -725,6 +780,9 @@ impl Command {
             Command::Cal(args) => calendar_action(args, now, config)?,
             Command::Log => Action::Log,
             Command::Undo(UndoArgs { entry, resolve }) => Action::Undo { entry, resolve },
+            Command::Pick(PickArgs { filter }) => Action::Pick {
+                query: filter.unwrap_or_default(),
+            },
         }))
     }
 }
@@ -742,6 +800,10 @@ impl Cli {
             Command::Completions { shell } => Some(CompletionRequest::Script(shell)),
             _ => None,
         }
+    }
+
+    pub fn is_pick(&self) -> bool {
+        matches!(self.command, Command::Pick(_))
     }
 
     pub fn is_config(&self) -> bool {
@@ -841,6 +903,7 @@ mod tests {
                 calendars: Vec::new(),
             },
             show_calendar: false,
+            details: false,
         }
     }
 
@@ -857,14 +920,30 @@ mod tests {
 
     fn showing_calendar(action: Action) -> Action {
         match action {
-            Action::ListEvents { query, .. } => Action::ListEvents {
+            Action::ListEvents { query, details, .. } => Action::ListEvents {
                 query,
                 show_calendar: true,
+                details,
             },
             Action::Today { date, query, .. } => Action::Today {
                 date,
                 query,
                 show_calendar: true,
+            },
+            other => panic!("{other:?} doesn't list events"),
+        }
+    }
+
+    fn with_details(action: Action) -> Action {
+        match action {
+            Action::ListEvents {
+                query,
+                show_calendar,
+                ..
+            } => Action::ListEvents {
+                query,
+                show_calendar,
+                details: true,
             },
             other => panic!("{other:?} doesn't list events"),
         }
@@ -1096,8 +1175,10 @@ mod tests {
             (&["cal", "--show-calendar"], showing_calendar(day.clone())),
             (
                 &["c", "ls", "--show-calendar", "-w"],
-                showing_calendar(week),
+                showing_calendar(week.clone()),
             ),
+            (&["cal", "--details"], with_details(day.clone())),
+            (&["c", "ls", "-w", "--details"], with_details(week)),
             (&["cal", "calendars"], Action::ListCalendars),
             (&["--json", "c", "calendars"], Action::ListCalendars),
             (
@@ -1190,6 +1271,7 @@ mod tests {
             &["cal", "calendars", "--week"][..],
             &["cal", "calendars", "--calendar", "Work"][..],
             &["cal", "calendars", "--show-calendar"][..],
+            &["cal", "calendars", "--details"][..],
         ] {
             assert!(matches!(
                 action_with_config(&now, args, &config),
@@ -1580,7 +1662,7 @@ mod tests {
         assert_eq!(action(&["n"]), notes(None));
         assert!(matches!(
             action(&["cal"]),
-            Action::ListEvents { query: EventQuery { calendars, .. }, show_calendar: false }
+            Action::ListEvents { query: EventQuery { calendars, .. }, show_calendar: false, .. }
                 if calendars == ["Work"]
         ));
         assert!(matches!(

@@ -24,11 +24,8 @@ pub fn run(
     host: &mut dyn Host,
 ) -> Result<String> {
     match action {
-        Action::Doctor => Err(miette::miette!(
-            "doctor must be run through the system diagnostic entry point"
-        )),
-        Action::Config(_) => Err(miette::miette!(
-            "config must be run through the configuration entry point"
+        Action::Doctor | Action::Config(_) | Action::Pick { .. } => Err(miette::miette!(
+            "doctor, config, and pick must be run through their own entry points"
         )),
         Action::Today {
             date,
@@ -79,13 +76,8 @@ pub fn run(
         Action::ListEvents {
             query,
             show_calendar,
-        } => output::events(
-            &backends.calendar.events(query)?,
-            show_calendar,
-            json,
-            now,
-            style,
-        ),
+            details,
+        } => list_events(query, show_calendar, details, json, now, backends, style),
         Action::ListCalendars => output::list(&backends.calendar.calendars()?, json, now, style),
         Action::CreateCalendar(calendar) => output::single(
             &backends.calendar.create_calendar(calendar)?,
@@ -183,7 +175,7 @@ fn filtered_tasks(
     output::list(&reminders, json, now, style)
 }
 
-fn reminder_from_snapshot(reminder: StoredReminder, local_zone: &TimeZone) -> Reminder {
+pub(crate) fn reminder_from_snapshot(reminder: StoredReminder, local_zone: &TimeZone) -> Reminder {
     let due_time = reminder.due_components.as_ref().and_then(stored_due_time);
     let due_time_zone = due_time.and_then(|_| {
         reminder
@@ -220,6 +212,19 @@ fn stored_due_time(parts: &ReminderDueComponents) -> Option<Time> {
         0,
     )
     .ok()
+}
+
+fn list_events(
+    query: EventQuery,
+    show_calendar: bool,
+    details: bool,
+    json: bool,
+    now: &Zoned,
+    backends: &Backends,
+    style: Style,
+) -> Result<String> {
+    let events = backends.calendar.events(query)?;
+    output::events(&events, show_calendar, details, json, now, style)
 }
 
 fn today(
@@ -604,12 +609,19 @@ mod tests {
                         && (query.calendars.is_empty()
                             || query.calendars.iter().any(|name| name == calendar))
                 })
-                .map(|(id, title, start, all_day, calendar)| Event {
-                    id: id.into(),
-                    title: title.into(),
-                    start,
-                    all_day,
-                    calendar: calendar.into(),
+                .map(|(id, title, start, all_day, calendar)| {
+                    let review = id == "event-3";
+                    Event {
+                        id: id.into(),
+                        title: title.into(),
+                        start,
+                        all_day,
+                        calendar: calendar.into(),
+                        location: review.then(|| "Room 4B".into()),
+                        notes: review
+                            .then(|| "Bring the mockups.\nJoin: https://zoom.us/j/1".into()),
+                        meeting_url: review.then(|| "https://zoom.us/j/1".into()),
+                    }
                 })
                 .collect())
         }
@@ -836,6 +848,9 @@ mod tests {
             start: at(day, hour, 0),
             all_day: false,
             calendar: "Work".into(),
+            location: None,
+            notes: None,
+            meeting_url: None,
         }
     }
 
@@ -1206,7 +1221,10 @@ mod tests {
               "title": "Design review",
               "start": "2026-10-26T14:00:00-04:00",
               "all_day": false,
-              "calendar": "Work"
+              "calendar": "Work",
+              "location": null,
+              "notes": null,
+              "meeting_url": null
             }
           ]
         }
@@ -1618,6 +1636,48 @@ mod tests {
     }
 
     #[test]
+    fn cal_details_list_each_event_with_its_fields() {
+        assert_snapshot!(nib(&["cal", "--week", "--details"]), @r"
+        2026-10-26 10:00  Team sync
+          calendar  Work
+
+        2026-10-28 all day  Offsite
+          calendar  Work
+
+        2026-10-29 14:30  Design review
+          calendar  Work
+          location  Room 4B
+          meeting   https://zoom.us/j/1
+          notes     Bring the mockups.
+                    Join: https://zoom.us/j/1
+        ");
+        assert_eq!(
+            nib(&["--json", "cal", "--week", "--details"]),
+            nib(&["--json", "cal", "--week"])
+        );
+    }
+
+    #[test]
+    fn cal_details_strip_control_characters() {
+        let mut hostile = event("event-x", "Sync\u{1b}[31m", date(2026, 10, 26), 10);
+        hostile.location = Some("Room\u{7}1".into());
+        hostile.notes = Some("line one\r\n\u{202e}line two\t!".into());
+        hostile.meeting_url = Some("https://zoom.us/j/1\u{1b}]8;;".into());
+        let output = agenda(&["cal", "--details"], Vec::new(), vec![hostile]);
+        assert!(!output.contains('\u{1b}'));
+        assert!(!output.contains('\u{7}'));
+        assert!(!output.contains('\u{202e}'));
+        assert_snapshot!(output, @r"
+        2026-10-26 10:00  Sync�[31m
+          calendar  Work
+          location  Room�1
+          meeting   https://zoom.us/j/1�]8;;
+          notes     line one
+                    �line two !
+        ");
+    }
+
+    #[test]
     fn event_list_json() {
         assert_snapshot!(nib(&["cal", "--week", "--json"]), @r#"
         [
@@ -1626,21 +1686,30 @@ mod tests {
             "title": "Team sync",
             "start": "2026-10-26T10:00:00-04:00",
             "all_day": false,
-            "calendar": "Work"
+            "calendar": "Work",
+            "location": null,
+            "notes": null,
+            "meeting_url": null
           },
           {
             "id": "event-5",
             "title": "Offsite",
             "start": "2026-10-28T00:00:00-04:00",
             "all_day": true,
-            "calendar": "Work"
+            "calendar": "Work",
+            "location": null,
+            "notes": null,
+            "meeting_url": null
           },
           {
             "id": "event-3",
             "title": "Design review",
             "start": "2026-10-29T14:30:00-04:00",
             "all_day": false,
-            "calendar": "Work"
+            "calendar": "Work",
+            "location": "Room 4B",
+            "notes": "Bring the mockups.\nJoin: https://zoom.us/j/1",
+            "meeting_url": "https://zoom.us/j/1"
           }
         ]
         "#);
@@ -2508,6 +2577,76 @@ mod quick_tests {
             "completed": false,
             "priority": "medium",
             "change": "moved"
+          }
+        ]
+        "#);
+    }
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod pick_tests {
+    use insta::assert_snapshot;
+    use jiff::civil::{date, time};
+
+    use crate::cli::output::{self, PickedReminder, Style};
+    use crate::domain::Priority;
+
+    fn picked() -> Vec<PickedReminder<'static>> {
+        vec![
+            PickedReminder {
+                id: "reminder-3",
+                title: "Renew passport",
+                list: Some("Reminders"),
+                due: Some(date(2026, 11, 9)),
+                due_time: Some(time(9, 0, 0, 0)),
+                due_time_zone: Some("America/New_York"),
+                priority: Some(Priority::Low),
+                completed: false,
+            },
+            PickedReminder {
+                id: "reminder-5",
+                title: "Water plants",
+                list: None,
+                due: None,
+                due_time: None,
+                due_time_zone: None,
+                priority: None,
+                completed: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn pick_prints_one_id_per_line() {
+        assert_snapshot!(output::picked(&picked(), false, Style::default()).unwrap(), @r"
+        reminder-3
+        reminder-5
+        ");
+    }
+
+    #[test]
+    fn pick_json_lists_each_chosen_reminder() {
+        assert_snapshot!(output::picked(&picked(), true, Style::default()).unwrap(), @r#"
+        [
+          {
+            "id": "reminder-3",
+            "title": "Renew passport",
+            "list": "Reminders",
+            "due": "2026-11-09",
+            "due_time": "09:00",
+            "due_time_zone": "America/New_York",
+            "priority": "low",
+            "completed": false
+          },
+          {
+            "id": "reminder-5",
+            "title": "Water plants",
+            "list": null,
+            "due": null,
+            "due_time": null,
+            "due_time_zone": null,
+            "priority": null,
+            "completed": false
           }
         ]
         "#);

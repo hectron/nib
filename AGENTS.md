@@ -51,6 +51,7 @@ nib t "Buy groceries"
 - `src/infra/eventkit.rs` — the only unsafe module. It implements Reminders and Calendar with EventKit on macOS, converts callback data to owned Rust values in the callback, and keeps Objective-C calls behind small safe helpers.
 - `src/cli/mod.rs` — `clap` definitions. Every command line resolves to one `Action`; relative input is resolved against the supplied clock and configuration.
 - `src/cli/output.rs` — table and JSON rendering. Terminal style is detected once; text strips control characters; JSON uses private output types.
+- `src/tui/` — `nib pick`, behind the default `tui` feature. `state.rs` is the pure prompt state and `update`; `keys.rs` is the one key table; `session.rs` performs effects through the one-step commands and quick-add; `render.rs` draws with ratatui; `terminal.rs` owns the `/dev/tty` inline viewport and raw mode.
 - `src/test_support.rs` — test-only helpers shared by unit tests.
 
 See [`STYLE.md`](STYLE.md) for the repository's concrete formatting, naming, architecture, error, unsafe, and lint rules.
