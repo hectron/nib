@@ -325,6 +325,7 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, state: &State, theme: Theme) {
                 .collect(),
         ),
     };
+    let hidden = hidden_line(state, theme);
     let lines: Vec<Line<'_>> = options
         .into_iter()
         .enumerate()
@@ -342,6 +343,7 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, state: &State, theme: Theme) {
                 line
             }
         })
+        .chain(hidden)
         .collect();
     let skip = state
         .menu_cursor()
@@ -352,9 +354,21 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, state: &State, theme: Theme) {
         .padding(Padding::horizontal(1))
         .title(Span::styled(title, STRONG));
     frame.render_widget(
-        Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()).block(block),
+        Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>())
+            .block(block)
+            .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn hidden_line(state: &State, theme: Theme) -> Option<Line<'static>> {
+    let hidden = state.hidden_target_count();
+    (hidden > 0).then(|| {
+        Line::styled(
+            format!("{hidden} selected not shown by the current query."),
+            theme.paint(Color::Yellow),
+        )
+    })
 }
 
 fn draw_confirm_delete(frame: &mut Frame<'_>, area: Rect, state: &State, what: &str, theme: Theme) {
@@ -365,17 +379,6 @@ fn draw_confirm_delete(frame: &mut Frame<'_>, area: Rect, state: &State, what: &
         )
     };
     let mut lines = Vec::new();
-    let hidden = state.hidden_target_count();
-    if hidden > 0 {
-        lines.push(Line::styled(
-            format!("{hidden} not shown by the current query."),
-            theme.paint(Color::Yellow),
-        ));
-    }
-    lines.push(Line::styled(
-        "Undo re-creates deleted reminders with new ids and without alarms, repeats, or links.",
-        MUTED,
-    ));
     if state.delete_needs_count() {
         let count = state.targets().len();
         lines.push(Line::from(vec![
@@ -390,6 +393,21 @@ fn draw_confirm_delete(frame: &mut Frame<'_>, area: Rect, state: &State, what: &
             Span::raw("keep"),
         ]));
     }
+    if let Some(hidden) = hidden_line(state, theme) {
+        lines.push(hidden);
+    }
+    let partial = state.partial_target_count();
+    if partial > 0 {
+        let has = if partial == 1 { "has" } else { "have" };
+        lines.push(Line::styled(
+            format!("{partial} {has} alarms, repeats, or links that undo can't bring back."),
+            theme.paint(Color::Yellow),
+        ));
+    }
+    lines.push(Line::styled(
+        "Undo re-creates deleted reminders with new ids.",
+        MUTED,
+    ));
     let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(MUTED)
@@ -440,7 +458,11 @@ mod tests {
     use crate::tui::state::tests::{data, now, type_text};
 
     fn screen(state: &State, width: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, 9)).unwrap();
+        sized_screen(state, width, 9)
+    }
+
+    fn sized_screen(state: &State, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| draw(frame, state, false)).unwrap();
         terminal.backend().to_string()
     }
@@ -514,11 +536,11 @@ mod tests {
         "> eggs                                                         2 selected  1 matches"
         "────────────────────────────────────────────────────────────────────────────────────"
         "+ Buy eggs                       Work       │Delete 2 reminders?                    "
-        "+ Add reminder: eggs                  enter │ 1 not shown by the current query.     "
+        "+ Add reminder: eggs                  enter │ y  delete  n  keep                    "
+        "                                            │ 1 selected not shown by the current   "
+        "                                            │ query.                                "
         "                                            │ Undo re-creates deleted reminders     "
-        "                                            │ with new ids and without alarms,      "
-        "                                            │ repeats, or links.                    "
-        "                                            │ y  delete  n  keep                    "
+        "                                            │ with new ids.                         "
         "esc keep                                                                            "
         "#);
     }
@@ -544,12 +566,56 @@ mod tests {
         ">                                      4 selected  4 matches"
         "────────────────────────────────────────────────────────────"
         "│Delete 4 reminders?                                        "
-        "│ Undo re-creates deleted reminders with new ids and        "
-        "│ without alarms, repeats, or links.                        "
         "│ Type 4 and press enter: 4                                 "
+        "│ Undo re-creates deleted reminders with new ids.           "
+        "│                                                           "
         "│                                                           "
         "│                                                           "
         "esc keep                                                    "
+        "#);
+    }
+
+    #[test]
+    fn a_partial_backup_asks_for_the_count_and_says_what_undo_loses() {
+        let mut items = data();
+        items.items[1].backup_partial = true;
+        let (mut state, _) = State::new(items, "", now());
+        state.update(Action::ToggleDown);
+        state.update(Action::ToggleDown);
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        assert_snapshot!(screen(&state, 60), @r#"
+        ">                                      2 selected  3 matches"
+        "────────────────────────────────────────────────────────────"
+        "│Delete 2 reminders?                                        "
+        "│ Type 2 and press enter:                                   "
+        "│ 1 has alarms, repeats, or links that undo can't bring     "
+        "│ back.                                                     "
+        "│ Undo re-creates deleted reminders with new ids.           "
+        "│                                                           "
+        "esc keep                                                    "
+        "#);
+    }
+
+    #[test]
+    fn menus_count_selections_hidden_by_the_query() {
+        let (mut state, _) = State::new(data(), "", now());
+        state.update(Action::ToggleDown);
+        type_text(&mut state, "eggs");
+        state.update(Action::ToggleDown);
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('p'));
+        assert_snapshot!(sized_screen(&state, 84, 10), @r#"
+        "> eggs                                                         2 selected  1 matches"
+        "────────────────────────────────────────────────────────────────────────────────────"
+        "+ Buy eggs                       Work       │Priority for 2 reminders               "
+        "+ Add reminder: eggs                  enter │ h  high                               "
+        "                                            │ m  medium                             "
+        "                                            │ l  low                                "
+        "                                            │ n  none                               "
+        "                                            │ 1 selected not shown by the current   "
+        "                                            │ query.                                "
+        "enter choose  esc back                                                              "
         "#);
     }
 }

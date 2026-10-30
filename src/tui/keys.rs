@@ -6,6 +6,7 @@ use super::state::{Action, Mode};
 enum Scope {
     Any,
     Prompt,
+    Confirm,
 }
 
 const NONE: KeyModifiers = KeyModifiers::NONE;
@@ -45,6 +46,8 @@ const BINDINGS: &[(Scope, KeyCode, KeyModifiers, Action)] = &[
     (Scope::Prompt, KeyCode::Char('k'), CTRL, Action::KillToEnd),
     (Scope::Prompt, KeyCode::Char('w'), CTRL, Action::KillWord),
     (Scope::Prompt, KeyCode::Backspace, ALT, Action::KillWord),
+    (Scope::Confirm, KeyCode::Backspace, NONE, Action::Backspace),
+    (Scope::Confirm, KeyCode::Char('h'), CTRL, Action::Backspace),
 ];
 
 pub(crate) fn action(mode: Mode, key: KeyEvent) -> Option<Action> {
@@ -53,7 +56,12 @@ pub(crate) fn action(mode: Mode, key: KeyEvent) -> Option<Action> {
     let bound = BINDINGS
         .iter()
         .find(|(scope, code, wanted, _)| {
-            (*scope == Scope::Any || prompt) && *code == key.code && *wanted == modifiers
+            let active = match scope {
+                Scope::Any => true,
+                Scope::Prompt => prompt,
+                Scope::Confirm => mode == Mode::ConfirmDelete,
+            };
+            active && *code == key.code && *wanted == modifiers
         })
         .map(|(.., action)| *action);
     bound.or(match key.code {
@@ -147,6 +155,14 @@ mod tests {
     fn prompt_editing_keys_do_nothing_in_menus() {
         assert_eq!(action(Mode::Act, key(KeyCode::Char('o'), CTRL)), None);
         assert_eq!(action(Mode::Move, key(KeyCode::Backspace, NONE)), None);
+        assert_eq!(
+            action(Mode::ConfirmDelete, key(KeyCode::Backspace, NONE)),
+            Some(Action::Backspace)
+        );
+        assert_eq!(
+            action(Mode::ConfirmDelete, key(KeyCode::Char('w'), CTRL)),
+            None
+        );
         assert_eq!(
             action(Mode::Priority, key(KeyCode::Esc, NONE)),
             Some(Action::Cancel)

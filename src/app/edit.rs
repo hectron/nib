@@ -91,7 +91,7 @@ pub fn tasks(
             }
         };
         if let Err(error) = journal::record_edit(now, &plan.changes, &applied, host) {
-            host.say(journal::UNRECORDED);
+            host.say_unrecorded(journal::UNRECORDED);
             file.remove_on_drop();
             return Err(error);
         }

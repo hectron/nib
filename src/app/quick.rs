@@ -86,15 +86,6 @@ pub(crate) enum DeleteError {
     #[error("\"{title}\" is in the read-only list \"{list}\" and can't be deleted")]
     #[diagnostic(code(nib::task::read_only_list))]
     ReadOnly { title: String, list: String },
-
-    #[error("nib can't fully back up \"{title}\", so it won't delete it here")]
-    #[diagnostic(
-        code(nib::task::partial_backup),
-        help(
-            "delete it with `nib task edit`, which warns about the partial backup before applying"
-        )
-    )]
-    PartialBackup { title: String },
 }
 
 pub fn run(
@@ -138,7 +129,7 @@ pub fn run(
     if let Err(error) =
         journal::record_action(now, change.journal_action(), &changes, &applied, host)
     {
-        host.say(journal::UNRECORDED);
+        host.say_unrecorded(journal::UNRECORDED);
         return Err(error);
     }
     Ok(changes
@@ -191,12 +182,6 @@ pub(crate) fn delete(
             }
             .into());
         }
-        if reminder.backup_partial {
-            return Err(DeleteError::PartialBackup {
-                title: clean(&reminder.title),
-            }
-            .into());
-        }
         if !selected.iter().any(|existing| existing.id == reminder.id) {
             selected.push(reminder);
         }
@@ -216,7 +201,7 @@ pub(crate) fn delete(
     if let Err(error) =
         journal::record_action(now, JournalAction::TaskDelete, &changes, &applied, host)
     {
-        host.say(journal::UNRECORDED);
+        host.say_unrecorded(journal::UNRECORDED);
         return Err(error);
     }
     Ok(selected)
@@ -1082,17 +1067,20 @@ mod tests {
     }
 
     #[test]
-    fn delete_refuses_reminders_whose_backup_would_be_partial() {
+    fn delete_backs_up_reminders_whose_backup_is_partial() {
         let mut reminders = sample();
         reminders[1].backup_partial = true;
         let mut host = Scripted::new();
-        let (result, state) = delete_from(reminders.clone(), &["rem-2"], &mut host);
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "nib can't fully back up \"Buy eggs\", so it won't delete it here"
+        let (result, state) = delete_from(reminders, &["rem-2"], &mut host);
+        assert_eq!(result.unwrap()[0].title, "Buy eggs");
+        assert!(state.iter().all(|reminder| reminder.id != "rem-2"));
+        assert_eq!(host.backups.len(), 1);
+        assert!(
+            host.backups[0].1.contains("\"partial\": true"),
+            "{}",
+            host.backups[0].1
         );
-        assert_eq!(state, reminders);
-        assert_eq!(host.backups, Vec::<(String, String)>::new());
+        assert_eq!(host.journals.len(), 1);
     }
 
     #[test]

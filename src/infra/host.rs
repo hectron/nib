@@ -24,6 +24,11 @@ pub trait Host {
     fn edit(&mut self, path: &Path) -> io::Result<Duration>;
     fn ask(&mut self, prompt: &str) -> io::Result<String>;
     fn say(&mut self, message: &str);
+
+    fn say_unrecorded(&mut self, message: &str) {
+        self.say(message);
+    }
+
     fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf>;
     fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf>;
     fn replace_journal(&mut self, id: &str, contents: &str) -> io::Result<PathBuf>;

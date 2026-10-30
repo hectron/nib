@@ -17,6 +17,7 @@ pub(crate) struct Item {
     pub due_at: Option<Timestamp>,
     pub priority: Option<Priority>,
     pub completed: bool,
+    pub backup_partial: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,8 +114,6 @@ pub(crate) const ACTS: [(char, &str); 4] = [
 ];
 
 pub(crate) const DELETE_COUNT_THRESHOLD: usize = 3;
-
-const QUICK_ADD_PRIORITIES: [&str; 3] = ["low", "medium", "high"];
 
 pub(crate) const PRIORITIES: [(char, &str, Option<Priority>); 4] = [
     ('h', "high", Some(Priority::High)),
@@ -237,7 +236,14 @@ impl State {
     }
 
     pub(crate) fn delete_needs_count(&self) -> bool {
-        self.targets.len() > DELETE_COUNT_THRESHOLD
+        self.targets.len() > DELETE_COUNT_THRESHOLD || self.partial_target_count() > 0
+    }
+
+    pub(crate) fn partial_target_count(&self) -> usize {
+        self.targets
+            .iter()
+            .filter(|id| self.item(id).is_some_and(|item| item.backup_partial))
+            .count()
     }
 
     pub(crate) fn hidden_target_count(&self) -> usize {
@@ -517,6 +523,10 @@ impl State {
                     self.confirm_input.push(digit);
                     None
                 }
+                Action::Backspace => {
+                    self.confirm_input.pop();
+                    None
+                }
                 Action::Accept if self.confirm_input == self.targets.len().to_string() => {
                     self.mode = Mode::Filter;
                     Some(Effect::Delete(self.targets.clone()))
@@ -633,17 +643,8 @@ impl State {
 }
 
 fn is_plain_text(query: &str) -> bool {
-    let rest: Vec<&str> = query
-        .split_whitespace()
-        .filter(|word| {
-            !word.strip_prefix('!').is_some_and(|value| {
-                QUICK_ADD_PRIORITIES
-                    .iter()
-                    .any(|priority| value.eq_ignore_ascii_case(priority))
-            })
-        })
-        .collect();
-    Filter::parse(&rest.join(" ")).is_ok_and(|filter| filter.is_plain_text())
+    let title = crate::cli::quick_add_title(query);
+    !title.is_empty() && Filter::parse(&title).is_ok_and(|filter| filter.is_plain_text())
 }
 
 enum MenuStep {
@@ -685,6 +686,7 @@ pub(crate) mod tests {
             due_at: None,
             priority,
             completed: false,
+            backup_partial: false,
         }
     }
 
@@ -790,6 +792,17 @@ pub(crate) mod tests {
             rows(&state("Pay rent fri !HIGH #bills")),
             ["add:Pay rent fri !HIGH #bills"]
         );
+        assert_eq!(
+            rows(&state("Pay rent !high fri")),
+            ["add:Pay rent !high fri"]
+        );
+    }
+
+    #[test]
+    fn priorities_count_only_where_quick_add_reads_them() {
+        assert_eq!(rows(&state("!high zzz")), Vec::<String>::new());
+        assert_eq!(rows(&state("!high")), ["rem-1", "rem-2", "rem-3"]);
+        assert_eq!(rows(&state("!high #bills")), Vec::<String>::new());
     }
 
     #[test]
@@ -941,18 +954,19 @@ pub(crate) mod tests {
 
     #[test]
     fn a_failed_add_reports_the_error_and_keeps_the_prompt_open() {
-        let mut state = state("Pay !low !high");
-        state.update(Action::Down);
+        let mut state = state("Call mom tomorrow fri");
         assert_eq!(
             state.update(Action::Accept),
-            Some(Effect::Add("Pay !low !high".into()))
+            Some(Effect::Add("Call mom tomorrow fri".into()))
         );
-        state.resolve(Response::Failed("invalid inline priority".into()));
+        state.resolve(Response::Failed(
+            "inline due date is specified more than once".into(),
+        ));
         assert_eq!(state.outcome(), None);
         assert_eq!(
             state.status(),
             Some(&Status {
-                text: "invalid inline priority".into(),
+                text: "inline due date is specified more than once".into(),
                 error: true
             })
         );
@@ -1150,6 +1164,93 @@ pub(crate) mod tests {
                 "rem-4".into()
             ]))
         );
+    }
+
+    #[test]
+    fn backspace_edits_the_typed_count() {
+        let mut state = select_four();
+        type_text_in_menu(&mut state, "44");
+        assert_eq!(state.update(Action::Backspace), None);
+        assert_eq!(state.confirm_input(), "4");
+        state.update(Action::Backspace);
+        state.update(Action::Backspace);
+        assert_eq!(state.confirm_input(), "");
+        assert_eq!(state.mode(), Mode::ConfirmDelete);
+        type_text_in_menu(&mut state, "4");
+        assert_eq!(
+            state.update(Action::Accept),
+            Some(Effect::Delete(vec![
+                "rem-1".into(),
+                "rem-2".into(),
+                "rem-3".into(),
+                "rem-4".into()
+            ]))
+        );
+    }
+
+    #[test]
+    fn escape_or_a_stray_letter_cancels_count_entry_and_movement_is_ignored() {
+        for cancel in [Action::Cancel, Action::Hotkey('x')] {
+            let mut state = select_four();
+            type_text_in_menu(&mut state, "4");
+            assert_eq!(state.update(Action::Down), None);
+            assert_eq!(state.mode(), Mode::ConfirmDelete);
+            assert_eq!(state.update(cancel), None);
+            assert_eq!(state.mode(), Mode::Filter);
+            assert_eq!(
+                state.status().map(|status| status.text.as_str()),
+                Some("Nothing was deleted.")
+            );
+            assert_eq!(state.selected().len(), 4);
+        }
+    }
+
+    fn with_partial_backup(ids: &[&str]) -> State {
+        let mut items = data();
+        for item in &mut items.items {
+            item.backup_partial = ids.contains(&item.id.as_str());
+        }
+        let (state, _) = State::new(items, "", now());
+        state
+    }
+
+    #[test]
+    fn a_partial_backup_needs_the_count_typed() {
+        let mut state = with_partial_backup(&["rem-2"]);
+        state.update(Action::ToggleDown);
+        state.update(Action::ToggleDown);
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        assert_eq!(state.partial_target_count(), 1);
+        assert!(state.delete_needs_count());
+        assert_eq!(state.update(Action::Hotkey('y')), None);
+        assert_eq!(state.mode(), Mode::Filter);
+
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        type_text_in_menu(&mut state, "1");
+        assert_eq!(state.update(Action::Accept), None);
+        assert_eq!(
+            state.status().map(|status| status.text.as_str()),
+            Some("Nothing was deleted.")
+        );
+
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        type_text_in_menu(&mut state, "2");
+        assert_eq!(
+            state.update(Action::Accept),
+            Some(Effect::Delete(vec!["rem-1".into(), "rem-2".into()]))
+        );
+    }
+
+    #[test]
+    fn a_full_backup_keeps_the_single_key_confirmation() {
+        let mut state = with_partial_backup(&["rem-3"]);
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        assert_eq!(state.partial_target_count(), 0);
+        assert!(!state.delete_needs_count());
     }
 
     #[test]

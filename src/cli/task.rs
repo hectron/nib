@@ -284,47 +284,7 @@ pub(crate) enum InlineError {
 
 pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> {
     let mut end = words.len();
-    let mut list = None;
-    let mut due = None;
-    let mut priority = None;
-
-    while end > 0 {
-        if end >= 2 && is_escaped_due_phrase(&words[end - 2], &words[end - 1]) {
-            break;
-        }
-        if words[end - 1].starts_with('\\') {
-            break;
-        }
-        let word = &words[end - 1];
-        if let Some(value) = word.strip_prefix('!') {
-            let value = match value.to_ascii_lowercase().as_str() {
-                "low" => Priority::Low,
-                "medium" => Priority::Medium,
-                "high" => Priority::High,
-                _ => return Err(InlineError::Priority(word.clone())),
-            };
-            set_once(&mut priority, value, "priority")?;
-            end -= 1;
-            continue;
-        }
-        if let Some(value) = word.strip_prefix('#') {
-            if value.is_empty() {
-                return Err(InlineError::EmptyList);
-            }
-            set_once(&mut list, value.to_owned(), "list")?;
-            end -= 1;
-            continue;
-        }
-        match inline_due_suffix(&words[..end]) {
-            Ok(Some((value, count))) => {
-                set_once(&mut due, value, "due date")?;
-                end -= count;
-            }
-            Ok(None) => break,
-            Err((value, reason)) => return Err(InlineError::Due { value, reason }),
-        }
-    }
-
+    let (list, due, priority) = inline_fields(words, &mut end)?;
     let title = inline_title(&words[..end]);
     if title.is_empty() {
         return Err(InlineError::EmptyTitle);
@@ -335,6 +295,61 @@ pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> 
         due,
         priority,
     })
+}
+
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub(super) fn inline_title_len(words: &[String]) -> usize {
+    let mut end = words.len();
+    let _ = inline_fields(words, &mut end);
+    end
+}
+
+type InlineFields = (Option<String>, Option<Due>, Option<Priority>);
+
+fn inline_fields(words: &[String], end: &mut usize) -> Result<InlineFields, InlineError> {
+    let mut list = None;
+    let mut due = None;
+    let mut priority = None;
+
+    while *end > 0 {
+        let end_now = *end;
+        if end_now >= 2 && is_escaped_due_phrase(&words[end_now - 2], &words[end_now - 1]) {
+            break;
+        }
+        if words[end_now - 1].starts_with('\\') {
+            break;
+        }
+        let word = &words[end_now - 1];
+        if let Some(value) = word.strip_prefix('!') {
+            let value = match value.to_ascii_lowercase().as_str() {
+                "low" => Priority::Low,
+                "medium" => Priority::Medium,
+                "high" => Priority::High,
+                _ => return Err(InlineError::Priority(word.clone())),
+            };
+            set_once(&mut priority, value, "priority")?;
+            *end -= 1;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix('#') {
+            if value.is_empty() {
+                return Err(InlineError::EmptyList);
+            }
+            set_once(&mut list, value.to_owned(), "list")?;
+            *end -= 1;
+            continue;
+        }
+        match inline_due_suffix(&words[..end_now]) {
+            Ok(Some((value, count))) => {
+                set_once(&mut due, value, "due date")?;
+                *end -= count;
+            }
+            Ok(None) => break,
+            Err((value, reason)) => return Err(InlineError::Due { value, reason }),
+        }
+    }
+
+    Ok((list, due, priority))
 }
 
 fn inline_due_suffix(words: &[String]) -> Result<Option<(Due, usize)>, (String, String)> {
@@ -802,6 +817,21 @@ mod tests {
             let words: Vec<String> = words.iter().map(ToString::to_string).collect();
             let error = parse_inline(&words).unwrap_err();
             assert!(error.to_string().contains(message), "{words:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_title_length_stops_before_trailing_fields_or_a_bad_one() {
+        let cases = [
+            (&["Pay", "rent", "fri", "!high", "#bills"][..], 2),
+            (&["!high", "Pay", "rent"][..], 3),
+            (&["!high"][..], 0),
+            (&["Call", "mom", "tomorrow", "fri"][..], 3),
+            (&["Pay", "!urgent"][..], 2),
+        ];
+        for (words, expected) in cases {
+            let words: Vec<String> = words.iter().map(ToString::to_string).collect();
+            assert_eq!(inline_title_len(&words), expected, "{words:?}");
         }
     }
 }

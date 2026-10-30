@@ -16,7 +16,7 @@ pub mod output;
 mod quick;
 mod task;
 
-use task::{Due, InlineTask, due, parse_inline};
+use task::{Due, InlineTask, due, inline_title_len, parse_inline};
 
 /// Fast CLI for Apple Notes, Reminders, and Calendar
 #[derive(Debug, Parser)]
@@ -511,6 +511,12 @@ pub(crate) fn quick_add(
         priority: None,
     }
     .reminder(&words, now, config)
+}
+
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub(crate) fn quick_add_title(text: &str) -> String {
+    let words: Vec<String> = text.split_whitespace().map(ToOwned::to_owned).collect();
+    words[..inline_title_len(&words)].join(" ")
 }
 
 impl TaskOpts {

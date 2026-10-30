@@ -7,7 +7,7 @@ use miette::Result;
 
 use super::state::{Data, Effect, Item, ListChoice, Response};
 use crate::app::commands::reminder_from_snapshot;
-use crate::app::{journal, quick};
+use crate::app::quick;
 use crate::cli::output::{self, Style, clean};
 use crate::domain::{Backends, Config, Reminder, ReminderSnapshot, TaskChangeRequest};
 use crate::infra::host::{EditFile, Host, JournalFile, JournalLock};
@@ -89,27 +89,34 @@ impl Session<'_> {
         let mut host = Quiet {
             inner: &mut *self.host,
             said: Vec::new(),
+            unrecorded: false,
         };
         let result = run(&mut host);
-        let with_said = |text: String| {
-            std::iter::once(text)
-                .chain(host.said.iter().map(|line| clean(line)))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let applied = host.said.iter().any(|line| line == journal::UNRECORDED);
+        let said = host.said.iter().map(|line| clean(line));
         match result {
             Ok(summary) => Ok(Response::Changed {
-                message: with_said(summary),
+                message: std::iter::once(summary)
+                    .chain(said)
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 error: false,
                 data: None,
             }),
-            Err(error) if applied => Ok(Response::Changed {
-                message: with_said(error.to_string()),
-                error: true,
-                data: None,
-            }),
-            Err(error) => Err(miette::miette!("{}", with_said(error.to_string()))),
+            Err(error) => {
+                let message = said
+                    .chain(std::iter::once(error.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if host.unrecorded {
+                    Ok(Response::Changed {
+                        message,
+                        error: true,
+                        data: None,
+                    })
+                } else {
+                    Err(miette::miette!("{message}"))
+                }
+            }
         }
     }
 
@@ -134,6 +141,7 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
             let notes = stored.notes.clone();
             let url = stored.url.clone();
             let completed = stored.completed;
+            let backup_partial = stored.backup_partial;
             let reminder = reminder_from_snapshot(stored, now.time_zone());
             Item {
                 id: reminder.id,
@@ -147,6 +155,7 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
                 due_at: reminder.due_at,
                 priority: reminder.priority,
                 completed,
+                backup_partial,
             }
         })
         .collect();
@@ -177,12 +186,14 @@ fn added_item(reminder: Reminder, list: Option<String>) -> Item {
         due_at: reminder.due_at,
         priority: reminder.priority,
         completed: false,
+        backup_partial: false,
     }
 }
 
 struct Quiet<'a> {
     inner: &'a mut dyn Host,
     said: Vec<String>,
+    unrecorded: bool,
 }
 
 impl Host for Quiet<'_> {
@@ -199,6 +210,11 @@ impl Host for Quiet<'_> {
     }
 
     fn say(&mut self, message: &str) {
+        self.said.push(message.to_owned());
+    }
+
+    fn say_unrecorded(&mut self, message: &str) {
+        self.unrecorded = true;
         self.said.push(message.to_owned());
     }
 
@@ -240,6 +256,7 @@ mod tests {
     use jiff::civil::{date, time};
 
     use super::*;
+    use crate::app::journal;
     use crate::domain::{BackendError, Priority, TaskChange};
     use crate::infra::host::Scripted;
     use crate::tui::state::tests::{now, type_text};
@@ -409,7 +426,10 @@ mod tests {
             panic!("expected a change, got {response:?}");
         };
         assert!(error);
-        assert!(message.ends_with(journal::UNRECORDED), "{message}");
+        assert_eq!(
+            message,
+            format!("{} injected journal save failure", journal::UNRECORDED)
+        );
         assert_eq!(host.journals, Vec::<(String, String)>::new());
         assert_eq!(host.backups.len(), 1);
     }
