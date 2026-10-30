@@ -1899,7 +1899,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_named_local_zone_repins_to_its_name_when_the_date_changes() {
+    fn hidden_named_local_zone_repins_to_its_name_on_a_date_edit() {
         let snapshot = timed_snapshot(timed_reminder_on(
             "hidden",
             date(2026, 12, 1),
