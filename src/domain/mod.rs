@@ -8,6 +8,10 @@ use jiff::{Timestamp, Zoned};
 use miette::Diagnostic;
 use thiserror::Error;
 
+mod meeting;
+
+pub use meeting::meeting_url;
+
 fn ambiguity_details(matches: &[String]) -> String {
     if matches.is_empty() {
         String::new()
@@ -62,6 +66,9 @@ pub struct Event {
     pub start: Zoned,
     pub all_day: bool,
     pub calendar: String,
+    pub location: Option<String>,
+    pub notes: Option<String>,
+    pub meeting_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

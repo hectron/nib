@@ -63,6 +63,7 @@ pub enum Action {
     ListEvents {
         query: EventQuery,
         show_calendar: bool,
+        details: bool,
     },
     ListCalendars,
     CreateCalendar(NewResource),
@@ -401,6 +402,9 @@ pub struct CalArgs {
     /// Show each event's calendar
     #[arg(long, global = true)]
     show_calendar: bool,
+    /// Show each event's location, meeting link, and notes
+    #[arg(long, global = true)]
+    details: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -528,7 +532,9 @@ pub(crate) enum ActionError {
     Inline(#[from] task::InlineError),
     #[error("--folder can't be used with `nib note folders`")]
     NoteFoldersFilter,
-    #[error("--week, --calendar, and --show-calendar can't be used with `nib cal calendars`")]
+    #[error(
+        "--week, --calendar, --show-calendar, and --details can't be used with `nib cal calendars`"
+    )]
     CalendarResourceFilter,
     #[error("--filter can only be used with `nib task` or `nib task list`")]
     TaskFilter,
@@ -633,6 +639,7 @@ fn calendar_action(args: CalArgs, now: &Zoned, config: &Config) -> Result<Action
         week,
         calendar,
         show_calendar,
+        details,
     } = args;
     Ok(match action {
         Some(CalAction::List) | None => Action::ListEvents {
@@ -645,9 +652,10 @@ fn calendar_action(args: CalArgs, now: &Zoned, config: &Config) -> Result<Action
                 },
             },
             show_calendar: show_calendar || config.cal.show_calendar,
+            details,
         },
         Some(CalAction::Calendars(CalendarsArgs { action })) => {
-            if week || !calendar.is_empty() || show_calendar {
+            if week || !calendar.is_empty() || show_calendar || details {
                 return Err(ActionError::CalendarResourceFilter);
             }
             match action {
@@ -841,6 +849,7 @@ mod tests {
                 calendars: Vec::new(),
             },
             show_calendar: false,
+            details: false,
         }
     }
 
@@ -857,14 +866,30 @@ mod tests {
 
     fn showing_calendar(action: Action) -> Action {
         match action {
-            Action::ListEvents { query, .. } => Action::ListEvents {
+            Action::ListEvents { query, details, .. } => Action::ListEvents {
                 query,
                 show_calendar: true,
+                details,
             },
             Action::Today { date, query, .. } => Action::Today {
                 date,
                 query,
                 show_calendar: true,
+            },
+            other => panic!("{other:?} doesn't list events"),
+        }
+    }
+
+    fn with_details(action: Action) -> Action {
+        match action {
+            Action::ListEvents {
+                query,
+                show_calendar,
+                ..
+            } => Action::ListEvents {
+                query,
+                show_calendar,
+                details: true,
             },
             other => panic!("{other:?} doesn't list events"),
         }
@@ -1096,8 +1121,10 @@ mod tests {
             (&["cal", "--show-calendar"], showing_calendar(day.clone())),
             (
                 &["c", "ls", "--show-calendar", "-w"],
-                showing_calendar(week),
+                showing_calendar(week.clone()),
             ),
+            (&["cal", "--details"], with_details(day.clone())),
+            (&["c", "ls", "-w", "--details"], with_details(week)),
             (&["cal", "calendars"], Action::ListCalendars),
             (&["--json", "c", "calendars"], Action::ListCalendars),
             (
@@ -1190,6 +1217,7 @@ mod tests {
             &["cal", "calendars", "--week"][..],
             &["cal", "calendars", "--calendar", "Work"][..],
             &["cal", "calendars", "--show-calendar"][..],
+            &["cal", "calendars", "--details"][..],
         ] {
             assert!(matches!(
                 action_with_config(&now, args, &config),
@@ -1579,7 +1607,7 @@ mod tests {
         assert_eq!(action(&["n"]), notes(None));
         assert!(matches!(
             action(&["cal"]),
-            Action::ListEvents { query: EventQuery { calendars, .. }, show_calendar: false }
+            Action::ListEvents { query: EventQuery { calendars, .. }, show_calendar: false, .. }
                 if calendars == ["Work"]
         ));
         assert!(matches!(

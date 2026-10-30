@@ -16,4 +16,5 @@ Options:
   -w, --week             Show the next seven days instead of today
       --calendar <NAME>  Only show events from this calendar
       --show-calendar    Show each event's calendar
+      --details          Show each event's location, meeting link, and notes
   -h, --help             Print help
