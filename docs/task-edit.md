@@ -28,7 +28,7 @@ nib uses `$VISUAL`, then `$EDITOR`, and falls back to `vi`. GUI editors must wai
 - `- [ ]` is an incomplete reminder. Change it to `- [x]` to complete it.
 - `⏫`, `🔼`, and `🔽` mean high, medium, and low priority.
 - `📅 YYYY-MM-DD` is the due date. Add a 24-hour time as `📅 YYYY-MM-DD HH:MM`.
-- A time in another zone includes its IANA name, such as `📅 2026-11-03 09:00 America/New_York`. Local, floating, and multi-token system zone names render without a zone. A time whose zone matches your local offset on its old date is treated as local: when a date or time edit changes it, nib re-pins it to your local zone at the new date and time, so the time you see stays the same. Floating and multi-token system zones keep their hidden zone when you change the date or time.
+- A time in another zone includes its IANA name, such as `📅 2026-11-03 09:00 America/New_York`. Local, floating, and multi-token system zone names render without a zone. A time whose zone matches your local zone on its old date is treated as local. When a date or time edit changes it, nib re-pins it to your local zone at the new date and time, so the time you see stays the same. The re-pinned zone uses the local zone's IANA name, such as `America/Chicago`, when the local zone has one. When it has none, the zone is a fixed offset, such as `GMT-0500`. A zone you type after the time overrides the re-pin, and it must be an IANA name: a typed fixed offset such as `GMT-0500` is rejected. Floating and multi-token system zones keep their hidden zone when you change the date or time.
 - Indent notes with four spaces or a tab beneath their reminder.
 - A reminder without an `🆔` is new.
 - HTML comments are ignored.

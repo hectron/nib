@@ -909,13 +909,12 @@ fn plan_due(
             .zip(due.time_zone.as_deref())
             .is_some_and(|(time, zone)| time_zone_is_local_at(zone, local_zone, due.date, time))
     });
+    let before_zone_stays_hidden = !before_zone_visible && !before_zone_was_local;
     let zone = match (after.time, after.time_zone.as_deref()) {
         (None, _) => None,
         (Some(_), Some(zone)) if Some(zone) == before_zone => Some(zone.to_owned()),
         (Some(_), Some(zone)) => Some(canonical_zone(zone)?),
-        (Some(_), None)
-            if before_time.is_some() && !before_zone_visible && !before_zone_was_local =>
-        {
+        (Some(_), None) if before_time.is_some() && before_zone_stays_hidden => {
             before_zone.map(ToOwned::to_owned)
         }
         (Some(time), None) => Some(local_time_zone_name_at(local_zone, after.date, time)),
@@ -1877,7 +1876,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_local_zone_repins_when_a_date_edit_crosses_dst() {
+    fn hidden_unnamed_local_zone_repins_to_the_new_offset_when_a_date_edit_crosses_dst() {
         let snapshot = timed_snapshot(timed_reminder_on(
             "hidden",
             date(2026, 12, 1),
@@ -1896,10 +1895,45 @@ mod tests {
         );
         assert_eq!((parts.hour, parts.minute), (Some(9), Some(0)));
         assert_eq!(parts.time_zone.as_deref(), Some("GMT-0500"));
-        assert_eq!(
-            description,
-            "  ~ update    \"Call\": due 2026-12-01 09:00 GMT-0600 → 2027-06-01 09:00 GMT-0500"
-        );
+        assert_snapshot!(description, @r#"  ~ update    "Call": due 2026-12-01 09:00 GMT-0600 → 2027-06-01 09:00 GMT-0500"#);
+    }
+
+    #[test]
+    fn hidden_named_local_zone_repins_to_its_name_when_the_date_changes() {
+        let snapshot = timed_snapshot(timed_reminder_on(
+            "hidden",
+            date(2026, 12, 1),
+            (9, 0),
+            Some("GMT-0600"),
+        ));
+        let session = Session::new_in_zone(&snapshot, named_chicago_zone());
+        let edited = render(&session.document).replace("2026-12-01 09:00", "2027-06-01 09:00");
+        let plan = plan(&snapshot, &session, &parse(&edited).unwrap()).unwrap();
+        let description = describe(&plan, &snapshot);
+        let edit = only_update(plan);
+        let parts = edit.due_components.unwrap();
+        assert_eq!((parts.hour, parts.minute), (Some(9), Some(0)));
+        assert_eq!(parts.time_zone.as_deref(), Some("America/Chicago"));
+        assert_snapshot!(description, @r#"  ~ update    "Call": due 2026-12-01 09:00 GMT-0600 → 2027-06-01 09:00 America/Chicago"#);
+    }
+
+    #[test]
+    fn hidden_named_local_zone_repins_to_its_name_when_no_dst_change_applies() {
+        let snapshot = timed_snapshot(timed_reminder_on(
+            "hidden",
+            date(2026, 12, 1),
+            (9, 0),
+            Some("GMT-0600"),
+        ));
+        let session = Session::new_in_zone(&snapshot, named_chicago_zone());
+        let edited = render(&session.document).replace("2026-12-01", "2026-12-15");
+        let plan = plan(&snapshot, &session, &parse(&edited).unwrap()).unwrap();
+        let description = describe(&plan, &snapshot);
+        let edit = only_update(plan);
+        let parts = edit.due_components.unwrap();
+        assert_eq!(parts.day, Some(15));
+        assert_eq!(parts.time_zone.as_deref(), Some("America/Chicago"));
+        assert_snapshot!(description, @r#"  ~ update    "Call": due 2026-12-01 09:00 GMT-0600 → 2026-12-15 09:00 America/Chicago"#);
     }
 
     #[test]
@@ -1921,7 +1955,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_local_zone_keeps_its_name_when_no_dst_change_applies() {
+    fn hidden_unnamed_local_zone_keeps_its_offset_name_when_no_dst_change_applies() {
         let snapshot = timed_snapshot(timed_reminder_on(
             "hidden",
             date(2026, 12, 1),
@@ -1937,7 +1971,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_local_zone_repins_when_a_time_edit_crosses_dst_on_the_same_day() {
+    fn hidden_unnamed_local_zone_repins_when_a_time_edit_crosses_dst_on_the_same_day() {
         let snapshot = timed_snapshot(timed_reminder_on(
             "hidden",
             date(2026, 11, 1),
@@ -1950,6 +1984,25 @@ mod tests {
         let parts = edit.due_components.unwrap();
         assert_eq!((parts.hour, parts.minute), (Some(3), Some(30)));
         assert_eq!(parts.time_zone.as_deref(), Some("GMT-0600"));
+    }
+
+    #[test]
+    fn hidden_named_local_zone_repins_to_its_name_when_only_the_time_changes() {
+        let snapshot = timed_snapshot(timed_reminder_on(
+            "hidden",
+            date(2026, 12, 1),
+            (9, 0),
+            Some("GMT-0600"),
+        ));
+        let session = Session::new_in_zone(&snapshot, named_chicago_zone());
+        let edited = render(&session.document).replace("2026-12-01 09:00", "2026-12-01 10:30");
+        let plan = plan(&snapshot, &session, &parse(&edited).unwrap()).unwrap();
+        let description = describe(&plan, &snapshot);
+        let edit = only_update(plan);
+        let parts = edit.due_components.unwrap();
+        assert_eq!((parts.hour, parts.minute), (Some(10), Some(30)));
+        assert_eq!(parts.time_zone.as_deref(), Some("America/Chicago"));
+        assert_snapshot!(description, @r#"  ~ update    "Call": due 2026-12-01 09:00 GMT-0600 → 2026-12-01 10:30 America/Chicago"#);
     }
 
     #[test]
