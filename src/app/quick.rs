@@ -7,8 +7,8 @@ use thiserror::Error;
 use crate::app::{edit, journal};
 use crate::cli::output::clean;
 use crate::domain::{
-    BackendError, Backends, FieldEdit, ReminderChange, ReminderEdit, ReminderList, StoredReminder,
-    TaskChange, TaskChangeRequest,
+    BackendError, Backends, FieldEdit, JournalAction, ReminderChange, ReminderEdit, ReminderList,
+    StoredReminder, TaskChange, TaskChangeRequest,
 };
 use crate::infra::host::Host;
 
@@ -139,6 +139,52 @@ pub fn run(
             })
         })
         .collect())
+}
+
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub(crate) fn delete(
+    ids: &[String],
+    now: &Zoned,
+    backends: &Backends,
+    host: &mut dyn Host,
+) -> Result<Vec<StoredReminder>> {
+    let snapshot = backends.reminders.snapshot(None)?;
+    let mut selected: Vec<StoredReminder> = Vec::new();
+    for id in ids {
+        let reminder = match snapshot
+            .reminders
+            .iter()
+            .find(|reminder| reminder.id == *id)
+        {
+            Some(found) => found.clone(),
+            None => backends
+                .reminders
+                .reminder(id)?
+                .ok_or_else(|| miette::miette!("reminder {} not found", clean(id)))?,
+        };
+        if !selected.iter().any(|existing| existing.id == reminder.id) {
+            selected.push(reminder);
+        }
+    }
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let changes: Vec<ReminderChange> = selected
+        .iter()
+        .map(|before| ReminderChange::Delete {
+            before: before.clone(),
+        })
+        .collect();
+    let _lock = host.lock_journal().into_diagnostic()?;
+    edit::back_up(now, &changes, host)?;
+    let applied = backends.reminders.apply(&changes)?;
+    if let Err(error) =
+        journal::record_action(now, JournalAction::TaskDelete, &changes, &applied, host)
+    {
+        host.say("The changes were applied, but nib couldn't record the journal entry.");
+        return Err(error);
+    }
+    Ok(selected)
 }
 
 pub(crate) fn select(
@@ -344,8 +390,7 @@ mod tests {
     use super::*;
     use crate::app::undo;
     use crate::domain::{
-        ApplyResult, Calendar, JournalAction, NewReminder, Notes, Priority, Reminder,
-        ReminderSnapshot, Reminders,
+        ApplyResult, Calendar, NewReminder, Notes, Priority, Reminder, ReminderSnapshot, Reminders,
     };
     use crate::infra::host::Scripted;
 
@@ -404,16 +449,30 @@ mod tests {
             let mut reminders = self.reminders.borrow_mut();
             let mut written = Vec::new();
             for change in changes {
-                let ReminderChange::Update { before, edit } = change else {
-                    unreachable!("one-step commands only update reminders")
-                };
-                let current = reminders
-                    .iter_mut()
-                    .find(|reminder| reminder.id == before.id)
-                    .unwrap();
-                assert_eq!(current, before, "apply must see the selected state");
-                *current = expected(before, edit);
-                written.push(Some(current.clone()));
+                match change {
+                    ReminderChange::Update { before, edit } => {
+                        let current = reminders
+                            .iter_mut()
+                            .find(|reminder| reminder.id == before.id)
+                            .unwrap();
+                        assert_eq!(current, before, "apply must see the selected state");
+                        *current = expected(before, edit);
+                        written.push(Some(current.clone()));
+                    }
+                    ReminderChange::Delete { before } => {
+                        let index = reminders
+                            .iter()
+                            .position(|reminder| reminder == before)
+                            .unwrap();
+                        reminders.remove(index);
+                        written.push(None);
+                    }
+                    ReminderChange::Restore { before } => {
+                        reminders.push(before.clone());
+                        written.push(Some(before.clone()));
+                    }
+                    ReminderChange::Add { .. } => unreachable!("one-step commands never add"),
+                }
             }
             Ok(ApplyResult {
                 unrecorded: vec![false; written.len()],
@@ -899,6 +958,55 @@ mod tests {
             "report",
             JournalAction::TaskPriority,
         );
+    }
+
+    #[test]
+    fn delete_removes_backs_up_and_journals_by_id() {
+        let reminders = Shared::new(RefCell::new(sample()));
+        let calls = Calls::default();
+        let backends = backends(&reminders, &calls);
+        let mut host = Scripted::new().answer("y");
+        let ids = ["rem-2".to_owned(), "rem-4".to_owned(), "rem-2".to_owned()];
+        let deleted = delete(&ids, &now(), &backends, &mut host).unwrap();
+        assert_eq!(
+            deleted
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["rem-2", "rem-4"]
+        );
+        assert_eq!(*calls.borrow(), ["snapshot", "reminder rem-4"]);
+        assert_eq!(reminders.borrow().len(), 3);
+        assert_eq!(host.backups.len(), 1);
+        let journal: serde_json::Value = serde_json::from_str(&host.journals[0].1).unwrap();
+        assert_eq!(journal["action"], "task_delete");
+        assert_eq!(journal["changes"][0]["change"], "deleted");
+
+        let log = journal::log(now().timestamp(), &mut host).unwrap();
+        assert_eq!(log[0].action, JournalAction::TaskDelete);
+        assert_eq!(log[0].counts.deleted, 2);
+        let outcome = undo::run(None, &now(), &backends, &mut host).unwrap();
+        assert!(matches!(outcome, undo::Outcome::Applied { .. }));
+        let mut restored = reminders.borrow().clone();
+        restored.sort_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(restored, sample());
+    }
+
+    #[test]
+    fn delete_of_an_unknown_id_changes_nothing() {
+        let reminders = Shared::new(RefCell::new(sample()));
+        let backends = backends(&reminders, &Calls::default());
+        let mut host = Scripted::new();
+        let error = delete(
+            &["rem-1".to_owned(), "nope".to_owned()],
+            &now(),
+            &backends,
+            &mut host,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "reminder nope not found");
+        assert_eq!(*reminders.borrow(), sample());
+        assert_eq!(host.journals, Vec::<(String, String)>::new());
     }
 
     #[test]

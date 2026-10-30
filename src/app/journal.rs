@@ -38,6 +38,7 @@ enum Action {
     TaskReopen,
     TaskPriority,
     TaskMove,
+    TaskDelete,
     Undo,
 }
 
@@ -740,6 +741,7 @@ fn action(value: Action) -> JournalAction {
         Action::TaskReopen => JournalAction::TaskReopen,
         Action::TaskPriority => JournalAction::TaskPriority,
         Action::TaskMove => JournalAction::TaskMove,
+        Action::TaskDelete => JournalAction::TaskDelete,
         Action::Undo => JournalAction::Undo,
     }
 }
@@ -752,6 +754,7 @@ impl From<JournalAction> for Action {
             JournalAction::TaskReopen => Self::TaskReopen,
             JournalAction::TaskPriority => Self::TaskPriority,
             JournalAction::TaskMove => Self::TaskMove,
+            JournalAction::TaskDelete => Self::TaskDelete,
             JournalAction::Undo => Self::Undo,
         }
     }

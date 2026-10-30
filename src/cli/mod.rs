@@ -75,6 +75,9 @@ pub enum Action {
         entry: Option<String>,
         resolve: Option<String>,
     },
+    Pick {
+        query: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -113,6 +116,15 @@ pub enum Command {
     Log,
     /// Undo a journal entry, or the latest entry when omitted
     Undo(UndoArgs),
+    /// Pick reminders in an inline prompt and print their ids
+    Pick(PickArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PickArgs {
+    /// Start with this filter expression as the query
+    #[arg(short, long, value_name = "EXPR")]
+    filter: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -486,8 +498,32 @@ fn days_from_today(now: &Zoned, count: i32) -> Result<Range<Zoned>, jiff::Error>
     Ok(now.start_of_day()?..end.to_zoned(now.time_zone().clone())?)
 }
 
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub(crate) fn quick_add(
+    text: &str,
+    now: &Zoned,
+    config: &Config,
+) -> Result<NewReminder, ActionError> {
+    let words: Vec<String> = text.split_whitespace().map(ToOwned::to_owned).collect();
+    TaskOpts {
+        list: None,
+        due: None,
+        priority: None,
+    }
+    .reminder(&words, now, config)
+}
+
 impl TaskOpts {
     fn add(self, words: &[String], now: &Zoned, config: &Config) -> Result<Action, ActionError> {
+        self.reminder(words, now, config).map(Action::AddTask)
+    }
+
+    fn reminder(
+        self,
+        words: &[String],
+        now: &Zoned,
+        config: &Config,
+    ) -> Result<NewReminder, ActionError> {
         let inline = if config.task.parse_inline {
             parse_inline(words)?
         } else {
@@ -506,7 +542,7 @@ impl TaskOpts {
         let due_time_zone = due.zip(due_time).map(|(date, time)| {
             crate::domain::local_time_zone_name_at(now.time_zone(), date, time)
         });
-        Ok(Action::AddTask(NewReminder {
+        Ok(NewReminder {
             title: inline.title,
             list: self
                 .list
@@ -516,7 +552,7 @@ impl TaskOpts {
             due_time,
             due_time_zone,
             priority: self.priority.or(inline.priority).or(config.task.priority),
-        }))
+        })
     }
 }
 
@@ -725,6 +761,9 @@ impl Command {
             Command::Cal(args) => calendar_action(args, now, config)?,
             Command::Log => Action::Log,
             Command::Undo(UndoArgs { entry, resolve }) => Action::Undo { entry, resolve },
+            Command::Pick(PickArgs { filter }) => Action::Pick {
+                query: filter.unwrap_or_default(),
+            },
         }))
     }
 }
@@ -742,6 +781,10 @@ impl Cli {
             Command::Completions { shell } => Some(CompletionRequest::Script(shell)),
             _ => None,
         }
+    }
+
+    pub fn is_pick(&self) -> bool {
+        matches!(self.command, Command::Pick(_))
     }
 
     pub fn is_config(&self) -> bool {

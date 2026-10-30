@@ -445,6 +445,7 @@ pub enum JournalAction {
     TaskReopen,
     TaskPriority,
     TaskMove,
+    TaskDelete,
     Undo,
 }
 
@@ -456,6 +457,7 @@ impl JournalAction {
             Self::TaskReopen => "task_reopen",
             Self::TaskPriority => "task_priority",
             Self::TaskMove => "task_move",
+            Self::TaskDelete => "task_delete",
             Self::Undo => "undo",
         }
     }

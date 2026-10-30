@@ -24,11 +24,8 @@ pub fn run(
     host: &mut dyn Host,
 ) -> Result<String> {
     match action {
-        Action::Doctor => Err(miette::miette!(
-            "doctor must be run through the system diagnostic entry point"
-        )),
-        Action::Config(_) => Err(miette::miette!(
-            "config must be run through the configuration entry point"
+        Action::Doctor | Action::Config(_) | Action::Pick { .. } => Err(miette::miette!(
+            "doctor, config, and pick must be run through their own entry points"
         )),
         Action::Today {
             date,
@@ -183,7 +180,7 @@ fn filtered_tasks(
     output::list(&reminders, json, now, style)
 }
 
-fn reminder_from_snapshot(reminder: StoredReminder, local_zone: &TimeZone) -> Reminder {
+pub(crate) fn reminder_from_snapshot(reminder: StoredReminder, local_zone: &TimeZone) -> Reminder {
     let due_time = reminder.due_components.as_ref().and_then(stored_due_time);
     let due_time_zone = due_time.and_then(|_| {
         reminder
@@ -2440,6 +2437,72 @@ mod quick_tests {
             "completed": false,
             "priority": "medium",
             "change": "moved"
+          }
+        ]
+        "#);
+    }
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod pick_tests {
+    use insta::assert_snapshot;
+    use jiff::civil::{date, time};
+
+    use crate::cli::output::{self, PickedReminder, Style};
+    use crate::domain::Priority;
+
+    fn picked() -> Vec<PickedReminder<'static>> {
+        vec![
+            PickedReminder {
+                id: "reminder-3",
+                title: "Renew passport",
+                list: Some("Reminders"),
+                due: Some(date(2026, 11, 9)),
+                due_time: Some(time(9, 0, 0, 0)),
+                priority: Some(Priority::Low),
+                completed: false,
+            },
+            PickedReminder {
+                id: "reminder-5",
+                title: "Water plants",
+                list: None,
+                due: None,
+                due_time: None,
+                priority: None,
+                completed: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn pick_prints_one_id_per_line() {
+        assert_snapshot!(output::picked(&picked(), false, Style::default()).unwrap(), @r"
+        reminder-3
+        reminder-5
+        ");
+    }
+
+    #[test]
+    fn pick_json_lists_each_chosen_reminder() {
+        assert_snapshot!(output::picked(&picked(), true, Style::default()).unwrap(), @r#"
+        [
+          {
+            "id": "reminder-3",
+            "title": "Renew passport",
+            "list": "Reminders",
+            "due": "2026-11-09",
+            "due_time": "09:00",
+            "priority": "low",
+            "completed": false
+          },
+          {
+            "id": "reminder-5",
+            "title": "Water plants",
+            "list": null,
+            "due": null,
+            "due_time": null,
+            "priority": null,
+            "completed": false
           }
         ]
         "#);
