@@ -1480,7 +1480,7 @@ fn rfc3339<S: Serializer>(time: &Zoned, serializer: S) -> Result<S::Ok, S::Error
     serializer.collect_str(&time.timestamp().display_with_offset(time.offset()))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg_attr(not(any(test, feature = "tui")), allow(dead_code))]
 pub fn keymap_help(keymap: &Keymap, state: KeymapState) -> String {
     let mut lines = keymap
         .bindings(state)

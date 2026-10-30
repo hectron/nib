@@ -68,6 +68,16 @@ fn main() -> miette::Result<()> {
         }
         return print_output(&result.text);
     }
+    if cli.is_board() {
+        return nib::board(
+            cli,
+            &config,
+            &now,
+            demo,
+            cache_directory.as_deref(),
+            nib::Style::detect_interactive(),
+        );
+    }
     let out = nib::run(
         cli,
         &config,

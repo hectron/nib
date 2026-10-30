@@ -79,6 +79,7 @@ pub enum Action {
     Pick {
         query: String,
     },
+    Board,
 }
 
 #[derive(Debug, Subcommand)]
@@ -119,6 +120,9 @@ pub enum Command {
     Undo(UndoArgs),
     /// Pick reminders in an inline prompt and print their ids
     Pick(PickArgs),
+    /// Browse, filter, and change reminders in a full-screen board
+    #[command(visible_alias = "b")]
+    Board,
 }
 
 #[derive(Debug, Args)]
@@ -783,6 +787,7 @@ impl Command {
             Command::Pick(PickArgs { filter }) => Action::Pick {
                 query: filter.unwrap_or_default(),
             },
+            Command::Board => Action::Board,
         }))
     }
 }
@@ -804,6 +809,10 @@ impl Cli {
 
     pub fn is_pick(&self) -> bool {
         matches!(self.command, Command::Pick(_))
+    }
+
+    pub fn is_board(&self) -> bool {
+        matches!(self.command, Command::Board)
     }
 
     pub fn is_config(&self) -> bool {

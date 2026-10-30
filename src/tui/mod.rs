@@ -1,3 +1,4 @@
+mod board;
 mod keys;
 mod render;
 mod session;
@@ -13,6 +14,7 @@ use thiserror::Error;
 use crate::cli::output::{self, PickedReminder, Style};
 use crate::domain::{Backends, Config};
 use crate::infra::host::Host;
+pub(crate) use board::board;
 use session::Session;
 use state::{Outcome, State};
 

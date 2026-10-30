@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::app::journal;
 use crate::app::markdown::{self, ParseError, Plan, Session};
 use crate::cli::output::{clean, clean_lines};
-use crate::domain::{Backends, ReminderChange};
+use crate::domain::{Backends, ReminderChange, ReminderSnapshot};
 use crate::infra::host::Host;
 
 const INSTANT: Duration = Duration::from_millis(500);
@@ -20,7 +20,44 @@ pub fn tasks(
     host: &mut dyn Host,
 ) -> Result<String> {
     let snapshot = backends.reminders.snapshot(list)?;
-    let session = Session::new_at(&snapshot, now);
+    edit_snapshot(&snapshot, now, backends, host)
+}
+
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub(crate) fn selected(
+    ids: &[String],
+    now: &Zoned,
+    backends: &Backends,
+    host: &mut dyn Host,
+) -> Result<String> {
+    let mut snapshot = backends.reminders.snapshot(None)?;
+    snapshot
+        .reminders
+        .retain(|reminder| ids.contains(&reminder.id));
+    let missing = ids.len() - snapshot.reminders.len();
+    if snapshot.reminders.is_empty() {
+        return Err(miette!(
+            "None of the selected reminders are open, so there is nothing to edit."
+        ));
+    }
+    if missing > 0 {
+        host.say(&format!(
+            "Leaving out {} that {} completed or no longer {}.",
+            count(missing, "selected reminder"),
+            if missing == 1 { "is" } else { "are" },
+            if missing == 1 { "exists" } else { "exist" },
+        ));
+    }
+    edit_snapshot(&snapshot, now, backends, host)
+}
+
+fn edit_snapshot(
+    snapshot: &ReminderSnapshot,
+    now: &Zoned,
+    backends: &Backends,
+    host: &mut dyn Host,
+) -> Result<String> {
+    let session = Session::new_at(snapshot, now);
     if session.skipped > 0 {
         host.say(&format!(
             "Skipping {} with line breaks or control characters in the text; nib won't show or change {}.",
@@ -42,7 +79,7 @@ pub fn tasks(
             return Ok("No changes.".into());
         }
         let plan = match markdown::parse(&edited)
-            .and_then(|document| markdown::plan(&snapshot, &session, &document))
+            .and_then(|document| markdown::plan(snapshot, &session, &document))
             .and_then(|plan| {
                 validate_time_zones(&plan, backends)?;
                 Ok(plan)
@@ -66,7 +103,7 @@ pub fn tasks(
             file.remove_on_drop();
             return Ok("No changes.".into());
         }
-        host.say(&clean_lines(&markdown::describe(&plan, &snapshot)));
+        host.say(&clean_lines(&markdown::describe(&plan, snapshot)));
         if !confirmed(host, &plan)? {
             return Ok(format!(
                 "Nothing was changed. Your edits are in {}",
@@ -474,6 +511,78 @@ mod tests {
         let result = tasks(None, &now, &backends, host);
         let applied = applied.borrow().clone();
         (result, applied)
+    }
+
+    fn run_selected(
+        titles: &[&str],
+        ids: &[&str],
+        host: &mut Scripted,
+    ) -> (Result<String>, Vec<ReminderChange>) {
+        let applied = Applied::default();
+        let recorder = Recorder {
+            snapshot: snapshot(titles),
+            applied: applied.clone(),
+            conflict: false,
+            unrecorded: false,
+            journal_locks: host.journal_lock_state(),
+        };
+        let backends = Backends::new(
+            || -> Box<dyn Notes> { unreachable!() },
+            move || Box::new(recorder),
+            || -> Box<dyn Calendar> { unreachable!() },
+        );
+        let now = date(2026, 10, 26)
+            .at(9, 0, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-4)))
+            .unwrap();
+        let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        let result = selected(&ids, &now, &backends, host);
+        let applied = applied.borrow().clone();
+        (result, applied)
+    }
+
+    #[test]
+    fn a_selection_edits_only_the_selected_reminders() {
+        let mut host = Scripted::new()
+            .edit(|text| {
+                assert!(text.contains("Eggs"), "{text}");
+                assert!(text.contains("Bread"), "{text}");
+                assert!(!text.contains("Oat milk"), "{text}");
+                let mut kept = String::new();
+                for line in text.lines().filter(|line| !line.contains("Eggs")) {
+                    kept.push_str(line);
+                    kept.push('\n');
+                }
+                kept
+            })
+            .answer("y");
+        let (result, applied) = run_selected(
+            &["Oat milk", "Eggs", "Bread"],
+            &["rem-0001", "rem-0002", "gone"],
+            &mut host,
+        );
+        assert_eq!(result.unwrap(), "Applied 1 change: 1 deleted.");
+        assert!(
+            matches!(&applied[..], [ReminderChange::Delete { before }] if before.id == "rem-0001"),
+            "{applied:?}"
+        );
+        assert_eq!(
+            host.said[0],
+            "Leaving out 1 selected reminder that is completed or no longer exists."
+        );
+        assert_eq!(host.journals.len(), 1);
+        assert_eq!(host.backups.len(), 1);
+    }
+
+    #[test]
+    fn a_selection_with_no_open_reminders_opens_no_editor() {
+        let mut host = Scripted::new();
+        let (result, applied) = run_selected(&["Oat milk"], &["gone"], &mut host);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "None of the selected reminders are open, so there is nothing to edit."
+        );
+        assert_eq!(applied, Vec::<ReminderChange>::new());
     }
 
     fn check(line: &str) -> impl FnOnce(String) -> String {

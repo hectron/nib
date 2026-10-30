@@ -48,6 +48,7 @@ struct FileNote {
 struct FileTui {
     preset: Option<toml::Value>,
     keys: Option<BTreeMap<String, toml::Value>>,
+    views: Option<BTreeMap<String, toml::Value>>,
 }
 
 #[derive(Debug, Error, Diagnostic)]
@@ -86,6 +87,20 @@ pub enum ConfigError {
         span: SourceSpan,
     },
 
+    #[error("invalid saved view in {} for {key}: {reason}", path.display())]
+    #[diagnostic(code(nib::config::invalid_view))]
+    View {
+        path: PathBuf,
+        key: String,
+        reason: String,
+        line: usize,
+        column: usize,
+        #[source_code]
+        source_code: Arc<NamedSource<String>>,
+        #[label("{reason}")]
+        span: SourceSpan,
+    },
+
     #[error("invalid value for {name}: {value:?}; expected {expected}")]
     #[diagnostic(
         code(nib::config::invalid_environment),
@@ -108,7 +123,9 @@ pub enum ConfigError {
 impl ConfigError {
     fn plain_text(&self) -> String {
         match self {
-            Self::Parse { line, column, .. } | Self::Keymap { line, column, .. } => {
+            Self::Parse { line, column, .. }
+            | Self::Keymap { line, column, .. }
+            | Self::View { line, column, .. } => {
                 format!("{self} at line {line}, column {column}")
             }
             _ => self.to_string(),
@@ -539,6 +556,7 @@ fn apply(
             origins.tui_preset = origin;
         }
         origins.keymap_layers.push(tui.bindings);
+        config.tui.views.extend(tui.views);
     }
     Ok(())
 }
@@ -557,6 +575,7 @@ fn build_keymap(preset: &str, layers: &[CompiledBindings]) -> Keymap {
 struct CompiledTui {
     preset: Option<String>,
     bindings: CompiledBindings,
+    views: BTreeMap<String, String>,
 }
 
 type CompiledBindings = Vec<(State, StateBindings)>;
@@ -574,6 +593,7 @@ enum KeymapSpan {
     State(String),
     Chord { state: String, chord: String },
     Value { state: String, chord: String },
+    View(String),
 }
 
 fn compile_tui(tui: FileTui) -> Result<CompiledTui, KeymapIssue> {
@@ -628,10 +648,42 @@ fn compile_tui(tui: FileTui) -> Result<CompiledTui, KeymapIssue> {
         }
         compiled.push((state, state_bindings));
     }
+    let views = tui
+        .views
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, value)| parse_view(name, value))
+        .collect::<Result<_, _>>()?;
     Ok(CompiledTui {
         preset,
         bindings: compiled,
+        views,
     })
+}
+
+fn parse_view(name: String, value: toml::Value) -> Result<(String, String), KeymapIssue> {
+    let issue = |reason: String, needle: &str| KeymapIssue {
+        key: format!("tui.views.{name:?}"),
+        reason,
+        needle: needle.to_owned(),
+        span: KeymapSpan::View(name.clone()).into(),
+    };
+    if name.trim().is_empty() || name.trim() != name || name.chars().any(char::is_control) {
+        return Err(issue(
+            "a view name must be non-empty, without control characters or surrounding spaces"
+                .into(),
+            &name,
+        ));
+    }
+    let toml::Value::String(expression) = value else {
+        return Err(issue(
+            "a saved view must be a filter expression string".into(),
+            &name,
+        ));
+    };
+    crate::app::filter::Filter::parse(&expression)
+        .map_err(|error| issue(error.to_string(), &expression))?;
+    Ok((name, expression))
 }
 
 fn parse_preset(value: toml::Value) -> Result<String, KeymapIssue> {
@@ -738,15 +790,27 @@ fn keymap_error(path: &Path, source: &str, issue: KeymapIssue) -> ConfigError {
     let span = keymap_span(source, issue.span.as_ref()).unwrap_or(fallback);
     let offset = span.start;
     let (line, column) = source_location(source, offset);
+    let source_code = Arc::new(
+        NamedSource::new(path.display().to_string(), source.to_owned()).with_language("toml"),
+    );
+    if matches!(issue.span.as_ref(), KeymapSpan::View(_)) {
+        return ConfigError::View {
+            path: path.to_owned(),
+            key: issue.key,
+            reason: issue.reason,
+            line,
+            column,
+            source_code,
+            span: span.into(),
+        };
+    }
     ConfigError::Keymap {
         path: path.to_owned(),
         key: issue.key,
         reason: issue.reason,
         line,
         column,
-        source_code: Arc::new(
-            NamedSource::new(path.display().to_string(), source.to_owned()).with_language("toml"),
-        ),
+        source_code,
         span: span.into(),
     }
 }
@@ -771,6 +835,7 @@ fn keymap_span(source: &str, target: &KeymapSpan) -> Option<std::ops::Range<usiz
             .as_table_like()?
             .get(chord)?
             .span(),
+        KeymapSpan::View(name) => tui.get("views")?.as_table_like()?.get(name)?.span(),
     }
 }
 
@@ -1436,6 +1501,71 @@ mod tests {
             assert!(error.contains(&path.display().to_string()), "{error}");
             assert!(error.contains(key), "{error}");
             assert!(error.contains(detail), "{error}");
+        }
+    }
+
+    #[test]
+    fn saved_views_merge_by_name_through_the_layers() {
+        let temp = TempDir::new();
+        let user = temp.join("user.toml");
+        write(
+            &user,
+            "[tui.views]\nwork = \"list:work\"\nsoon = \"due:week\"\n",
+        );
+        let project = temp.join("project");
+        fs::create_dir(&project).unwrap();
+        write(
+            &project.join("nib.toml"),
+            "[tui.views]\nwork = \"list:work pri:high\"\n\"Done today\" = \"is:done due:today\"\n",
+        );
+
+        let config = load(&project, Some(&user), no_env).unwrap();
+        assert_eq!(
+            config.tui.views.into_iter().collect::<Vec<_>>(),
+            [
+                ("Done today".to_owned(), "is:done due:today".to_owned()),
+                ("soon".to_owned(), "due:week".to_owned()),
+                ("work".to_owned(), "list:work pri:high".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_saved_views_name_the_file_and_key() {
+        let cases = [
+            (
+                "[tui.views]\nurgent = \"pri:urgent\"\n",
+                "tui.views.\"urgent\"",
+                "invalid value \"urgent\" for pri filter",
+                (2, 11),
+            ),
+            (
+                "[tui.views]\nurgent = 3\n",
+                "tui.views.\"urgent\"",
+                "must be a filter expression string",
+                (2, 1),
+            ),
+            (
+                "[tui.views]\n\" padded\" = \"due:today\"\n",
+                "tui.views.\" padded\"",
+                "surrounding spaces",
+                (2, 2),
+            ),
+        ];
+        for (source, key, detail, location) in cases {
+            let temp = TempDir::new();
+            let path = temp.join("nib.toml");
+            write(&path, source);
+            let error = load(&temp.0, None, no_env).unwrap_err();
+            let text = error.to_string();
+            assert!(text.starts_with("invalid saved view in "), "{text}");
+            assert!(text.contains(&path.display().to_string()), "{text}");
+            assert!(text.contains(key), "{text}");
+            assert!(text.contains(detail), "{text}");
+            let ConfigError::View { line, column, .. } = &error else {
+                panic!("{error:?}");
+            };
+            assert_eq!((*line, *column), location, "{text}");
         }
     }
 
@@ -2434,6 +2564,12 @@ mod tests {
             let properties = section_schema["properties"].as_object().unwrap();
             let mut section_sample = toml::map::Map::new();
             for (name, property) in properties {
+                if name == "views" {
+                    let mut views = toml::map::Map::new();
+                    views.insert("today".into(), toml::Value::String("due:today".into()));
+                    section_sample.insert(name.clone(), toml::Value::Table(views));
+                    continue;
+                }
                 if name == "keys" {
                     let mut browse = toml::map::Map::new();
                     browse.insert("x".into(), toml::Value::String("done".into()));
@@ -2478,8 +2614,12 @@ mod tests {
         assert!(calendars.is_some() && show_calendar.is_some());
         let FileNote { folder } = note.unwrap();
         assert!(folder.is_some());
-        let FileTui { preset, keys } = tui.unwrap();
-        assert!(preset.is_some() && keys.is_some());
+        let FileTui {
+            preset,
+            keys,
+            views,
+        } = tui.unwrap();
+        assert!(preset.is_some() && keys.is_some() && views.is_some());
 
         let supported = ConfigKey::ALL
             .map(ConfigKey::as_str)

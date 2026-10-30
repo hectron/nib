@@ -17,7 +17,14 @@ pub(crate) struct Item {
     pub due_at: Option<Timestamp>,
     pub priority: Option<Priority>,
     pub completed: bool,
+    pub extras: Extras,
     pub backup_partial: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Extras {
+    pub alarms: bool,
+    pub repeats: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,9 +258,11 @@ impl State {
     }
 
     pub(crate) fn delete_needs_count(&self) -> bool {
-        self.targets.len() > DELETE_COUNT_THRESHOLD
-            || self.partial_target_count() > 0
-            || self.targets.iter().any(|id| self.item(id).is_none())
+        delete_needs_count(
+            &self.targets,
+            self.partial_target_count(),
+            self.targets.iter().any(|id| self.item(id).is_none()),
+        )
     }
 
     pub(crate) fn partial_target_count(&self) -> usize {
@@ -534,44 +543,36 @@ impl State {
     }
 
     fn update_confirm(&mut self, action: Action) -> Option<Effect> {
-        if self.delete_needs_count() {
-            return match action {
-                Action::Hotkey(digit) if digit.is_ascii_digit() => {
-                    self.confirm_input.push(digit);
-                    None
-                }
-                Action::Backspace => {
-                    self.confirm_input.pop();
-                    None
-                }
-                Action::Accept if self.confirm_input == self.targets.len().to_string() => {
-                    self.mode = Mode::Filter;
-                    Some(Effect::Delete {
-                        ids: self.targets.clone(),
-                        partial_confirmed: self.partial_target_count() > 0,
-                    })
-                }
-                Action::Accept | Action::Hotkey(_) | Action::Cancel => {
-                    self.mode = Mode::Filter;
-                    self.set_status("Nothing was deleted.", false);
-                    None
-                }
-                _ => None,
-            };
-        }
-        match action {
-            Action::Hotkey('y') => {
+        let key = match action {
+            Action::Hotkey(character) => ConfirmKey::Char(character),
+            Action::Backspace => ConfirmKey::Backspace,
+            Action::Accept => ConfirmKey::Accept,
+            Action::Cancel => ConfirmKey::Cancel,
+            _ => ConfirmKey::Other,
+        };
+        let step = confirm_delete(
+            self.delete_needs_count(),
+            self.partial_target_count(),
+            self.targets.len(),
+            &mut self.confirm_input,
+            key,
+        );
+        match step {
+            ConfirmStep::Stay => None,
+            ConfirmStep::Delete { partial_confirmed } => {
                 self.mode = Mode::Filter;
                 Some(Effect::Delete {
                     ids: self.targets.clone(),
-                    partial_confirmed: false,
+                    partial_confirmed,
                 })
             }
-            Action::Hotkey(_) | Action::Cancel => {
+            ConfirmStep::Cancelled { said } => {
                 self.mode = Mode::Filter;
+                if said {
+                    self.set_status(NOTHING_DELETED, false);
+                }
                 None
             }
-            _ => None,
         }
     }
 
@@ -683,7 +684,64 @@ impl State {
     }
 }
 
-fn is_plain_text(query: &str, parse_inline: bool) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmKey {
+    Char(char),
+    Backspace,
+    Accept,
+    Cancel,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmStep {
+    Stay,
+    Delete { partial_confirmed: bool },
+    Cancelled { said: bool },
+}
+
+pub(crate) const NOTHING_DELETED: &str = "Nothing was deleted.";
+
+pub(crate) fn delete_needs_count(targets: &[String], partial: usize, missing: bool) -> bool {
+    targets.len() > DELETE_COUNT_THRESHOLD || partial > 0 || missing
+}
+
+pub(crate) fn confirm_delete(
+    needs_count: bool,
+    partial: usize,
+    count: usize,
+    input: &mut String,
+    key: ConfirmKey,
+) -> ConfirmStep {
+    if needs_count {
+        return match key {
+            ConfirmKey::Char(digit) if digit.is_ascii_digit() => {
+                input.push(digit);
+                ConfirmStep::Stay
+            }
+            ConfirmKey::Backspace => {
+                input.pop();
+                ConfirmStep::Stay
+            }
+            ConfirmKey::Accept if *input == count.to_string() => ConfirmStep::Delete {
+                partial_confirmed: partial > 0,
+            },
+            ConfirmKey::Accept | ConfirmKey::Char(_) | ConfirmKey::Cancel => {
+                ConfirmStep::Cancelled { said: true }
+            }
+            ConfirmKey::Other => ConfirmStep::Stay,
+        };
+    }
+    match key {
+        ConfirmKey::Char('y') => ConfirmStep::Delete {
+            partial_confirmed: false,
+        },
+        ConfirmKey::Char(_) | ConfirmKey::Cancel => ConfirmStep::Cancelled { said: false },
+        _ => ConfirmStep::Stay,
+    }
+}
+
+pub(crate) fn is_plain_text(query: &str, parse_inline: bool) -> bool {
     let title = crate::cli::quick_add_title(query, parse_inline);
     !title.is_empty() && Filter::parse(&title).is_ok_and(|filter| filter.is_plain_text())
 }
@@ -727,6 +785,7 @@ pub(crate) mod tests {
             due_at: None,
             priority,
             completed: false,
+            extras: Extras::default(),
             backup_partial: false,
         }
     }

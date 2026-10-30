@@ -188,6 +188,7 @@ pub struct NoteConfig {
 pub struct TuiConfig {
     pub preset: String,
     pub keymap: Keymap,
+    pub views: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for TuiConfig {
@@ -195,6 +196,7 @@ impl Default for TuiConfig {
         Self {
             preset: DEFAULT_PRESET.into(),
             keymap: Keymap::default(),
+            views: std::collections::BTreeMap::new(),
         }
     }
 }

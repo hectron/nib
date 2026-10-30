@@ -20,12 +20,8 @@ const CURSOR_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(super) fn run(state: &mut State, session: &mut Session<'_>, color: bool) -> io::Result<()> {
     let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
-    let query = tty.try_clone()?;
     let _raw = RawMode::enable()?;
-    let backend = TtyBackend {
-        inner: CrosstermBackend::new(BufWriter::new(tty)),
-        query,
-    };
+    let backend = TtyBackend::new(tty)?;
     let height = backend.size()?.height.clamp(1, MAX_HEIGHT);
     let mut terminal = Terminal::with_options(
         backend,
@@ -82,12 +78,19 @@ impl Drop for RawMode {
     }
 }
 
-struct TtyBackend {
+pub(super) struct TtyBackend {
     inner: CrosstermBackend<BufWriter<File>>,
     query: File,
 }
 
 impl TtyBackend {
+    pub(super) fn new(tty: File) -> io::Result<Self> {
+        Ok(Self {
+            query: tty.try_clone()?,
+            inner: CrosstermBackend::new(BufWriter::new(tty)),
+        })
+    }
+
     fn query_cursor(&mut self) -> io::Result<Position> {
         self.query.write_all(b"\x1b[6n")?;
         self.query.flush()?;

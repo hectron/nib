@@ -277,7 +277,7 @@ complete -p nib
         String::from_utf8(output.stdout).expect("bash output should be UTF-8"),
         concat!(
             "[task|]\n",
-            "[completions|doctor|config|today|note|task|cal|n|t|log|undo|pick|help|]\n",
+            "[completions|doctor|config|today|note|task|cal|n|t|log|undo|pick|board|help|]\n",
             "[task.list|task.priority|task.parse_inline|]\n",
             "[low|medium|high|]\n",
             "[Work\\ Projects|Bob\\'s\\ list|Q4:\\ Plan|Say\\ \\\"hi\\\"|\\$HOME|\\*glob|\\#bills|\\~tilde|Alpha:Beta|]\n",
@@ -354,7 +354,7 @@ words=(nib t title --list ""); CURRENT=5; _nib; emit
     assert_eq!(
         String::from_utf8(output.stdout).expect("zsh output should be UTF-8"),
         concat!(
-            "[completions|doctor|config|today|note|task|todo|cal|c|n|t|log|undo|pick|help]\n",
+            "[completions|doctor|config|today|note|task|todo|cal|c|n|t|log|undo|pick|board|b|help]\n",
             "[low|medium|high]\n",
             "[Work Projects|Bob's list|Q4: Plan|Say \"hi\"|$HOME|*glob|#bills|~tilde|Alpha:Beta]\n",
             "[Work Projects|Read Only]\n",
@@ -734,6 +734,41 @@ fn demo_backend_filters_reminders() {
     assert!(stdout.contains("Review pull request"), "{stdout}");
     assert!(!stdout.contains("Pay rent"), "{stdout}");
     assert!(!stdout.contains("Buy groceries"), "{stdout}");
+}
+
+#[cfg(feature = "tui")]
+#[test]
+fn board_refuses_to_run_without_an_interactive_terminal() {
+    for command_name in ["board", "b"] {
+        let out = command()
+            .arg(command_name)
+            .env("NIB_DEMO", "1")
+            .write_stdin("")
+            .output()
+            .expect("the nib test process should start");
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(out.stdout, Vec::<u8>::new());
+        let stderr = String::from_utf8(out.stderr).expect("stderr should be UTF-8");
+        assert!(stderr.contains("nib::board::not_a_terminal"), "{stderr}");
+        assert!(
+            stderr.contains("nib board needs an interactive terminal"),
+            "{stderr}"
+        );
+    }
+}
+
+#[cfg(not(feature = "tui"))]
+#[test]
+fn board_reports_that_the_terminal_interface_is_unavailable() {
+    let out = command()
+        .arg("board")
+        .env("NIB_DEMO", "1")
+        .write_stdin("")
+        .output()
+        .expect("the nib test process should start");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8(out.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("nib::board::unavailable"), "{stderr}");
 }
 
 #[cfg(feature = "tui")]

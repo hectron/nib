@@ -56,7 +56,7 @@ Each action backs up the reminders and writes a journal entry, as the [one-step 
 
 The action menus and the delete confirmation count selected reminders that the current query hides; the count stays above the options while you scroll a long menu, and list names too long for the menu are cut off. When any selected reminder can't be fully backed up, the delete confirmation says how many and asks for the count. If a reminder gained an alarm, repeat, or link after the prompt loaded it, nib deletes nothing, says so, reloads the reminders, and asks for the count instead. While typing the count, `backspace` corrects it, and any other typed character or `esc` cancels. Delete refuses reminders in read-only lists.
 
-Editing reminders in `$EDITOR` from the prompt isn't available yet; use `nib task edit`.
+Editing reminders in `$EDITOR` from the prompt isn't available yet; use `nib task edit`, or `e` on [`nib board`](board.md#editing-in-your-editor).
 
 ## JSON
 

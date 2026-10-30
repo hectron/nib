@@ -5,7 +5,7 @@ use std::time::Duration;
 use jiff::{Timestamp, Zoned};
 use miette::Result;
 
-use super::state::{Data, Effect, Item, ListChoice, Response};
+use super::state::{Data, Effect, Extras, Item, ListChoice, Response};
 use crate::app::commands::reminder_from_snapshot;
 use crate::app::quick::{self, DeleteError};
 use crate::cli::output::{self, Style, clean};
@@ -72,6 +72,13 @@ impl Session<'_> {
                 }
                 _ => Response::Failed(clean(&error.to_string())),
             },
+        }
+    }
+
+    pub(crate) fn edit(&mut self, ids: &[String], includes_completed: bool) -> Response {
+        match crate::app::edit::selected(ids, self.now, self.backends, &mut *self.host) {
+            Ok(summary) => self.reloaded(clean(&summary), false, includes_completed),
+            Err(error) => self.reloaded(clean(&error.to_string()), true, includes_completed),
         }
     }
 
@@ -163,6 +170,10 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
             let notes = stored.notes.clone();
             let url = stored.url.clone();
             let completed = stored.completed;
+            let extras = Extras {
+                alarms: stored.alarms_present,
+                repeats: stored.recurrence_present,
+            };
             let backup_partial = stored.backup_partial;
             let reminder = reminder_from_snapshot(stored, now.time_zone());
             Item {
@@ -177,6 +188,7 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
                 due_at: reminder.due_at,
                 priority: reminder.priority,
                 completed,
+                extras,
                 backup_partial,
             }
         })
@@ -208,6 +220,7 @@ fn added_item(reminder: Reminder, list: Option<String>) -> Item {
         due_at: reminder.due_at,
         priority: reminder.priority,
         completed: false,
+        extras: Extras::default(),
         backup_partial: false,
     }
 }
@@ -698,6 +711,39 @@ mod tests {
                 .iter()
                 .filter(|item| item.id != first)
                 .all(|item| !item.backup_partial)
+        );
+    }
+
+    #[test]
+    fn editing_a_selection_runs_the_task_edit_flow_and_reloads() {
+        let mut host = Scripted::new()
+            .edit(|text| text.replace("- [ ] Pay rent", "- [x] Pay rent"))
+            .answer("y");
+        let response = run(&mut host, |session| {
+            session.edit(&["reminder-2".into(), "reminder-4".into()], false)
+        });
+        let Response::Changed {
+            message,
+            error,
+            data: Some(_),
+        } = response
+        else {
+            panic!("expected a change, got {response:?}");
+        };
+        assert_eq!(message, "Applied 1 change: 1 completed.");
+        assert!(!error);
+        assert_eq!(host.journals.len(), 1);
+        assert!(
+            host.said
+                .iter()
+                .any(|line| line == "Apply 1 change? [y/N] ")
+        );
+
+        let mut host = Scripted::new();
+        let response = run(&mut host, |session| session.edit(&["gone".into()], false));
+        assert!(
+            matches!(&response, Response::Changed { error: true, data: Some(_), message } if message.starts_with("None of the selected")),
+            "{response:?}"
         );
     }
 
