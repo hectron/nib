@@ -717,6 +717,24 @@ fn demo_backend_shows_sample_data() {
 }
 
 #[test]
+fn demo_backend_filters_reminders() {
+    let out = command()
+        .args(["task", "list", "--filter", "pri:high"])
+        .env("NIB_DEMO", "1")
+        .output()
+        .expect("the nib test process should start");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("stdout should be UTF-8");
+    assert!(stdout.contains("Review pull request"), "{stdout}");
+    assert!(!stdout.contains("Pay rent"), "{stdout}");
+    assert!(!stdout.contains("Buy groceries"), "{stdout}");
+}
+
+#[test]
 fn demo_backend_lists_resources_in_text_and_json() {
     for (args, heading) in [
         (&["note", "folders"][..], "ACCOUNT"),

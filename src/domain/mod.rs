@@ -611,6 +611,9 @@ pub trait Reminders {
     fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError>;
     fn list(&self) -> Result<Vec<Reminder>, BackendError>;
     fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError>;
+    fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+        self.snapshot(None)
+    }
     fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
         self.snapshot(None).map(|snapshot| {
             snapshot

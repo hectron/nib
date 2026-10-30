@@ -1,11 +1,16 @@
+use std::collections::HashMap;
+
 use jiff::Zoned;
-use jiff::civil::Date;
+use jiff::civil::{Date, Time};
 use miette::Result;
 
+use crate::app::filter::{Filter, FilterKind, FilterRow};
 use crate::app::{edit, journal, undo};
 use crate::cli::Action;
 use crate::cli::output::{self, Style};
-use crate::domain::{Backends, EventQuery};
+use crate::domain::{
+    Backends, EventQuery, Reminder, ReminderDueComponents, ReminderSnapshot, StoredReminder,
+};
 use crate::infra::host::Host;
 
 pub fn run(
@@ -53,6 +58,7 @@ pub fn run(
             now,
         ),
         Action::ListTasks => output::list(&backends.reminders.list()?, json, now, style),
+        Action::FilterTasks(expression) => filtered_tasks(&expression, json, now, backends, style),
         Action::ListReminderLists => output::list(&backends.reminders.lists()?, json, now, style),
         Action::CreateReminderList(list) => output::single(
             &backends.reminders.create_list(list)?,
@@ -116,6 +122,76 @@ pub fn run(
     }
 }
 
+fn filtered_tasks(
+    expression: &str,
+    json: bool,
+    now: &Zoned,
+    backends: &Backends,
+    style: Style,
+) -> Result<String> {
+    let filter = Filter::parse(expression)?;
+    let snapshot = if filter.includes_completed() {
+        backends.reminders.snapshot_including_completed()?
+    } else {
+        backends.reminders.snapshot(None)?
+    };
+    let ReminderSnapshot { lists, reminders } = snapshot;
+    let list_names = lists
+        .iter()
+        .map(|list| (list.id.as_str(), list.name.as_str()))
+        .collect::<HashMap<_, _>>();
+    let reminders = reminders
+        .into_iter()
+        .filter(|reminder| {
+            filter.matches(
+                &FilterRow {
+                    kind: FilterKind::Reminder,
+                    title: &reminder.title,
+                    collection: list_names
+                        .get(reminder.list_id.as_str())
+                        .copied()
+                        .unwrap_or_default(),
+                    due: reminder.due,
+                    priority: reminder.priority,
+                    completed: reminder.completed,
+                },
+                now.date(),
+            )
+        })
+        .map(reminder_from_snapshot)
+        .collect::<Vec<_>>();
+    output::list(&reminders, json, now, style)
+}
+
+fn reminder_from_snapshot(reminder: StoredReminder) -> Reminder {
+    let due_time = reminder.due_components.as_ref().and_then(stored_due_time);
+    let due_time_zone = due_time.and_then(|_| {
+        reminder
+            .due_components
+            .as_ref()
+            .and_then(|parts| parts.time_zone.clone())
+    });
+    Reminder {
+        id: reminder.id,
+        title: reminder.title,
+        due: reminder.due,
+        due_time,
+        due_time_zone,
+        due_at: None,
+        priority: reminder.priority,
+    }
+}
+
+fn stored_due_time(parts: &ReminderDueComponents) -> Option<Time> {
+    Time::new(
+        parts.hour?.try_into().ok()?,
+        parts.minute?.try_into().ok()?,
+        0,
+        0,
+    )
+    .ok()
+}
+
 fn today(
     date: Date,
     query: EventQuery,
@@ -160,8 +236,8 @@ mod tests {
         ApplyResult, AutomationStatus, BackendError, Calendar, CalendarInfo, CalendarKind,
         ChangeCounts, ConfigEntry, ConfigKey, ConfigOrigin, ConfigValue, DoctorProbe,
         EditorSetting, Event, EventQuery, NewNote, NewReminder, NewResource, Note, NoteFolder,
-        NoteQuery, Notes, PermissionStatus, Priority, Reminder, ReminderChange, ReminderListInfo,
-        ReminderSnapshot, Reminders, ResourceSelector,
+        NoteQuery, Notes, PermissionStatus, Priority, Reminder, ReminderChange, ReminderList,
+        ReminderListInfo, ReminderSnapshot, Reminders, ResourceSelector, StoredReminder,
     };
     use crate::infra::host::Scripted;
     use crate::{Cli, Config};
@@ -337,7 +413,45 @@ mod tests {
         }
 
         fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
-            Ok(ReminderSnapshot::default())
+            let reminders = Reminders::list(self)?
+                .into_iter()
+                .enumerate()
+                .map(|(index, reminder)| StoredReminder {
+                    id: reminder.id,
+                    list_id: if index == 0 {
+                        "list-work".into()
+                    } else {
+                        "list-reminders".into()
+                    },
+                    title: reminder.title,
+                    notes: None,
+                    due: reminder.due,
+                    due_components: None,
+                    priority: reminder.priority,
+                    completed: false,
+                    modified: None,
+                    alarms_present: false,
+                    absolute_alarms: Some(Vec::new()),
+                    recurrence_present: false,
+                    url: None,
+                    backup_partial: false,
+                })
+                .collect();
+            Ok(ReminderSnapshot {
+                lists: vec![
+                    ReminderList {
+                        id: "list-reminders".into(),
+                        name: "Reminders".into(),
+                        writable: true,
+                    },
+                    ReminderList {
+                        id: "list-work".into(),
+                        name: "Work".into(),
+                        writable: false,
+                    },
+                ],
+                reminders,
+            })
         }
 
         fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
@@ -1175,6 +1289,30 @@ mod tests {
             "due_time_zone": null,
             "priority": "high"
           },
+          {
+            "id": "reminder-2",
+            "title": "Buy groceries",
+            "due": null,
+            "due_time": null,
+            "due_time_zone": null,
+            "priority": null
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn filtered_task_list_table() {
+        assert_snapshot!(nib(&["task", "list", "--filter", "list:work"]), @r"
+        TITLE                DUE         PRIORITY
+        Review pull request  2026-10-27  high
+        ");
+    }
+
+    #[test]
+    fn filtered_task_list_json() {
+        assert_snapshot!(nib(&["task", "--filter", "pri:none", "--json"]), @r#"
+        [
           {
             "id": "reminder-2",
             "title": "Buy groceries",
