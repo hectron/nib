@@ -83,9 +83,12 @@ A nearer file only replaces the fields it defines.
 | `task.priority` | `NIB_TASK_PRIORITY` | `low`, `medium`, or `high` | `nib t` and `nib task add` |
 | `task.parse_inline` | `NIB_TASK_PARSE_INLINE` | `true` or `false` | Trailing due dates, priorities, and lists for `nib t` and `nib task add` |
 | `cal.calendars` | `NIB_CAL_CALENDARS` | Array in TOML; comma-separated names in the environment | `nib cal` |
+| `cal.show_calendar` | `NIB_CAL_SHOW_CALENDAR` | `true` or `false` | Calendar column in `nib cal` and `nib today` event tables |
 | `note.folder` | `NIB_NOTE_FOLDER` | Folder name | `nib n` and `nib note new` |
 
 Calendar names from `NIB_CAL_CALENDARS` are trimmed, and empty names are ignored.
+
+The event tables in `nib cal` and `nib today` show a `CALENDAR` column only when `cal.show_calendar = true`, `NIB_CAL_SHOW_CALENDAR=true`, or `--show-calendar` is given. The flag only turns the column on; run `nib config unset cal.show_calendar` or set it to `false` to turn it off. JSON event objects always include `calendar`.
 
 Inline task parsing is on by default. Set `task.parse_inline = false` or `NIB_TASK_PARSE_INLINE=false` to keep trailing tokens as part of reminder titles. Explicit `--due`, `--priority`, and `--list` flags still work. See [Quick-add reminders](quick-add.md) for the recognized tokens.
 

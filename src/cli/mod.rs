@@ -35,6 +35,7 @@ pub enum Action {
     Today {
         date: Date,
         query: EventQuery,
+        show_calendar: bool,
     },
     NewNote(NewNote),
     ListNotes(NoteQuery),
@@ -55,7 +56,10 @@ pub enum Action {
     EditTasks {
         list: Option<String>,
     },
-    ListEvents(EventQuery),
+    ListEvents {
+        query: EventQuery,
+        show_calendar: bool,
+    },
     ListCalendars,
     CreateCalendar(NewResource),
     RenameCalendar {
@@ -203,6 +207,9 @@ pub struct TodayArgs {
     /// Only show events from this calendar
     #[arg(long, value_name = "NAME")]
     calendar: Vec<String>,
+    /// Show each event's calendar
+    #[arg(long)]
+    show_calendar: bool,
 }
 
 #[derive(Debug, Args)]
@@ -361,6 +368,9 @@ pub struct CalArgs {
     /// Only show events from this calendar
     #[arg(long, value_name = "NAME", global = true)]
     calendar: Vec<String>,
+    /// Show each event's calendar
+    #[arg(long, global = true)]
+    show_calendar: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -488,7 +498,7 @@ pub(crate) enum ActionError {
     Inline(#[from] task::InlineError),
     #[error("--folder can't be used with `nib note folders`")]
     NoteFoldersFilter,
-    #[error("--week and --calendar can't be used with `nib cal calendars`")]
+    #[error("--week, --calendar, and --show-calendar can't be used with `nib cal calendars`")]
     CalendarResourceFilter,
 }
 
@@ -564,24 +574,27 @@ fn task_action(
     })
 }
 
-fn calendar_action(
-    action: Option<CalAction>,
-    week: bool,
-    calendar: Vec<String>,
-    now: &Zoned,
-    config: &Config,
-) -> Result<Action, ActionError> {
+fn calendar_action(args: CalArgs, now: &Zoned, config: &Config) -> Result<Action, ActionError> {
+    let CalArgs {
+        action,
+        week,
+        calendar,
+        show_calendar,
+    } = args;
     Ok(match action {
-        Some(CalAction::List) | None => Action::ListEvents(EventQuery {
-            range: days_from_today(now, if week { 7 } else { 1 })?,
-            calendars: if calendar.is_empty() {
-                config.cal.calendars.clone()
-            } else {
-                calendar
+        Some(CalAction::List) | None => Action::ListEvents {
+            query: EventQuery {
+                range: days_from_today(now, if week { 7 } else { 1 })?,
+                calendars: if calendar.is_empty() {
+                    config.cal.calendars.clone()
+                } else {
+                    calendar
+                },
             },
-        }),
+            show_calendar: show_calendar || config.cal.show_calendar,
+        },
         Some(CalAction::Calendars(CalendarsArgs { action })) => {
-            if week || !calendar.is_empty() {
+            if week || !calendar.is_empty() || show_calendar {
                 return Err(ActionError::CalendarResourceFilter);
             }
             match action {
@@ -616,7 +629,10 @@ impl Command {
             Command::Complete { .. } | Command::Completions { .. } => return Ok(None),
             Command::Doctor => Action::Doctor,
             Command::Config(ConfigArgs { action }) => Action::Config(action),
-            Command::Today(TodayArgs { calendar }) => Action::Today {
+            Command::Today(TodayArgs {
+                calendar,
+                show_calendar,
+            }) => Action::Today {
                 date: now.date(),
                 query: EventQuery {
                     range: days_from_today(now, 1)?,
@@ -626,6 +642,7 @@ impl Command {
                         calendar
                     },
                 },
+                show_calendar: show_calendar || config.cal.show_calendar,
             },
             Command::Note(NoteArgs {
                 action,
@@ -652,11 +669,7 @@ impl Command {
                     opts.add(&words, now, config)?
                 }
             }
-            Command::Cal(CalArgs {
-                action,
-                week,
-                calendar,
-            }) => calendar_action(action, week, calendar, now, config)?,
+            Command::Cal(args) => calendar_action(args, now, config)?,
             Command::Log => Action::Log,
             Command::Undo(UndoArgs { entry, resolve }) => Action::Undo { entry, resolve },
         }))
@@ -769,10 +782,13 @@ mod tests {
     }
 
     fn events(from: Date, until: Date) -> Action {
-        Action::ListEvents(EventQuery {
-            range: at(from, 0, 0)..at(until, 0, 0),
-            calendars: Vec::new(),
-        })
+        Action::ListEvents {
+            query: EventQuery {
+                range: at(from, 0, 0)..at(until, 0, 0),
+                calendars: Vec::new(),
+            },
+            show_calendar: false,
+        }
     }
 
     fn today(calendars: &[&str]) -> Action {
@@ -782,6 +798,22 @@ mod tests {
                 range: at(date(2026, 10, 26), 0, 0)..at(date(2026, 10, 27), 0, 0),
                 calendars: calendars.iter().map(|name| (*name).into()).collect(),
             },
+            show_calendar: false,
+        }
+    }
+
+    fn showing_calendar(action: Action) -> Action {
+        match action {
+            Action::ListEvents { query, .. } => Action::ListEvents {
+                query,
+                show_calendar: true,
+            },
+            Action::Today { date, query, .. } => Action::Today {
+                date,
+                query,
+                show_calendar: true,
+            },
+            other => panic!("{other:?} doesn't list events"),
         }
     }
 
@@ -799,6 +831,7 @@ mod tests {
                 today(&["Work", "Personal"]),
             ),
             (&["--json", "today"], today(&[])),
+            (&["today", "--show-calendar"], showing_calendar(today(&[]))),
         ]);
     }
 
@@ -995,10 +1028,15 @@ mod tests {
         let week = events(date(2026, 10, 26), date(2026, 11, 2));
         assert_parses(&[
             (&["c"], day.clone()),
-            (&["cal", "--json", "list"], day),
+            (&["cal", "--json", "list"], day.clone()),
             (&["cal", "--week"], week.clone()),
             (&["c", "-w", "ls"], week.clone()),
-            (&["cal", "list", "-w"], week),
+            (&["cal", "list", "-w"], week.clone()),
+            (&["cal", "--show-calendar"], showing_calendar(day.clone())),
+            (
+                &["c", "ls", "--show-calendar", "-w"],
+                showing_calendar(week),
+            ),
             (&["cal", "calendars"], Action::ListCalendars),
             (&["--json", "c", "calendars"], Action::ListCalendars),
             (
@@ -1076,6 +1114,7 @@ mod tests {
         for args in [
             &["cal", "calendars", "--week"][..],
             &["cal", "calendars", "--calendar", "Work"][..],
+            &["cal", "calendars", "--show-calendar"][..],
         ] {
             assert!(matches!(
                 action_with_config(&now, args, &config),
@@ -1098,7 +1137,10 @@ mod tests {
             .map(|(args, now)| {
                 let now = now.to_zoned(new_york.clone()).unwrap();
                 let args: Vec<&str> = args.split(' ').collect();
-                let Action::ListEvents(EventQuery { range, .. }) = parse_at(&now, &args).unwrap()
+                let Action::ListEvents {
+                    query: EventQuery { range, .. },
+                    ..
+                } = parse_at(&now, &args).unwrap()
                 else {
                     panic!("nib {args:?} should list events");
                 };
@@ -1409,6 +1451,7 @@ mod tests {
             },
             cal: crate::domain::CalendarConfig {
                 calendars: vec!["Work".into()],
+                show_calendar: false,
             },
             note: crate::domain::NoteConfig {
                 folder: Some("Inbox".into()),
@@ -1445,7 +1488,8 @@ mod tests {
         assert_eq!(action(&["n"]), notes(None));
         assert!(matches!(
             action(&["cal"]),
-            Action::ListEvents(EventQuery { calendars, .. }) if calendars == ["Work"]
+            Action::ListEvents { query: EventQuery { calendars, .. }, show_calendar: false }
+                if calendars == ["Work"]
         ));
         assert!(matches!(
             action(&["today"]),
@@ -1455,5 +1499,37 @@ mod tests {
             action(&["today", "--calendar", "Personal"]),
             Action::Today { query: EventQuery { calendars, .. }, .. } if calendars == ["Personal"]
         ));
+    }
+
+    #[test]
+    fn show_calendar_comes_from_the_flag_or_configuration() {
+        let now = at(date(2026, 10, 26), 9, 30);
+        let shown = |args: &[&str], configured: bool| {
+            let config = Config {
+                cal: crate::domain::CalendarConfig {
+                    calendars: Vec::new(),
+                    show_calendar: configured,
+                },
+                ..Config::default()
+            };
+            match action_with_config(&now, args, &config).unwrap() {
+                Action::ListEvents { show_calendar, .. } | Action::Today { show_calendar, .. } => {
+                    show_calendar
+                }
+                other => panic!("{other:?} doesn't list events"),
+            }
+        };
+
+        for args in [&["cal"][..], &["today"][..]] {
+            assert!(!shown(args, false), "{args:?}");
+            assert!(shown(args, true), "{args:?}");
+        }
+        for args in [
+            &["cal", "--show-calendar"][..],
+            &["today", "--show-calendar"][..],
+        ] {
+            assert!(shown(args, false), "{args:?}");
+            assert!(shown(args, true), "{args:?}");
+        }
     }
 }
