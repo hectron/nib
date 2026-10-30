@@ -1990,6 +1990,11 @@ mod tests {
                 value: ConfigValue::String("Notes".into()),
                 origin: ConfigOrigin::File("/Users/me/.config/nib/config.toml".into()),
             },
+            ConfigEntry {
+                key: ConfigKey::TuiPreset,
+                value: ConfigValue::String("default".into()),
+                origin: ConfigOrigin::Default,
+            },
         ]
     }
 
@@ -2004,6 +2009,7 @@ mod tests {
         cal.calendars      ["Work", "Personal"]
         cal.show_calendar  true
         note.folder        Notes
+        tui.preset         default
         "#);
         assert_snapshot!(output::config_list(&entries, true, false, Style::default()).unwrap(), @r#"
         KEY                VALUE                 ORIGIN
@@ -2013,6 +2019,7 @@ mod tests {
         cal.calendars      ["Work", "Personal"]  default
         cal.show_calendar  true                  /Users/me/project/nib.toml
         note.folder        Notes                 /Users/me/.config/nib/config.toml
+        tui.preset         default               default
         "#);
     }
 
@@ -2068,6 +2075,13 @@ mod tests {
             "origin": {
               "kind": "file",
               "path": "/Users/me/.config/nib/config.toml"
+            }
+          },
+          {
+            "id": "tui.preset",
+            "value": "default",
+            "origin": {
+              "kind": "default"
             }
           }
         ]
@@ -2127,6 +2141,13 @@ mod tests {
               "kind": "file",
               "path": "/Users/me/.config/nib/config.toml"
             }
+          },
+          {
+            "id": "tui.preset",
+            "value": "default",
+            "origin": {
+              "kind": "default"
+            }
           }
         ]
         "#);
@@ -2185,6 +2206,7 @@ mod tests {
                 error: None,
             }],
             None,
+            Some(&crate::domain::keymap::Keymap::default()),
             &[],
         );
         assert!(crate::app::doctor::failed(&checks));
@@ -2197,10 +2219,40 @@ mod tests {
         ! Apple Notes Automation access is checked on first use
           Fix: When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation.
         ✓ config is valid: /Users/me/project/nib.toml
+        ✓ keymap is valid in browse, filter, and capture states
         ✓ no configuration lock files are left behind
         ! $VISUAL uses `code` without a wait flag
           Fix: Set VISUAL="code --wait".
         "###);
+    }
+
+    #[test]
+    fn doctor_reports_each_keymap_error_once() {
+        let error = "invalid keymap in /Users/me/project/nib.toml for tui.keys.browse.\"x\": unknown keymap action \"dne\"; did you mean \"done\"? at line 2, column 5";
+        let checks = crate::app::doctor::checks(
+            &FakeDoctor,
+            &[crate::app::doctor::ConfigFileCheck {
+                path: "/Users/me/project/nib.toml".into(),
+                error: Some(error.into()),
+            }],
+            Some(error),
+            None,
+            &[],
+        );
+        let failures = checks
+            .iter()
+            .filter(|check| check.message.contains("dne"))
+            .count();
+        assert_eq!(failures, 1);
+        let preset_error = "invalid value for NIB_TUI_PRESET: \"vim\"; expected default";
+        let checks = crate::app::doctor::checks(&FakeDoctor, &[], Some(preset_error), None, &[]);
+        let failures = checks
+            .iter()
+            .filter(|check| check.message.contains("NIB_TUI_PRESET"))
+            .count();
+        assert_eq!(failures, 1);
+        let keymap = checks.iter().find(|check| check.id == "keymap").unwrap();
+        assert_eq!(keymap.status, crate::app::doctor::CheckStatus::Warning);
     }
 
     #[test]
@@ -2209,6 +2261,7 @@ mod tests {
             &FakeDoctor,
             &[],
             None,
+            Some(&crate::domain::keymap::Keymap::default()),
             &[crate::app::doctor::ConfigLockFile {
                 path: "/Users/me/project/nib.toml.lock".into(),
             }],
@@ -2233,6 +2286,7 @@ mod tests {
             &FakeDoctor,
             &[],
             None,
+            Some(&crate::domain::keymap::Keymap::default()),
             &[
                 crate::app::doctor::ConfigLockFile {
                     path: "/Users/me/project/nib.toml.lock".into(),
@@ -2256,6 +2310,7 @@ mod tests {
         ! Apple Notes Automation access is checked on first use
           Fix: When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation.
         ✓ no config files loaded; built-in defaults are valid
+        ✓ keymap is valid in browse, filter, and capture states
         ! leftover lock files from an older nib: /Users/me/project/nib.toml.lock, /Users/me/project/.nib.local.toml.lock
           Fix: Remove /Users/me/project/nib.toml.lock, /Users/me/project/.nib.local.toml.lock; nib no longer uses them.
         ! $VISUAL uses `code` without a wait flag
@@ -2308,6 +2363,12 @@ mod tests {
               "fix": null
             },
             {
+              "id": "keymap",
+              "status": "pass",
+              "message": "keymap is valid in browse, filter, and capture states",
+              "fix": null
+            },
+            {
               "id": "config_lock",
               "status": "warning",
               "message": "leftover lock files from an older nib: /Users/me/project/nib.toml.lock, /Users/me/project/.nib.local.toml.lock",
@@ -2333,6 +2394,7 @@ mod tests {
                 error: None,
             }],
             None,
+            Some(&crate::domain::keymap::Keymap::default()),
             &[],
         );
         assert_snapshot!(output::doctor(&checks, true, Style::default()).unwrap(), @r###"
@@ -2374,6 +2436,12 @@ mod tests {
               "id": "config_1",
               "status": "pass",
               "message": "config is valid: /Users/me/project/nib.toml",
+              "fix": null
+            },
+            {
+              "id": "keymap",
+              "status": "pass",
+              "message": "keymap is valid in browse, filter, and capture states",
               "fix": null
             },
             {

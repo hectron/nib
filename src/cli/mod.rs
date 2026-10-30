@@ -1629,6 +1629,7 @@ mod tests {
             note: crate::domain::NoteConfig {
                 folder: Some("Inbox".into()),
             },
+            ..Config::default()
         };
         let now = at(date(2026, 10, 26), 9, 30);
         let action = |args: &[&str]| {

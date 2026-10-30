@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use toml_edit::{Array, Decor, DocumentMut, Item, Table, Value};
 
+use crate::domain::keymap::{Action as KeymapAction, KeyChord, Keymap, State};
 use crate::domain::{Config, ConfigEntry, ConfigKey, ConfigOrigin, ConfigValue, Priority};
 
 #[derive(Debug, Default, Deserialize)]
@@ -17,6 +19,7 @@ struct FileConfig {
     task: Option<FileTask>,
     cal: Option<FileCal>,
     note: Option<FileNote>,
+    tui: Option<FileTui>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +43,13 @@ struct FileNote {
     folder: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileTui {
+    preset: Option<toml::Value>,
+    keys: Option<BTreeMap<String, toml::Value>>,
+}
+
 #[derive(Debug, Error, Diagnostic)]
 pub enum ConfigError {
     #[error("couldn't read configuration file {}: {source}", path.display())]
@@ -53,6 +63,20 @@ pub enum ConfigError {
     #[diagnostic(code(nib::config::invalid_file))]
     Parse {
         path: PathBuf,
+        reason: String,
+        line: usize,
+        column: usize,
+        #[source_code]
+        source_code: Arc<NamedSource<String>>,
+        #[label("{reason}")]
+        span: SourceSpan,
+    },
+
+    #[error("invalid keymap in {} for {key}: {reason}", path.display())]
+    #[diagnostic(code(nib::config::invalid_keymap))]
+    Keymap {
+        path: PathBuf,
+        key: String,
         reason: String,
         line: usize,
         column: usize,
@@ -84,7 +108,7 @@ pub enum ConfigError {
 impl ConfigError {
     fn plain_text(&self) -> String {
         match self {
-            Self::Parse { line, column, .. } => {
+            Self::Parse { line, column, .. } | Self::Keymap { line, column, .. } => {
                 format!("{self} at line {line}, column {column}")
             }
             _ => self.to_string(),
@@ -196,6 +220,13 @@ impl ConfigInspection {
         self.result.as_ref().err()
     }
 
+    pub(crate) fn keymap(&self) -> Option<&Keymap> {
+        self.result
+            .as_ref()
+            .ok()
+            .map(|(config, _)| &config.tui.keymap)
+    }
+
     pub(crate) fn files(&self) -> &[ConfigFileInspection] {
         &self.files
     }
@@ -221,6 +252,8 @@ struct Origins {
     cal_calendars: ConfigOrigin,
     cal_show_calendar: ConfigOrigin,
     note_folder: ConfigOrigin,
+    tui_preset: ConfigOrigin,
+    keymap_layers: Vec<CompiledBindings>,
 }
 
 impl Default for Origins {
@@ -232,6 +265,8 @@ impl Default for Origins {
             cal_calendars: ConfigOrigin::Default,
             cal_show_calendar: ConfigOrigin::Default,
             note_folder: ConfigOrigin::Default,
+            tui_preset: ConfigOrigin::Default,
+            keymap_layers: Vec::new(),
         }
     }
 }
@@ -245,6 +280,7 @@ impl Origins {
             ConfigKey::CalCalendars => &self.cal_calendars,
             ConfigKey::CalShowCalendar => &self.cal_show_calendar,
             ConfigKey::NoteFolder => &self.note_folder,
+            ConfigKey::TuiPreset => &self.tui_preset,
         }
     }
 
@@ -290,6 +326,11 @@ impl Origins {
                     .clone()
                     .map_or(ConfigValue::Unset, ConfigValue::String),
                 origin: self.note_folder,
+            },
+            ConfigEntry {
+                key: ConfigKey::TuiPreset,
+                value: ConfigValue::String(config.tui.preset.clone()),
+                origin: self.tui_preset,
             },
         ]
     }
@@ -359,6 +400,7 @@ fn load_inspected(
     }
 
     apply_environment(&mut config, &mut origins, env)?;
+    config.tui.keymap = build_keymap(&config.tui.preset, &origins.keymap_layers);
     Ok((config, origins))
 }
 
@@ -431,7 +473,8 @@ fn apply_file(config: &mut Config, origins: &mut Origins, path: &Path) -> Result
         source,
     })?;
     let parsed = parse_file(path, &source)?;
-    apply(config, origins, parsed, ConfigOrigin::File(path.to_owned()));
+    apply(config, origins, parsed, ConfigOrigin::File(path.to_owned()))
+        .map_err(|issue| keymap_error(path, &source, issue))?;
     Ok(())
 }
 
@@ -453,7 +496,13 @@ fn parse_file(path: &Path, source: &str) -> Result<FileConfig, ConfigError> {
     })
 }
 
-fn apply(config: &mut Config, origins: &mut Origins, other: FileConfig, origin: ConfigOrigin) {
+fn apply(
+    config: &mut Config,
+    origins: &mut Origins,
+    other: FileConfig,
+    origin: ConfigOrigin,
+) -> Result<(), KeymapIssue> {
+    let tui = other.tui.map(compile_tui).transpose()?;
     if let Some(task) = other.task {
         if task.list.is_some() {
             config.task.list = task.list;
@@ -482,7 +531,246 @@ fn apply(config: &mut Config, origins: &mut Origins, other: FileConfig, origin: 
         && note.folder.is_some()
     {
         config.note.folder = note.folder;
-        origins.note_folder = origin;
+        origins.note_folder = origin.clone();
+    }
+    if let Some(tui) = tui {
+        if let Some(preset) = tui.preset {
+            config.tui.preset = preset;
+            origins.tui_preset = origin;
+        }
+        origins.keymap_layers.push(tui.bindings);
+    }
+    Ok(())
+}
+
+fn build_keymap(preset: &str, layers: &[CompiledBindings]) -> Keymap {
+    let mut keymap =
+        Keymap::from_preset(preset).expect("presets are validated before they are stored");
+    for (state, bindings) in layers.iter().flatten() {
+        for (chord, actions) in bindings {
+            keymap.bind(*state, chord.clone(), actions.clone());
+        }
+    }
+    keymap
+}
+
+struct CompiledTui {
+    preset: Option<String>,
+    bindings: CompiledBindings,
+}
+
+type CompiledBindings = Vec<(State, StateBindings)>;
+type StateBindings = Vec<(KeyChord, Vec<KeymapAction>)>;
+
+struct KeymapIssue {
+    key: String,
+    reason: String,
+    needle: String,
+    span: Box<KeymapSpan>,
+}
+
+enum KeymapSpan {
+    Preset,
+    State(String),
+    Chord { state: String, chord: String },
+    Value { state: String, chord: String },
+}
+
+fn compile_tui(tui: FileTui) -> Result<CompiledTui, KeymapIssue> {
+    let preset = tui.preset.map(parse_preset).transpose()?;
+    let mut compiled = Vec::new();
+    for (state_name, value) in tui.keys.unwrap_or_default() {
+        let state = state_name.parse::<State>().map_err(|error| KeymapIssue {
+            key: format!("tui.keys.{state_name}"),
+            reason: error.to_string(),
+            needle: state_name.clone(),
+            span: KeymapSpan::State(state_name.clone()).into(),
+        })?;
+        let toml::Value::Table(bindings) = value else {
+            return Err(KeymapIssue {
+                key: format!("tui.keys.{state_name}"),
+                reason: "a keymap state must be a table of key chords and actions".into(),
+                needle: state_name.clone(),
+                span: KeymapSpan::State(state_name).into(),
+            });
+        };
+        let mut canonical = BTreeMap::<KeyChord, String>::new();
+        let mut state_bindings = Vec::new();
+        for (raw_chord, value) in bindings {
+            let key = format!("tui.keys.{state_name}.{raw_chord:?}");
+            let chord = raw_chord.parse::<KeyChord>().map_err(|error| KeymapIssue {
+                key: key.clone(),
+                reason: error.to_string(),
+                needle: raw_chord.clone(),
+                span: KeymapSpan::Chord {
+                    state: state_name.clone(),
+                    chord: raw_chord.clone(),
+                }
+                .into(),
+            })?;
+            if let Some(previous) = canonical.insert(chord.clone(), raw_chord.clone()) {
+                return Err(KeymapIssue {
+                    key,
+                    reason: format!(
+                        "key chord {raw_chord:?} duplicates {previous:?} after canonicalization to {chord:?}",
+                        chord = chord.to_string()
+                    ),
+                    needle: raw_chord.clone(),
+                    span: KeymapSpan::Chord {
+                        state: state_name.clone(),
+                        chord: raw_chord,
+                    }
+                    .into(),
+                });
+            }
+            let actions = parse_actions(&key, &state_name, &raw_chord, value)?;
+            state_bindings.push((chord, actions));
+        }
+        compiled.push((state, state_bindings));
+    }
+    Ok(CompiledTui {
+        preset,
+        bindings: compiled,
+    })
+}
+
+fn parse_preset(value: toml::Value) -> Result<String, KeymapIssue> {
+    let toml::Value::String(preset) = value else {
+        return Err(KeymapIssue {
+            key: "tui.preset".into(),
+            reason: "a keymap preset must be a string".into(),
+            needle: "preset".into(),
+            span: KeymapSpan::Preset.into(),
+        });
+    };
+    Keymap::from_preset(&preset).map_err(|error| KeymapIssue {
+        key: "tui.preset".into(),
+        reason: error.to_string(),
+        needle: preset.clone(),
+        span: KeymapSpan::Preset.into(),
+    })?;
+    Ok(preset)
+}
+
+fn parse_actions(
+    key: &str,
+    state: &str,
+    raw_chord: &str,
+    value: toml::Value,
+) -> Result<Vec<KeymapAction>, KeymapIssue> {
+    let raw_actions = match value {
+        toml::Value::String(action) => vec![action],
+        toml::Value::Array(actions) => actions
+            .into_iter()
+            .map(|action| match action {
+                toml::Value::String(action) => Ok(action),
+                _ => Err(KeymapIssue {
+                    key: key.into(),
+                    reason: "an action sequence must contain only strings".into(),
+                    needle: raw_chord.into(),
+                    span: KeymapSpan::Value {
+                        state: state.into(),
+                        chord: raw_chord.into(),
+                    }
+                    .into(),
+                }),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(KeymapIssue {
+                key: key.into(),
+                reason: "a binding must be an action string or an array of action strings".into(),
+                needle: raw_chord.into(),
+                span: KeymapSpan::Value {
+                    state: state.into(),
+                    chord: raw_chord.into(),
+                }
+                .into(),
+            });
+        }
+    };
+    if raw_actions.is_empty() {
+        return Err(KeymapIssue {
+            key: key.into(),
+            reason: "an action sequence cannot be empty; use `none` to remove a binding".into(),
+            needle: raw_chord.into(),
+            span: KeymapSpan::Value {
+                state: state.into(),
+                chord: raw_chord.into(),
+            }
+            .into(),
+        });
+    }
+    let mut actions = Vec::with_capacity(raw_actions.len());
+    for raw_action in raw_actions {
+        actions.push(raw_action.parse::<KeymapAction>().map_err(|error| {
+            KeymapIssue {
+                key: key.into(),
+                reason: error.to_string(),
+                needle: raw_action,
+                span: KeymapSpan::Value {
+                    state: state.into(),
+                    chord: raw_chord.into(),
+                }
+                .into(),
+            }
+        })?);
+    }
+    if actions.len() > 1 && actions.contains(&KeymapAction::None) {
+        return Err(KeymapIssue {
+            key: key.into(),
+            reason: "action `none` must be the only action in a binding".into(),
+            needle: "none".into(),
+            span: KeymapSpan::Value {
+                state: state.into(),
+                chord: raw_chord.into(),
+            }
+            .into(),
+        });
+    }
+    Ok(actions)
+}
+
+fn keymap_error(path: &Path, source: &str, issue: KeymapIssue) -> ConfigError {
+    let fallback = source
+        .find(&issue.needle)
+        .map_or(0..1, |offset| offset..offset + issue.needle.len().max(1));
+    let span = keymap_span(source, issue.span.as_ref()).unwrap_or(fallback);
+    let offset = span.start;
+    let (line, column) = source_location(source, offset);
+    ConfigError::Keymap {
+        path: path.to_owned(),
+        key: issue.key,
+        reason: issue.reason,
+        line,
+        column,
+        source_code: Arc::new(
+            NamedSource::new(path.display().to_string(), source.to_owned()).with_language("toml"),
+        ),
+        span: span.into(),
+    }
+}
+
+fn keymap_span(source: &str, target: &KeymapSpan) -> Option<std::ops::Range<usize>> {
+    let document = DocumentMut::from_str(source).ok()?;
+    let tui = document.get("tui")?.as_table_like()?;
+    match target {
+        KeymapSpan::Preset => tui.get("preset")?.span(),
+        KeymapSpan::State(state) => tui.get("keys")?.as_table_like()?.key(state)?.span(),
+        KeymapSpan::Chord { state, chord } => tui
+            .get("keys")?
+            .as_table_like()?
+            .get(state)?
+            .as_table_like()?
+            .key(chord)?
+            .span(),
+        KeymapSpan::Value { state, chord } => tui
+            .get("keys")?
+            .as_table_like()?
+            .get(state)?
+            .as_table_like()?
+            .get(chord)?
+            .span(),
     }
 }
 
@@ -514,6 +802,15 @@ fn apply_environment(
     if let Some(value) = environment(&env, "NIB_NOTE_FOLDER")? {
         config.note.folder = Some(value);
         origins.note_folder = ConfigOrigin::Environment("NIB_NOTE_FOLDER");
+    }
+    if let Some(value) = environment(&env, "NIB_TUI_PRESET")? {
+        Keymap::from_preset(&value).map_err(|_| ConfigError::Environment {
+            name: "NIB_TUI_PRESET",
+            value: value.clone(),
+            expected: "default",
+        })?;
+        config.tui.preset = value;
+        origins.tui_preset = ConfigOrigin::Environment("NIB_TUI_PRESET");
     }
     Ok(())
 }
@@ -904,6 +1201,13 @@ fn edit_value(key: ConfigKey, input: &str) -> Result<(ConfigValue, Value), Confi
             ConfigValue::String(input.into()),
             Value::from(input.to_owned()),
         )),
+        ConfigKey::TuiPreset => {
+            Keymap::from_preset(input).map_err(|_| invalid_value(key, input, "default"))?;
+            Ok((
+                ConfigValue::String(input.into()),
+                Value::from(input.to_owned()),
+            ))
+        }
         ConfigKey::TaskPriority => {
             let priority =
                 priority(input).ok_or_else(|| invalid_value(key, input, "low, medium, or high"))?;
@@ -973,6 +1277,7 @@ mod tests {
 
     use super::*;
     use crate::cli::{Action, Cli};
+    use crate::domain::keymap::TEST_PRESET;
     use crate::domain::{EventQuery, NewReminder};
 
     struct TempDir(PathBuf);
@@ -1027,6 +1332,156 @@ mod tests {
     fn no_configuration_keeps_built_in_defaults() {
         let temp = TempDir::new();
         assert_eq!(load(&temp.0, None, no_env).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn keymap_overrides_layer_by_state_and_canonical_chord() {
+        let temp = TempDir::new();
+        let project = temp.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let user = temp.join("user.toml");
+        write(
+            &user,
+            "[tui]\npreset = \"default\"\n[tui.keys.browse]\nx = \"none\"\n\"Alt-X\" = [\"done\", \"down\"]\n[tui.keys.filter]\n\"ctrl-o\" = \"act-menu\"\n",
+        );
+        write(
+            &project.join("nib.toml"),
+            "[tui.keys.browse]\n\"alt-x\" = \"edit\"\n[tui.keys.filter]\n\"Ctrl-O\" = \"none\"\n",
+        );
+
+        let config = load(&project, Some(&user), no_env).unwrap();
+        let x = "x".parse::<KeyChord>().unwrap();
+        let alt_x = "alt-x".parse::<KeyChord>().unwrap();
+        let ctrl_o = "ctrl-o".parse::<KeyChord>().unwrap();
+        let j = "j".parse::<KeyChord>().unwrap();
+        assert_eq!(config.tui.preset, "default");
+        assert_eq!(config.tui.keymap.actions(State::Browse, &x), None);
+        assert_eq!(
+            config.tui.keymap.actions(State::Browse, &alt_x),
+            Some(&[KeymapAction::Edit][..])
+        );
+        assert_eq!(config.tui.keymap.actions(State::Filter, &ctrl_o), None);
+        assert_eq!(
+            config.tui.keymap.actions(State::Browse, &j),
+            Some(&[KeymapAction::Down][..])
+        );
+    }
+
+    #[test]
+    fn keymap_is_built_from_the_final_preset_before_layered_overrides() {
+        let temp = TempDir::new();
+        let project = temp.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let user = temp.join("user.toml");
+        write(&user, "[tui.keys.browse]\ny = \"edit\"\n");
+        write(
+            &project.join("nib.toml"),
+            &format!("[tui]\npreset = \"{TEST_PRESET}\"\n"),
+        );
+        let x = "x".parse::<KeyChord>().unwrap();
+        let y = "y".parse::<KeyChord>().unwrap();
+        let z = "z".parse::<KeyChord>().unwrap();
+        let assert_alternate = |config: &Config| {
+            assert_eq!(config.tui.preset, TEST_PRESET);
+            assert_eq!(config.tui.keymap.actions(State::Browse, &x), None);
+            assert_eq!(
+                config.tui.keymap.actions(State::Browse, &z),
+                Some(&[KeymapAction::Done][..])
+            );
+            assert_eq!(
+                config.tui.keymap.actions(State::Browse, &y),
+                Some(&[KeymapAction::Edit][..])
+            );
+        };
+
+        assert_alternate(&load(&project, Some(&user), no_env).unwrap());
+
+        fs::remove_file(project.join("nib.toml")).unwrap();
+        let from_environment = load(&project, Some(&user), |name| {
+            (name == "NIB_TUI_PRESET").then(|| OsString::from(TEST_PRESET))
+        })
+        .unwrap();
+        assert_alternate(&from_environment);
+    }
+
+    #[test]
+    fn keymap_errors_name_the_file_and_key_with_suggestions() {
+        let cases = [
+            (
+                "[tui.keys.brows]\nx = \"done\"\n",
+                "tui.keys.brows",
+                "did you mean \"browse\"",
+            ),
+            (
+                "[tui.keys.browse]\n\"ctrl-\" = \"done\"\n",
+                "tui.keys.browse.\"ctrl-\"",
+                "modifier must be followed by a key",
+            ),
+            (
+                "[tui.keys.browse]\nx = \"dne\"\n",
+                "tui.keys.browse.\"x\"",
+                "did you mean \"done\"",
+            ),
+            (
+                "[tui]\npreset = \"defaults\"\n",
+                "tui.preset",
+                "did you mean \"default\"",
+            ),
+        ];
+        for (source, key, detail) in cases {
+            let temp = TempDir::new();
+            let path = temp.join("nib.toml");
+            write(&path, source);
+            let error = load(&temp.0, None, no_env).unwrap_err().to_string();
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(error.contains(key), "{error}");
+            assert!(error.contains(detail), "{error}");
+        }
+    }
+
+    #[test]
+    fn duplicate_canonical_key_chords_are_rejected() {
+        let temp = TempDir::new();
+        let path = temp.join("nib.toml");
+        write(
+            &path,
+            "[tui.keys.filter]\n\"ctrl-o\" = \"act-menu\"\n\"Ctrl-O\" = \"accept\"\n",
+        );
+
+        let error = load(&temp.0, None, no_env).unwrap_err().to_string();
+        assert!(error.contains("duplicates"), "{error}");
+        assert!(error.contains("ctrl-o"), "{error}");
+        assert!(error.contains("Ctrl-O"), "{error}");
+    }
+
+    #[test]
+    fn keymap_diagnostics_point_to_the_binding_value() {
+        let temp = TempDir::new();
+        write(&temp.join("nib.toml"), "[tui.keys.browse]\nx = \"dne\"\n");
+
+        let error = load(&temp.0, None, no_env).unwrap_err();
+        assert!(
+            error.to_string().ends_with(
+                "for tui.keys.browse.\"x\": unknown keymap action \"dne\"; did you mean \"done\"?"
+            ),
+            "{error}"
+        );
+        let ConfigError::Keymap { line, column, .. } = &error else {
+            panic!("{error:?}");
+        };
+        assert_eq!((*line, *column), (2, 6), "{error:?}");
+    }
+
+    #[test]
+    fn none_cannot_be_combined_with_other_actions() {
+        let temp = TempDir::new();
+        write(
+            &temp.join("nib.toml"),
+            "[tui.keys.browse]\nx = [\"none\", \"down\"]\n",
+        );
+
+        let error = load(&temp.0, None, no_env).unwrap_err().to_string();
+        assert!(error.contains("must be the only action"), "{error}");
     }
 
     #[test]
@@ -1207,6 +1662,38 @@ mod tests {
     }
 
     #[test]
+    fn tui_preset_can_be_set_and_overridden_by_the_environment() {
+        let temp = TempDir::new();
+        let path = temp.join("config.toml");
+
+        assert_eq!(
+            set(&path, ConfigKey::TuiPreset, "default", &temp.locks())
+                .unwrap()
+                .value,
+            ConfigValue::String("default".into())
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[tui]\npreset = \"default\"\n"
+        );
+        let inspection = inspect(&temp.0, Some(&path), |name| {
+            (name == "NIB_TUI_PRESET").then(|| OsString::from("default"))
+        });
+        assert_eq!(
+            inspection.origin(ConfigKey::TuiPreset),
+            Some(&ConfigOrigin::Environment("NIB_TUI_PRESET"))
+        );
+        assert!(set(&path, ConfigKey::TuiPreset, "vim", &temp.locks()).is_err());
+        let error = load(&temp.0, Some(&path), |name| {
+            (name == "NIB_TUI_PRESET").then(|| OsString::from("vim"))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("NIB_TUI_PRESET"), "{error}");
+        assert!(error.contains("default"), "{error}");
+    }
+
+    #[test]
     fn origins_follow_field_by_field_precedence() {
         let temp = TempDir::new();
         let project = temp.join("project");
@@ -1254,6 +1741,11 @@ mod tests {
                 ConfigEntry {
                     key: ConfigKey::NoteFolder,
                     value: ConfigValue::Unset,
+                    origin: ConfigOrigin::Default,
+                },
+                ConfigEntry {
+                    key: ConfigKey::TuiPreset,
+                    value: ConfigValue::String("default".into()),
                     origin: ConfigOrigin::Default,
                 },
             ]
@@ -1942,6 +2434,14 @@ mod tests {
             let properties = section_schema["properties"].as_object().unwrap();
             let mut section_sample = toml::map::Map::new();
             for (name, property) in properties {
+                if name == "keys" {
+                    let mut browse = toml::map::Map::new();
+                    browse.insert("x".into(), toml::Value::String("done".into()));
+                    let mut states = toml::map::Map::new();
+                    states.insert("browse".into(), toml::Value::Table(browse));
+                    section_sample.insert(name.clone(), toml::Value::Table(states));
+                    continue;
+                }
                 schema_keys.insert(format!("{section}.{name}"));
                 let value = if let Some(first) = property["enum"].as_array().and_then(|v| v.first())
                 {
@@ -1959,7 +2459,12 @@ mod tests {
             sample.insert(section.clone(), toml::Value::Table(section_sample));
         }
         let file: FileConfig = toml::Value::Table(sample).try_into().unwrap();
-        let FileConfig { task, cal, note } = file;
+        let FileConfig {
+            task,
+            cal,
+            note,
+            tui,
+        } = file;
         let FileTask {
             list,
             priority,
@@ -1973,6 +2478,8 @@ mod tests {
         assert!(calendars.is_some() && show_calendar.is_some());
         let FileNote { folder } = note.unwrap();
         assert!(folder.is_some());
+        let FileTui { preset, keys } = tui.unwrap();
+        assert!(preset.is_some() && keys.is_some());
 
         let supported = ConfigKey::ALL
             .map(ConfigKey::as_str)
@@ -1983,6 +2490,17 @@ mod tests {
         for key in ConfigKey::ALL {
             assert_eq!(ConfigKey::parse(key.as_str()), Some(key));
         }
+        let schema_actions = schema["$defs"]["action"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        let supported_actions = KeymapAction::ALL
+            .map(KeymapAction::as_str)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(schema_actions, supported_actions);
     }
 
     #[test]
@@ -1991,6 +2509,7 @@ mod tests {
             ("NIB_TASK_PRIORITY", "urgent"),
             ("NIB_TASK_PARSE_INLINE", "sometimes"),
             ("NIB_CAL_SHOW_CALENDAR", "yes"),
+            ("NIB_TUI_PRESET", "vim"),
         ];
         for (variable, value) in cases {
             let error = load(Path::new("/"), None, |name| {

@@ -52,6 +52,87 @@
           "description": "Default folder for newly created notes."
         }
       }
+    },
+    "tui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preset": {
+          "type": "string",
+          "enum": ["default"],
+          "default": "default",
+          "description": "Base keymap preset."
+        },
+        "keys": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "browse": { "$ref": "#/$defs/keyBindings" },
+            "filter": { "$ref": "#/$defs/keyBindings" },
+            "capture": { "$ref": "#/$defs/keyBindings" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "up",
+        "down",
+        "page-up",
+        "page-down",
+        "top",
+        "bottom",
+        "filter",
+        "capture",
+        "clear-filter",
+        "keep-filter",
+        "select-toggle",
+        "select-all",
+        "act-menu",
+        "done",
+        "reopen",
+        "priority-high",
+        "priority-medium",
+        "priority-low",
+        "priority-none",
+        "move",
+        "edit",
+        "delete",
+        "add",
+        "quit",
+        "help",
+        "accept",
+        "cancel",
+        "next-pane",
+        "prev-pane",
+        "preview-toggle",
+        "none"
+      ]
+    },
+    "binding": {
+      "oneOf": [
+        { "$ref": "#/$defs/action" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/action" },
+          "minItems": 1,
+          "anyOf": [
+            { "maxItems": 1 },
+            { "not": { "contains": { "const": "none" } } }
+          ]
+        }
+      ]
+    },
+    "keyBindings": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": { "$ref": "#/$defs/binding" }
     }
   }
 }

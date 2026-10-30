@@ -14,6 +14,7 @@ Change the user configuration without opening it in an editor:
 nib config set task.list Work
 nib config set task.priority high
 nib config set cal.calendars 'Work, Personal'
+nib config set tui.preset default
 nib config unset task.priority
 nib config path
 ```
@@ -39,6 +40,9 @@ list = "Work"
 [cal]
 calendars = ["Work"]
 show_calendar = true
+
+[tui]
+preset = "default"
 ```
 
 These defaults apply in that directory and every directory below it.
@@ -82,6 +86,8 @@ Settings merge field by field. From lowest to highest precedence:
 
 A nearer file only replaces the fields it defines.
 
+Keymap state tables merge chord by chord. Set a chord to `"none"` to remove a binding inherited from the preset or a lower-precedence file.
+
 ## Settings
 
 | TOML key | Environment variable | Values | Used by |
@@ -92,12 +98,15 @@ A nearer file only replaces the fields it defines.
 | `cal.calendars` | `NIB_CAL_CALENDARS` | Array in TOML; comma-separated names in the environment | `nib cal` |
 | `cal.show_calendar` | `NIB_CAL_SHOW_CALENDAR` | `true` or `false` | Calendar column in `nib cal` and `nib today` event tables |
 | `note.folder` | `NIB_NOTE_FOLDER` | Folder name | `nib n` and `nib note new` |
+| `tui.preset` | `NIB_TUI_PRESET` | `default` | Not yet used by any command; checked by `nib doctor` |
 
 Calendar names from `NIB_CAL_CALENDARS` are trimmed, and empty names are ignored.
 
 The event tables in `nib cal` and `nib today` show a `CALENDAR` column only when `cal.show_calendar = true`, `NIB_CAL_SHOW_CALENDAR=true`, or `--show-calendar` is given. The flag only turns the column on; run `nib config unset cal.show_calendar` or set it to `false` to turn it off. JSON event objects always include `calendar`.
 
 Inline task parsing is on by default. Set `task.parse_inline = false` or `NIB_TASK_PARSE_INLINE=false` to keep trailing tokens as part of reminder titles. Explicit `--due`, `--priority`, and `--list` flags still work. See [Quick-add reminders](quick-add.md) for the recognized tokens.
+
+Bindings live under `[tui.keys.browse]`, `[tui.keys.filter]`, and `[tui.keys.capture]`. They accept one action string or an array of actions. No command reads them yet; `nib doctor` validates them. See [Keymaps](keymap.md) for chord syntax, actions, defaults, and unbinding.
 
 ## Override a default
 

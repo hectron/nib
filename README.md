@@ -136,6 +136,7 @@ Nothing is saved while `NIB_DEMO=1` is set, including backups and undo history.
 
 - [Folders, lists, and calendars](docs/resources.md)
 - [Configuration](docs/configuration.md)
+- [Keymap configuration](docs/keymap.md)
 - [Quick-add reminders](docs/quick-add.md)
 - [One-step reminder changes](docs/task-commands.md)
 - [Picking reminders](docs/pick.md)
