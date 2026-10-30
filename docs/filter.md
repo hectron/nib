@@ -20,8 +20,10 @@ The expression is split into whitespace-separated tokens. Every token must match
 
 The engine also supports event rows, but `nib task list` currently supplies reminders only, so `cal:` and `is:event` do not match anything in this command.
 
-`due:week` includes overdue reminders, today, and the next seven days. Completed items are hidden unless the expression contains `is:done`.
+`due:week` includes overdue reminders, today, and the next seven days. `due:overdue` and `is:overdue` include timed reminders whose due time has passed today; date-only reminders become overdue after their due date.
 
-Text without a recognized field searches the title and list or calendar name, ignoring case. It matches either a contiguous substring or characters in order, so `rvw` matches `Review`. A colon does not make an unknown prefix an error: `http://example.com` is ordinary search text.
+Completed reminders appear only when the expression contains a positive, non-negated `is:done` token. A negated `!is:done` still uses the normal incomplete-reminder snapshot.
+
+Text without a recognized field searches the title and list or calendar name, ignoring case. Titles match either a contiguous substring or characters in order, so `rvw` matches `Review`; list and calendar names match contiguous substrings only. A colon does not make an unknown prefix an error: `http://example.com` is ordinary search text.
 
 Filters use AND only. There are no parentheses, OR expressions, regular expressions, ranking, or scoring.

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use jiff::Zoned;
 use jiff::civil::{Date, Time};
+use jiff::tz::TimeZone;
 use miette::Result;
 
 use crate::app::filter::{Filter, FilterKind, FilterRow};
@@ -142,28 +143,34 @@ fn filtered_tasks(
         .collect::<HashMap<_, _>>();
     let reminders = reminders
         .into_iter()
-        .filter(|reminder| {
-            filter.matches(
-                &FilterRow {
-                    kind: FilterKind::Reminder,
-                    title: &reminder.title,
-                    collection: list_names
-                        .get(reminder.list_id.as_str())
-                        .copied()
-                        .unwrap_or_default(),
-                    due: reminder.due,
-                    priority: reminder.priority,
-                    completed: reminder.completed,
-                },
-                now.date(),
-            )
+        .filter_map(|stored| {
+            let collection = list_names
+                .get(stored.list_id.as_str())
+                .copied()
+                .unwrap_or_default();
+            let completed = stored.completed;
+            let reminder = reminder_from_snapshot(stored, now.time_zone());
+            filter
+                .matches(
+                    &FilterRow {
+                        kind: FilterKind::Reminder,
+                        title: &reminder.title,
+                        collection,
+                        due: reminder.due,
+                        due_time: reminder.due_time,
+                        due_at: reminder.due_at,
+                        priority: reminder.priority,
+                        completed,
+                    },
+                    now,
+                )
+                .then_some(reminder)
         })
-        .map(reminder_from_snapshot)
         .collect::<Vec<_>>();
     output::list(&reminders, json, now, style)
 }
 
-fn reminder_from_snapshot(reminder: StoredReminder) -> Reminder {
+fn reminder_from_snapshot(reminder: StoredReminder, local_zone: &TimeZone) -> Reminder {
     let due_time = reminder.due_components.as_ref().and_then(stored_due_time);
     let due_time_zone = due_time.and_then(|_| {
         reminder
@@ -171,13 +178,23 @@ fn reminder_from_snapshot(reminder: StoredReminder) -> Reminder {
             .as_ref()
             .and_then(|parts| parts.time_zone.clone())
     });
+    let due_at = reminder.due.zip(due_time).and_then(|(date, time)| {
+        let zone = match due_time_zone.as_deref() {
+            Some(name) => TimeZone::get(name).ok()?,
+            None => local_zone.clone(),
+        };
+        date.to_datetime(time)
+            .to_zoned(zone)
+            .ok()
+            .map(|due| due.timestamp())
+    });
     Reminder {
         id: reminder.id,
         title: reminder.title,
         due: reminder.due,
         due_time,
         due_time_zone,
-        due_at: None,
+        due_at,
         priority: reminder.priority,
     }
 }
@@ -454,6 +471,10 @@ mod tests {
             })
         }
 
+        fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+            self.snapshot(None)
+        }
+
         fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
             Ok(vec![
                 ReminderListInfo {
@@ -653,6 +674,10 @@ mod tests {
             unreachable!()
         }
 
+        fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+            unreachable!()
+        }
+
         fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
             unreachable!()
         }
@@ -703,6 +728,36 @@ mod tests {
 
     fn now() -> Zoned {
         at(date(2026, 10, 26), 9, 30)
+    }
+
+    fn snapshot_reminder(id: &str, title: &str, completed: bool) -> StoredReminder {
+        StoredReminder {
+            id: id.into(),
+            list_id: "list-reminders".into(),
+            title: title.into(),
+            notes: None,
+            due: None,
+            due_components: None,
+            priority: None,
+            completed,
+            modified: None,
+            alarms_present: false,
+            absolute_alarms: Some(Vec::new()),
+            recurrence_present: false,
+            url: None,
+            backup_partial: false,
+        }
+    }
+
+    fn reminder_snapshot(reminder: StoredReminder) -> ReminderSnapshot {
+        ReminderSnapshot {
+            lists: vec![ReminderList {
+                id: "list-reminders".into(),
+                name: "Reminders".into(),
+                writable: true,
+            }],
+            reminders: vec![reminder],
+        }
     }
 
     fn nib(args: &[&str]) -> String {
@@ -1326,6 +1381,93 @@ mod tests {
     }
 
     #[test]
+    fn done_filter_selects_the_completed_snapshot_only_when_positive() {
+        struct DifferentSnapshots;
+
+        impl Reminders for DifferentSnapshots {
+            fn add(&self, _: NewReminder) -> Result<Reminder, BackendError> {
+                unreachable!()
+            }
+
+            fn list(&self) -> Result<Vec<Reminder>, BackendError> {
+                unreachable!()
+            }
+
+            fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+                Ok(reminder_snapshot(snapshot_reminder(
+                    "open",
+                    "Open reminder",
+                    false,
+                )))
+            }
+
+            fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+                Ok(reminder_snapshot(snapshot_reminder(
+                    "done",
+                    "Completed reminder",
+                    true,
+                )))
+            }
+
+            fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
+                unreachable!()
+            }
+        }
+
+        let backends = Backends::new(
+            || -> Box<dyn Notes> { unreachable!() },
+            || Box::new(DifferentSnapshots),
+            || -> Box<dyn Calendar> { unreachable!() },
+        );
+        let render = |expression| {
+            filtered_tasks(expression, false, &now(), &backends, Style::default()).unwrap()
+        };
+
+        assert_snapshot!(render("is:done"), @r"
+        TITLE               DUE  PRIORITY
+        Completed reminder
+        ");
+        assert_snapshot!(render("open"), @r"
+        TITLE          DUE  PRIORITY
+        Open reminder
+        ");
+        assert_snapshot!(render("!is:done"), @r"
+        TITLE          DUE  PRIORITY
+        Open reminder
+        ");
+    }
+
+    #[test]
+    fn filtered_snapshot_reconstructs_a_foreign_due_instant() {
+        let local_zone = TimeZone::fixed(offset(-5));
+        let mut stored = snapshot_reminder("tokyo", "Tokyo deadline", false);
+        stored.due = Some(date(2026, 10, 27));
+        stored.due_components = Some(ReminderDueComponents {
+            year: Some(2026),
+            month: Some(10),
+            day: Some(27),
+            hour: Some(9),
+            minute: Some(0),
+            time_zone: Some("Asia/Tokyo".into()),
+            ..ReminderDueComponents::default()
+        });
+
+        let reminder = reminder_from_snapshot(stored, &local_zone);
+        let expected = date(2026, 10, 27)
+            .at(9, 0, 0, 0)
+            .to_zoned(TimeZone::get("Asia/Tokyo").unwrap())
+            .unwrap()
+            .timestamp();
+        let now = date(2026, 10, 26)
+            .at(20, 0, 0, 0)
+            .to_zoned(local_zone)
+            .unwrap();
+
+        assert_eq!(reminder.due_at, Some(expected));
+        assert!(output::reminder_is_overdue(&reminder, &now));
+    }
+
+    #[test]
     fn reminder_lists() {
         assert_snapshot!(nib(&["task", "lists"]), @r"
         NAME       SOURCE        TYPE    WRITABLE  DEFAULT
@@ -1636,6 +1778,10 @@ mod tests {
             }
 
             fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+                unreachable!()
+            }
+
+            fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
                 unreachable!()
             }
 

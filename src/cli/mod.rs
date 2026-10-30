@@ -508,7 +508,7 @@ pub(crate) enum ActionError {
     NoteFoldersFilter,
     #[error("--week, --calendar, and --show-calendar can't be used with `nib cal calendars`")]
     CalendarResourceFilter,
-    #[error("--filter can only be used with `nib task list`")]
+    #[error("--filter can only be used with `nib task` or `nib task list`")]
     TaskFilter,
     #[error("--filter can't be specified both before and after `list`")]
     DuplicateTaskFilter,
@@ -1143,10 +1143,12 @@ mod tests {
             action_with_config(&now, &["note", "folders", "--folder", "Work"], &config),
             Err(ActionError::NoteFoldersFilter)
         ));
-        assert!(matches!(
-            action_with_config(&now, &["task", "--filter", "work", "lists"], &config),
-            Err(ActionError::TaskFilter)
-        ));
+        let error =
+            action_with_config(&now, &["task", "--filter", "work", "lists"], &config).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--filter can only be used with `nib task` or `nib task list`"
+        );
         assert!(matches!(
             action_with_config(
                 &now,

@@ -1,9 +1,10 @@
 use jiff::ToSpan;
 use jiff::civil::Date;
+use jiff::{Timestamp, Zoned};
 use miette::Diagnostic;
 use thiserror::Error;
 
-use crate::domain::Priority;
+use crate::domain::{Priority, reminder_due_is_overdue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterKind {
@@ -17,6 +18,8 @@ pub struct FilterRow<'a> {
     pub title: &'a str,
     pub collection: &'a str,
     pub due: Option<Date>,
+    pub due_time: Option<jiff::civil::Time>,
+    pub due_at: Option<Timestamp>,
     pub priority: Option<Priority>,
     pub completed: bool,
 }
@@ -98,13 +101,13 @@ impl Filter {
         })
     }
 
-    pub fn matches(&self, row: &FilterRow<'_>, today: Date) -> bool {
+    pub fn matches(&self, row: &FilterRow<'_>, now: &Zoned) -> bool {
         if row.completed && !self.include_completed {
             return false;
         }
         self.clauses
             .iter()
-            .all(|clause| clause.predicate.matches(row, today) != clause.negated)
+            .all(|clause| clause.predicate.matches(row, now) != clause.negated)
     }
 
     pub(crate) fn includes_completed(&self) -> bool {
@@ -113,10 +116,10 @@ impl Filter {
 }
 
 impl Predicate {
-    fn matches(&self, row: &FilterRow<'_>, today: Date) -> bool {
+    fn matches(&self, row: &FilterRow<'_>, now: &Zoned) -> bool {
         match self {
             Self::Text(value) => {
-                fuzzy_contains(row.title, value) || fuzzy_contains(row.collection, value)
+                fuzzy_contains(row.title, value) || contains_case_insensitive(row.collection, value)
             }
             Self::List(value) => {
                 row.kind == FilterKind::Reminder && contains_case_insensitive(row.collection, value)
@@ -124,18 +127,20 @@ impl Predicate {
             Self::Calendar(value) => {
                 row.kind == FilterKind::Event && contains_case_insensitive(row.collection, value)
             }
-            Self::Due(value) => value.matches(row.due, today),
+            Self::Due(value) => value.matches(row, now),
             Self::Priority(value) => row.priority == *value,
-            Self::Is(value) => value.matches(row, today),
+            Self::Is(value) => value.matches(row, now),
         }
     }
 }
 
 impl Due {
-    fn matches(self, due: Option<Date>, today: Date) -> bool {
+    fn matches(self, row: &FilterRow<'_>, now: &Zoned) -> bool {
+        let due = row.due;
+        let today = now.date();
         match self {
             Self::Today => due == Some(today),
-            Self::Overdue => due.is_some_and(|due| due < today),
+            Self::Overdue => reminder_due_is_overdue(due, row.due_time, row.due_at, now),
             Self::Week => due.is_some_and(|due| {
                 due < today || today.checked_add(7.days()).map_or(true, |end| due <= end)
             }),
@@ -146,9 +151,9 @@ impl Due {
 }
 
 impl Is {
-    fn matches(self, row: &FilterRow<'_>, today: Date) -> bool {
+    fn matches(self, row: &FilterRow<'_>, now: &Zoned) -> bool {
         match self {
-            Self::Overdue => row.due.is_some_and(|due| due < today),
+            Self::Overdue => reminder_due_is_overdue(row.due, row.due_time, row.due_at, now),
             Self::Done => row.completed,
             Self::Open => !row.completed,
             Self::Event => row.kind == FilterKind::Event,
@@ -186,9 +191,18 @@ fn parse_due(value: &str) -> Result<Due, FilterError> {
         "overdue" => Some(Due::Overdue),
         "week" => Some(Due::Week),
         "none" => Some(Due::None),
-        _ => value.parse().ok().map(Due::Exact),
+        _ if is_exact_date(value) => value.parse().ok().map(Due::Exact),
+        _ => None,
     };
     parsed.ok_or_else(|| invalid_value("due", value, "today, overdue, week, none, or YYYY-MM-DD"))
+}
+
+fn is_exact_date(value: &str) -> bool {
+    value.len() == 10
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            4 | 7 => byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
 }
 
 fn parse_priority(value: &str) -> Result<Option<Priority>, FilterError> {
@@ -238,7 +252,8 @@ fn fuzzy_contains(haystack: &str, needle: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use jiff::civil::date;
+    use jiff::civil::{date, time};
+    use jiff::tz::{TimeZone, offset};
 
     use super::*;
 
@@ -250,6 +265,8 @@ mod tests {
             title,
             collection: list,
             due: Some(TODAY),
+            due_time: None,
+            due_at: None,
             priority: Some(Priority::High),
             completed: false,
         }
@@ -261,13 +278,22 @@ mod tests {
             title,
             collection: calendar,
             due: Some(TODAY),
+            due_time: None,
+            due_at: None,
             priority: None,
             completed: false,
         }
     }
 
+    fn now() -> Zoned {
+        TODAY
+            .at(12, 0, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-5)))
+            .unwrap()
+    }
+
     fn matches(expression: &str, row: &FilterRow<'_>) -> bool {
-        Filter::parse(expression).unwrap().matches(row, TODAY)
+        Filter::parse(expression).unwrap().matches(row, &now())
     }
 
     #[test]
@@ -339,8 +365,13 @@ mod tests {
         let row = reminder("Review Pull Request", "Engineering Projects");
         assert!(matches("PULL", &row));
         assert!(matches("rvw", &row));
-        assert!(matches("engprj", &row));
+        assert!(matches("projects", &row));
+        assert!(!matches("engprj", &row));
         assert!(!matches("wvr", &row));
+
+        let reminders = reminder("Buy milk", "Reminders");
+        assert!(!matches("red", &reminders));
+        assert!(matches("!red", &reminders));
     }
 
     #[test]
@@ -361,6 +392,10 @@ mod tests {
             ("due:tomorrow", "today, overdue, week, none, or YYYY-MM-DD"),
             (
                 "due:2026-02-30",
+                "today, overdue, week, none, or YYYY-MM-DD",
+            ),
+            (
+                "due:2026-10-30T12:34",
                 "today, overdue, week, none, or YYYY-MM-DD",
             ),
             ("pri:urgent", "high, medium, low, or none"),
@@ -395,5 +430,17 @@ mod tests {
         assert!(!matches("!is:done", &row));
         assert!(matches("is:done filed", &row));
         assert!(!matches("is:done !filed", &row));
+    }
+
+    #[test]
+    fn timed_reminders_due_earlier_today_are_overdue() {
+        let mut timed = reminder("Morning task", "Work");
+        timed.due_time = Some(time(9, 0, 0, 0));
+        assert!(matches("due:overdue", &timed));
+        assert!(matches("is:overdue", &timed));
+
+        let date_only = reminder("All-day task", "Work");
+        assert!(!matches("due:overdue", &date_only));
+        assert!(!matches("is:overdue", &date_only));
     }
 }
