@@ -73,9 +73,24 @@ pub(crate) enum Effect {
 pub(crate) enum Scope {
     All,
     Today,
-    List(String),
+    List(ListScope),
     Events,
     View(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ListScope {
+    pub id: String,
+    pub name: String,
+}
+
+impl ListScope {
+    fn contains(&self, item: &Item) -> bool {
+        match &item.list_id {
+            Some(id) => *id == self.id,
+            None => item.list.as_deref() == Some(self.name.as_str()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +110,12 @@ pub(crate) enum Row<'a> {
 enum CapturePriority {
     Parsed,
     Set(Option<Priority>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    LoadCompleted,
+    Action,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,14 +211,14 @@ pub(crate) struct Board {
     selected: Vec<String>,
     targets: Vec<String>,
     menu_cursor: usize,
-    help_scroll: usize,
+    help_scroll: Cell<usize>,
     help_limit: Cell<usize>,
     items_offset: Cell<usize>,
     lists_offset: Cell<usize>,
     confirm_input: String,
     status: Option<Status>,
     quit: bool,
-    loading_completed: bool,
+    pending: Option<Pending>,
 }
 
 impl Board {
@@ -242,14 +263,14 @@ impl Board {
             selected: Vec::new(),
             targets: Vec::new(),
             menu_cursor: 0,
-            help_scroll: 0,
+            help_scroll: Cell::new(0),
             help_limit: Cell::new(usize::MAX),
             items_offset: Cell::new(0),
             lists_offset: Cell::new(0),
             confirm_input: String::new(),
             status,
             quit: false,
-            loading_completed: false,
+            pending: None,
         };
         let effect = board.refilter();
         (board, effect)
@@ -327,11 +348,12 @@ impl Board {
     }
 
     pub(crate) fn help_scroll(&self) -> usize {
-        self.help_scroll
+        self.help_scroll.get()
     }
 
     pub(crate) fn set_help_limit(&self, limit: usize) {
         self.help_limit.set(limit);
+        self.help_scroll.set(self.help_scroll.get().min(limit));
     }
 
     pub(crate) fn items_offset(&self) -> usize {
@@ -376,7 +398,7 @@ impl Board {
 
     pub(crate) fn scopes(&self) -> Vec<Scope> {
         let mut scopes = vec![Scope::All, Scope::Today];
-        scopes.extend(self.list_names().into_iter().map(Scope::List));
+        scopes.extend(self.list_scopes().into_iter().map(Scope::List));
         if !self.events.is_empty() {
             scopes.push(Scope::Events);
         }
@@ -388,7 +410,7 @@ impl Board {
         match scope {
             Scope::All => "All".into(),
             Scope::Today => "Today".into(),
-            Scope::List(name) => name.clone(),
+            Scope::List(list) => list.name.clone(),
             Scope::Events => "Events".into(),
             Scope::View(index) => self.views[*index].name.clone(),
         }
@@ -405,21 +427,29 @@ impl Board {
         self.matching(&filter, scope).len()
     }
 
-    fn list_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
+    fn list_scopes(&self) -> Vec<ListScope> {
+        let mut lists: Vec<ListScope> = self
             .data
             .lists
             .iter()
-            .map(|list| list.name.clone())
+            .map(|list| ListScope {
+                id: list.id.clone(),
+                name: list.name.clone(),
+            })
             .collect();
         for item in &self.data.items {
-            if let Some(list) = &item.list
-                && !names.contains(list)
-            {
-                names.push(list.clone());
+            let Some(name) = &item.list else {
+                continue;
+            };
+            if lists.iter().any(|list| list.contains(item)) {
+                continue;
             }
+            lists.push(ListScope {
+                id: item.list_id.clone().unwrap_or_else(|| name.clone()),
+                name: name.clone(),
+            });
         }
-        names
+        lists
     }
 
     fn scope_expression(&self, scope: &Scope) -> &str {
@@ -517,7 +547,7 @@ impl Board {
     fn matching(&self, filter: &Filter, scope: &Scope) -> Vec<RowIndex> {
         let now = &self.now;
         let list = match scope {
-            Scope::List(name) => Some(name.as_str()),
+            Scope::List(list) => Some(list),
             _ => None,
         };
         let reminders = self
@@ -525,7 +555,7 @@ impl Board {
             .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| list.is_none_or(|list| item.list.as_deref() == Some(list)))
+            .filter(|(_, item)| list.is_none_or(|list| list.contains(item)))
             .filter(|(_, item)| filter.matches(&reminder_row(item), now))
             .map(|(index, _)| RowIndex::Reminder(index));
         let events = self
@@ -555,9 +585,9 @@ impl Board {
         self.cursor = self.cursor.min(self.row_count().saturating_sub(1));
         if self.filter.includes_completed()
             && !self.data.includes_completed
-            && !self.loading_completed
+            && self.pending != Some(Pending::LoadCompleted)
         {
-            self.loading_completed = true;
+            self.pending = Some(Pending::LoadCompleted);
             Some(Effect::Session(SessionEffect::LoadCompleted))
         } else {
             None
@@ -626,7 +656,7 @@ impl Board {
                 return None;
             }
             Action::Help => {
-                self.help_scroll = 0;
+                self.help_scroll.set(0);
                 self.overlay = Some(Overlay::Help);
                 return None;
             }
@@ -851,10 +881,7 @@ impl Board {
         if !self.take_targets() {
             return None;
         }
-        Some(Effect::Session(SessionEffect::Change {
-            change,
-            ids: self.targets.clone(),
-        }))
+        Some(self.retarget(change))
     }
 
     fn take_targets(&mut self) -> bool {
@@ -919,10 +946,12 @@ impl Board {
         match overlay {
             Overlay::Help => {
                 match key {
-                    MenuKey::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
-                    MenuKey::Down => {
-                        self.help_scroll = (self.help_scroll + 1).min(self.help_limit.get());
-                    }
+                    MenuKey::Up => self
+                        .help_scroll
+                        .set(self.help_scroll.get().saturating_sub(1)),
+                    MenuKey::Down => self
+                        .help_scroll
+                        .set((self.help_scroll.get() + 1).min(self.help_limit.get())),
                     _ => self.overlay = None,
                 }
                 None
@@ -987,7 +1016,7 @@ impl Board {
                     ConfirmStep::Stay => None,
                     ConfirmStep::Delete { partial_confirmed } => {
                         self.overlay = None;
-                        Some(Effect::Session(SessionEffect::Delete {
+                        Some(self.acting(SessionEffect::Delete {
                             ids: self.targets.clone(),
                             partial_confirmed,
                         }))
@@ -1004,11 +1033,16 @@ impl Board {
         }
     }
 
-    fn retarget(&self, change: TaskChange) -> Effect {
-        Effect::Session(SessionEffect::Change {
+    fn retarget(&mut self, change: TaskChange) -> Effect {
+        self.acting(SessionEffect::Change {
             change,
             ids: self.targets.clone(),
         })
+    }
+
+    fn acting(&mut self, effect: SessionEffect) -> Effect {
+        self.pending = Some(Pending::Action);
+        Effect::Session(effect)
     }
 
     fn menu_choice(
@@ -1037,13 +1071,22 @@ impl Board {
     }
 
     pub(crate) fn resolve(&mut self, response: Response) -> Option<Effect> {
+        let pending = self.pending.take();
         match response {
             Response::Loaded(data) => {
-                self.loading_completed = false;
                 self.replace_data(data);
                 self.refilter()
             }
-            Response::Added(item) => {
+            Response::Added(mut item) => {
+                if item.list_id.is_none()
+                    && let Some(list) = self.data.lists.iter().find(|list| {
+                        item.list.as_deref() == Some(list.name.as_str())
+                            || item.list.as_deref() == Some(list.id.as_str())
+                    })
+                {
+                    item.list = Some(list.name.clone());
+                    item.list_id = Some(list.id.clone());
+                }
                 let title = item.title.clone();
                 let id = item.id.clone();
                 self.data.items.push(item);
@@ -1080,8 +1123,16 @@ impl Board {
                 data,
             } => {
                 self.overlay = None;
+                let Some(data) = data else {
+                    let message = if self.selected.is_empty() {
+                        message
+                    } else {
+                        format!("{message} The selection may be out of date.")
+                    };
+                    self.set_status(&message, error);
+                    return None;
+                };
                 self.set_status(&message, error);
-                let data = data?;
                 if !error {
                     self.selected.clear();
                     self.targets.clear();
@@ -1102,16 +1153,15 @@ impl Board {
                         item.backup_partial = true;
                     }
                 }
-                self.overlay = Some(Overlay::ConfirmDelete);
+                self.overlay = (!self.targets.is_empty()).then_some(Overlay::ConfirmDelete);
                 self.confirm_input.clear();
                 self.set_status(&message, true);
                 self.refilter()
             }
             Response::Failed(message) => {
-                self.loading_completed = false;
                 self.overlay = None;
                 self.set_status(&message, true);
-                None
+                (pending == Some(Pending::Action)).then_some(Effect::Session(SessionEffect::Reload))
             }
         }
     }
@@ -1119,10 +1169,25 @@ impl Board {
     fn replace_data(&mut self, data: Data) {
         let index = self.scope_cursor();
         self.data = data;
+        let items = &self.data.items;
+        let loaded = |id: &String| items.iter().any(|item| item.id == *id);
+        self.selected.retain(loaded);
+        self.targets.retain(loaded);
         let mut scopes = self.scopes();
-        if !scopes.contains(&self.scope) {
-            self.scope = scopes.swap_remove(index.min(scopes.len() - 1));
+        if scopes.contains(&self.scope) {
+            return;
         }
+        let same_name = match &self.scope {
+            Scope::List(list) => scopes
+                .iter()
+                .enumerate()
+                .filter(|(_, scope)| matches!(scope, Scope::List(other) if other.name == list.name))
+                .min_by_key(|(position, _)| position.abs_diff(index))
+                .map(|(position, _)| position),
+            _ => None,
+        };
+        let next = same_name.unwrap_or_else(|| index.min(scopes.len() - 1));
+        self.scope = scopes.swap_remove(next);
     }
 
     fn set_status(&mut self, text: &str, error: bool) {
@@ -1267,6 +1332,13 @@ pub(crate) mod tests {
             .collect()
     }
 
+    fn list_scope(name: &str) -> Scope {
+        Scope::List(ListScope {
+            id: format!("list-{}", name.to_lowercase()),
+            name: name.into(),
+        })
+    }
+
     fn change(change: TaskChange, ids: &[&str]) -> Effect {
         Effect::Session(SessionEffect::Change {
             change,
@@ -1330,7 +1402,7 @@ pub(crate) mod tests {
         act(&mut board, Action::Down);
         assert_eq!(ids(&board), ["rem-1", "event-1"]);
         act(&mut board, Action::Down);
-        assert_eq!(board.current_scope(), Scope::List("Home".into()));
+        assert_eq!(board.current_scope(), list_scope("Home"));
         assert_eq!(ids(&board), ["rem-1"]);
         act(&mut board, Action::Down);
         act(&mut board, Action::Down);
@@ -1503,13 +1575,18 @@ pub(crate) mod tests {
         act(&mut board, Action::PrevPane);
         act(&mut board, Action::Down);
         act(&mut board, Action::Down);
-        assert_eq!(board.current_scope(), Scope::List("Home".into()));
+        assert_eq!(board.current_scope(), list_scope("Home"));
         act(&mut board, Action::Capture);
         type_text(&mut board, "Water plants");
         captured(&mut board);
-        let added = item("rem-9", "Water plants", "Home", None, None);
+        let mut added = item("rem-9", "Water plants", "Home", None, None);
+        added.list_id = None;
         assert_eq!(board.resolve(Response::Added(added)), None);
         assert_eq!(ids(&board), ["rem-1", "rem-9"]);
+        assert_eq!(
+            board.item("rem-9").and_then(|item| item.list_id.as_deref()),
+            Some("list-home")
+        );
         assert_eq!(
             board.status().map(|status| status.text.as_str()),
             Some("Added \"Water plants\"")
@@ -1517,7 +1594,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_failed_change_keeps_the_selection() {
+    fn a_failed_change_keeps_the_selection_that_still_exists() {
         let mut board = board();
         act(&mut board, Action::SelectAll);
         act(&mut board, Action::Done);
@@ -1528,19 +1605,109 @@ pub(crate) mod tests {
         });
         assert_eq!(board.selected(), ["rem-1", "rem-2", "rem-3"]);
         assert_eq!(board.targets(), ["rem-1", "rem-2", "rem-3"]);
+
+        let mut applied = data();
+        applied.items.remove(0);
         board.resolve(Response::Changed {
-            message: "Couldn't reload reminders".into(),
-            error: false,
-            data: None,
+            message: "Completed \"Buy oat milk\". Couldn't write the journal.".into(),
+            error: true,
+            data: Some(applied),
         });
-        assert_eq!(board.selected(), ["rem-1", "rem-2", "rem-3"]);
+        assert_eq!(board.selected(), ["rem-2", "rem-3"]);
+        assert_eq!(board.targets(), ["rem-2", "rem-3"]);
+
         board.resolve(Response::Changed {
-            message: "Applied 3 changes.".into(),
+            message: "Applied 2 changes.".into(),
             error: false,
             data: Some(data()),
         });
         assert_eq!(board.selected(), Vec::<String>::new());
         assert_eq!(board.targets(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_selection_and_says_it_may_be_stale() {
+        let mut board = board();
+        act(&mut board, Action::SelectAll);
+        act(&mut board, Action::Done);
+        board.resolve(Response::Changed {
+            message: "Completed 3 reminders. Couldn't reload reminders.".into(),
+            error: true,
+            data: None,
+        });
+        assert_eq!(board.selected(), ["rem-1", "rem-2", "rem-3"]);
+        assert_eq!(
+            board.status(),
+            Some(&Status {
+                text: "Completed 3 reminders. Couldn't reload reminders. The selection may be out of date.".into(),
+                error: true,
+            })
+        );
+
+        assert_eq!(
+            act(&mut board, Action::Done),
+            Some(change(TaskChange::Complete, &["rem-1", "rem-2", "rem-3"]))
+        );
+        assert_eq!(
+            board.resolve(Response::Failed(
+                "\"Buy oat milk\" is already completed".into()
+            )),
+            Some(Effect::Session(SessionEffect::Reload))
+        );
+        let mut reloaded = data();
+        reloaded.items.clear();
+        assert_eq!(board.resolve(Response::Loaded(reloaded)), None);
+        assert_eq!(board.selected(), Vec::<String>::new());
+        assert_eq!(board.targets(), Vec::<String>::new());
+        assert_eq!(
+            board.status().map(|status| status.text.as_str()),
+            Some("\"Buy oat milk\" is already completed")
+        );
+        assert_eq!(
+            board.resolve(Response::Failed("still failing".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn same_named_lists_are_separate_scopes() {
+        let mut twins = data();
+        twins.lists.push(ListChoice {
+            id: "list-work-2".into(),
+            name: "Work".into(),
+        });
+        let mut other = item("rem-4", "Expense lunch", "Work", None, None);
+        other.list_id = Some("list-work-2".into());
+        twins.items.push(other);
+        let mut config = Config::default();
+        config.tui.views.insert("Soon".into(), "due:week".into());
+        let mut board = board_with(twins.clone(), config);
+        assert_eq!(
+            scope_names(&board),
+            ["All", "Today", "Home", "Work", "Work", "Events", "Soon"]
+        );
+        act(&mut board, Action::PrevPane);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        assert_eq!(board.scope_cursor(), 3);
+        assert_eq!(ids(&board), ["rem-2", "rem-3"]);
+        act(&mut board, Action::Down);
+        assert_eq!(board.scope_cursor(), 4);
+        assert_eq!(ids(&board), ["rem-4"]);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        assert_eq!(board.current_scope(), Scope::View(0));
+        act(&mut board, Action::Up);
+        act(&mut board, Action::Up);
+        assert_eq!(board.scope_cursor(), 4);
+
+        let mut moved = twins;
+        moved.lists[2].id = "list-work-3".into();
+        moved.items[3].list_id = Some("list-work-3".into());
+        board.resolve(Response::Loaded(moved));
+        assert_eq!(board.scope_cursor(), 4);
+        assert_eq!(ids(&board), ["rem-4"]);
     }
 
     #[test]
@@ -1563,19 +1730,19 @@ pub(crate) mod tests {
         act(&mut board, Action::Down);
         act(&mut board, Action::Down);
         act(&mut board, Action::Down);
-        assert_eq!(board.current_scope(), Scope::List("Work".into()));
+        assert_eq!(board.current_scope(), list_scope("Work"));
         let mut fewer = data();
         fewer.lists.remove(0);
         fewer.items.remove(0);
         board.resolve(Response::Loaded(fewer));
-        assert_eq!(board.current_scope(), Scope::List("Work".into()));
+        assert_eq!(board.current_scope(), list_scope("Work"));
         assert_eq!(ids(&board), ["rem-2", "rem-3"]);
 
         let mut gone = data();
         gone.lists.remove(1);
         gone.items.truncate(1);
         board.resolve(Response::Loaded(gone));
-        assert_eq!(board.current_scope(), Scope::List("Home".into()));
+        assert_eq!(board.current_scope(), list_scope("Home"));
     }
 
     #[test]

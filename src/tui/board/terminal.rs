@@ -1,8 +1,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::panic::{self, PanicHookInfo};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
@@ -18,6 +19,8 @@ use crate::tui::state::Response;
 use crate::tui::terminal::TtyBackend;
 
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+static PANIC_HOOK: Mutex<()> = Mutex::new(());
 
 pub(super) fn run(board: &mut Board, session: &mut Session<'_>, color: bool) -> io::Result<()> {
     let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
@@ -125,36 +128,53 @@ fn all_steps<const N: usize>(steps: [&mut dyn FnMut() -> io::Result<()>; N]) -> 
 }
 
 struct RestoreOnPanic {
-    previous: Arc<PanicHook>,
+    tty: Arc<Mutex<Option<File>>>,
+    previous: Option<Arc<PanicHook>>,
+    _installed: MutexGuard<'static, ()>,
 }
 
 impl RestoreOnPanic {
     fn install(tty: File, active: Arc<AtomicBool>) -> Self {
+        let installed = PANIC_HOOK.lock().unwrap_or_else(PoisonError::into_inner);
+        let tty = Arc::new(Mutex::new(Some(tty)));
         let previous: Arc<PanicHook> = Arc::new(panic::take_hook());
-        let chained = Arc::clone(&previous);
+        let owner = thread::current().id();
+        let (hook_tty, chained) = (Arc::clone(&tty), Arc::clone(&previous));
         panic::set_hook(Box::new(move |info| {
-            let _ = restore(&tty, &active);
+            if thread::current().id() == owner
+                && let Some(tty) = lock(&hook_tty).as_ref()
+            {
+                let _ = restore(tty, &active);
+            }
             chained(info);
         }));
-        Self { previous }
+        Self {
+            tty,
+            previous: Some(previous),
+            _installed: installed,
+        }
     }
 }
 
 impl Drop for RestoreOnPanic {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        drop(lock(&self.tty).take());
+        if thread::panicking() {
             return;
         }
         drop(panic::take_hook());
-        let previous = std::mem::replace(
-            &mut self.previous,
-            Arc::new(Box::new(|_: &PanicHookInfo<'_>| {})),
-        );
+        let Some(previous) = self.previous.take() else {
+            return;
+        };
         match Arc::try_unwrap(previous) {
             Ok(previous) => panic::set_hook(previous),
             Err(previous) => panic::set_hook(Box::new(move |info| previous(info))),
         }
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -213,6 +233,106 @@ mod tests {
                 change: TaskChange::Complete,
                 ids: vec!["rem-1".into()],
             })]
+        );
+    }
+
+    static HOOK_TESTS: Mutex<()> = Mutex::new(());
+    const MARKER: &str = "board hook test:";
+
+    fn message(info: &PanicHookInfo<'_>) -> String {
+        let payload = info.payload();
+        payload
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default()
+    }
+
+    fn with_recording_hook(body: impl FnOnce()) -> Vec<String> {
+        let _serial = lock(&HOOK_TESTS);
+        let original: Arc<PanicHook> = Arc::new(panic::take_hook());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (chained, record) = (Arc::clone(&original), Arc::clone(&seen));
+        panic::set_hook(Box::new(move |info| {
+            let text = message(info);
+            if text.starts_with(MARKER) {
+                lock(&record).push(text);
+            } else {
+                chained(info);
+            }
+        }));
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(body));
+        drop(panic::take_hook());
+        match Arc::try_unwrap(original) {
+            Ok(original) => panic::set_hook(original),
+            Err(original) => panic::set_hook(Box::new(move |info| original(info))),
+        }
+        if let Err(payload) = result {
+            panic::resume_unwind(payload);
+        }
+        lock(&seen).clone()
+    }
+
+    fn tty() -> File {
+        OpenOptions::new().write(true).open("/dev/null").unwrap()
+    }
+
+    fn panic_here(name: &str) {
+        let caught = panic::catch_unwind(|| panic!("{MARKER} {name}"));
+        assert!(caught.is_err());
+    }
+
+    #[test]
+    fn the_panic_hook_restores_only_for_the_owner_thread_and_is_removed_on_drop() {
+        let seen = with_recording_hook(|| {
+            let active = Arc::new(AtomicBool::new(true));
+            let hook = RestoreOnPanic::install(tty(), Arc::clone(&active));
+            let joined = thread::spawn(|| panic!("{MARKER} other thread")).join();
+            assert!(joined.is_err());
+            assert!(active.load(Ordering::SeqCst));
+            panic_here("owner");
+            assert!(!active.load(Ordering::SeqCst));
+            drop(hook);
+            active.store(true, Ordering::SeqCst);
+            panic_here("after drop");
+            assert!(active.load(Ordering::SeqCst));
+        });
+        assert_eq!(
+            seen,
+            [
+                format!("{MARKER} other thread"),
+                format!("{MARKER} owner"),
+                format!("{MARKER} after drop"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hook_dropped_while_unwinding_stops_restoring_and_frees_the_slot() {
+        let seen = with_recording_hook(|| {
+            let active = Arc::new(AtomicBool::new(true));
+            let unwound = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                let _hook = RestoreOnPanic::install(tty(), Arc::clone(&active));
+                panic!("{MARKER} while running");
+            }));
+            assert!(unwound.is_err());
+            assert!(!active.load(Ordering::SeqCst));
+            active.store(true, Ordering::SeqCst);
+            panic_here("after unwinding");
+            assert!(active.load(Ordering::SeqCst));
+            let second = Arc::new(AtomicBool::new(true));
+            let hook = RestoreOnPanic::install(tty(), Arc::clone(&second));
+            panic_here("second board");
+            assert!(!second.load(Ordering::SeqCst));
+            drop(hook);
+        });
+        assert_eq!(
+            seen,
+            [
+                format!("{MARKER} while running"),
+                format!("{MARKER} after unwinding"),
+                format!("{MARKER} second board"),
+            ]
         );
     }
 

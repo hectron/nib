@@ -32,6 +32,7 @@ impl Session<'_> {
     pub(crate) fn perform(&mut self, effect: Effect, includes_completed: bool) -> Response {
         let result = match effect {
             Effect::LoadCompleted => self.load(true).map(Response::Loaded),
+            Effect::Reload => self.load(includes_completed).map(Response::Loaded),
             Effect::Add(text) => crate::cli::quick_add(&text, self.now, self.config)
                 .map_err(|error| miette::miette!("{error}"))
                 .and_then(|new| self.add(new)),
@@ -155,18 +156,23 @@ impl Session<'_> {
     fn add(&mut self, new: NewReminder) -> Result<Response> {
         let list = new.list.clone();
         let added = self.backends.reminders.add(new)?;
-        let list = list.or_else(|| self.default_list());
-        Ok(Response::Added(added_item(added, list)))
+        let (list, list_id) = match list {
+            Some(list) => (Some(list), None),
+            None => self
+                .default_list()
+                .map_or((None, None), |(id, name)| (Some(name), Some(id))),
+        };
+        Ok(Response::Added(added_item(added, list, list_id)))
     }
 
-    fn default_list(&self) -> Option<String> {
+    fn default_list(&self) -> Option<(String, String)> {
         self.backends
             .reminders
             .lists()
             .ok()?
             .into_iter()
             .find(|list| list.default)
-            .map(|list| list.name)
+            .map(|list| (list.id, list.name))
     }
 }
 
@@ -187,11 +193,13 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
                 repeats: stored.recurrence_present,
             };
             let backup_partial = stored.backup_partial;
+            let list_id = stored.list_id.clone();
             let reminder = reminder_from_snapshot(stored, now.time_zone());
             Item {
                 id: reminder.id,
                 title: reminder.title,
                 list: Some(list),
+                list_id: Some(list_id),
                 notes,
                 url,
                 due: reminder.due,
@@ -219,11 +227,12 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
     }
 }
 
-fn added_item(reminder: Reminder, list: Option<String>) -> Item {
+fn added_item(reminder: Reminder, list: Option<String>, list_id: Option<String>) -> Item {
     Item {
         id: reminder.id,
         title: reminder.title,
         list,
+        list_id,
         notes: None,
         url: None,
         due: reminder.due,
@@ -380,6 +389,7 @@ mod tests {
             panic!("expected an added reminder, got {response:?}");
         };
         assert_eq!(item.list.as_deref(), Some("Reminders"));
+        assert_eq!(item.list_id.as_deref(), Some("demo-list"));
     }
 
     #[test]
@@ -787,6 +797,11 @@ mod tests {
             Response::Failed("\"Call the dentist\" is already completed".into())
         );
         assert_eq!(host.journals, Vec::<(String, String)>::new());
+        let reloaded = run(&mut host, |session| session.perform(Effect::Reload, false));
+        assert!(
+            matches!(&reloaded, Response::Loaded(data) if !data.includes_completed && !data.items.is_empty()),
+            "{reloaded:?}"
+        );
     }
 
     #[test]

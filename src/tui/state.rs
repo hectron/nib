@@ -9,6 +9,7 @@ pub(crate) struct Item {
     pub id: String,
     pub title: String,
     pub list: Option<String>,
+    pub list_id: Option<String>,
     pub notes: Option<String>,
     pub url: Option<String>,
     pub due: Option<Date>,
@@ -75,6 +76,7 @@ pub(crate) enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Effect {
     LoadCompleted,
+    Reload,
     Add(String),
     AddParsed(NewReminder),
     Change {
@@ -778,6 +780,7 @@ pub(crate) mod tests {
             id: id.into(),
             title: title.into(),
             list: Some(list.into()),
+            list_id: Some(format!("list-{}", list.to_lowercase())),
             notes: None,
             url: None,
             due,

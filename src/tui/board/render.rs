@@ -299,11 +299,15 @@ fn draw_lists(frame: &mut Frame<'_>, area: Rect, board: &Board, theme: Theme) {
             Cell::from(Line::styled(count, MUTED).right_aligned()),
         ]));
     }
+    let offset = board.lists_offset().min(
+        rows.len()
+            .saturating_sub(usize::from(block.inner(area).height)),
+    );
     let table = Table::new(rows, [Constraint::Min(1), Constraint::Length(4)])
         .block(block)
         .row_highlight_style(if focused { HIGHLIGHT } else { STRONG });
     let mut state = TableState::new()
-        .with_offset(board.lists_offset())
+        .with_offset(offset)
         .with_selected(Some(selected));
     frame.render_stateful_widget(table, area, &mut state);
     board.set_lists_offset(state.offset());
@@ -351,6 +355,11 @@ fn draw_items(frame: &mut Frame<'_>, area: Rect, board: &Board, theme: Theme) {
             TableRow::new(cells.map(Cell::from))
         })
         .collect();
+    let offset = board.items_offset().min(
+        table_rows
+            .len()
+            .saturating_sub(usize::from(block.inner(area).height)),
+    );
     let capped = |value: usize, cap: u16| width(value).min(cap);
     let table = Table::new(
         table_rows,
@@ -371,7 +380,7 @@ fn draw_items(frame: &mut Frame<'_>, area: Rect, board: &Board, theme: Theme) {
         STRONG
     });
     let mut state = TableState::new()
-        .with_offset(board.items_offset())
+        .with_offset(offset)
         .with_selected(Some(board.cursor()));
     frame.render_stateful_widget(table, area, &mut state);
     board.set_items_offset(state.offset());
@@ -896,6 +905,49 @@ mod tests {
         let screen = terminal.backend().to_string();
         assert!(screen.contains("Standup"), "{screen}");
         assert!(screen.contains("Lunch with Sam"), "{screen}");
+    }
+
+    #[test]
+    fn a_shrinking_row_set_fills_the_pane_again() {
+        let mut many = data();
+        for number in 4..=10 {
+            many.items.push(crate::tui::state::tests::item(
+                &format!("rem-{number}"),
+                &format!("Chore {number}"),
+                "Home",
+                None,
+                None,
+            ));
+        }
+        let mut board = board_with(many, Config::default());
+        let mut terminal = Terminal::new(TestBackend::new(50, 10)).unwrap();
+        act(&mut board, Action::Bottom);
+        terminal.draw(|frame| draw(frame, &board, false)).unwrap();
+        assert_eq!(board.items_offset(), 8);
+        board.resolve(crate::tui::state::Response::Loaded(data()));
+        terminal.draw(|frame| draw(frame, &board, false)).unwrap();
+        let screen = terminal.backend().to_string();
+        for title in ["Buy eggs", "File report", "Standup", "Lunch with Sam"] {
+            assert!(screen.contains(title), "{title} missing from\n{screen}");
+        }
+        assert_eq!(board.items_offset(), 1);
+    }
+
+    #[test]
+    fn growing_the_terminal_clamps_the_help_scroll() {
+        let mut board = board();
+        act(&mut board, Action::Help);
+        screen(&board, 90, 10);
+        for _ in 0..40 {
+            board.update(Input::Menu(MenuKey::Down));
+        }
+        let short = board.help_scroll();
+        assert!(short > 0);
+        screen(&board, 90, 60);
+        assert_eq!(board.help_scroll(), 0);
+        screen(&board, 90, 14);
+        board.update(Input::Menu(MenuKey::Down));
+        assert_eq!(board.help_scroll(), 1);
     }
 
     #[test]

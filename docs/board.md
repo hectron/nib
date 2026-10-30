@@ -51,7 +51,7 @@ Pasted text is typed into the filter or capture line, and ignored in BROWSE.
 | `ctrl-l` | Clear the filter |
 | `q`, `esc`, `ctrl-c` | Quit |
 
-Actions apply to the selected reminders, or to the highlighted one when nothing is selected. Selections are kept while you change lists or the filter.
+Actions apply to the selected reminders, or to the highlighted one when nothing is selected. Selections are kept while you change lists or the filter. After each reload, reminders that are no longer loaded drop out of the selection. If an action fails, the board reloads the reminders. If a reload fails, the selection is kept and the third line says it may be out of date.
 
 ### FILTER
 
@@ -67,7 +67,7 @@ Actions apply to the selected reminders, or to the highlighted one when nothing 
 | `up` / `down`, `ctrl-p` / `ctrl-n` | Move the highlight |
 | `left` / `right` | Switch between the lists and items panes |
 | `tab`, `shift-tab` | Select the highlighted reminder, and with `shift-tab` move up |
-| `alt-a` | Select every visible reminder |
+| `alt-a` | Select every visible reminder, or unselect them when all are selected |
 | `ctrl-o` | Open the action menu |
 | `ctrl-space` | Hide or show the details pane |
 | `ctrl-q` | Quit |
