@@ -117,14 +117,18 @@ pub fn run_config(
             warning = inspection
                 .origin(key)
                 .and_then(|origin| override_warning(key, origin, target, &path, current_dir));
-            let edit = infra::config::set(&path, key, &value, config_lock_directory)?;
+            let lock_directory =
+                config_lock_directory.ok_or(infra::config::ConfigCommandError::MissingHome)?;
+            let edit = infra::config::set(&path, key, &value, lock_directory)?;
             append_warning(&mut warning, edit.warning);
             cli::output::config_set(key.as_str(), &edit.value, &path, json, style)?
         }
         cli::ConfigAction::Unset { key, target } => {
             let key = infra::config::key(&key)?;
             let path = config_target(current_dir, user_config, target)?;
-            let edit = infra::config::unset(&path, key, config_lock_directory)?;
+            let lock_directory =
+                config_lock_directory.ok_or(infra::config::ConfigCommandError::MissingHome)?;
+            let edit = infra::config::unset(&path, key, lock_directory)?;
             append_warning(&mut warning, edit.warning);
             cli::output::config_unset(key.as_str(), &path, edit.value, json, style)?
         }

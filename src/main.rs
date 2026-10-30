@@ -86,18 +86,18 @@ fn user_config_path() -> Option<std::path::PathBuf> {
         .map(|root| root.join("nib/config.toml"))
 }
 
-fn cache_directory() -> Option<std::path::PathBuf> {
+fn home_directory() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
-        .map(|home| home.join("Library/Caches/nib"))
+}
+
+fn cache_directory() -> Option<std::path::PathBuf> {
+    home_directory().map(|home| home.join("Library/Caches/nib"))
 }
 
 fn config_lock_directory() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|path| !path.is_empty())
-        .map(std::path::PathBuf::from)
-        .map(|home| home.join("Library/Application Support/nib/backups"))
+    home_directory().map(|home| home.join("Library/Application Support/nib/backups"))
 }
 
 fn local_zone() -> TimeZone {

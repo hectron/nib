@@ -332,11 +332,8 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     })
 }
 
-pub(crate) fn config_lock(path: &Path, dir: Option<&Path>) -> Result<ConfigLock, ConfigLockError> {
+pub(crate) fn config_lock(path: &Path, dir: &Path) -> Result<ConfigLock, ConfigLockError> {
     let target = config_lock_target(path)?;
-    let dir = dir
-        .or_else(|| target.parent())
-        .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).map_err(|source| ConfigLockError::Lock {
         path: dir.to_owned(),
         source,
@@ -1336,15 +1333,15 @@ mod tests {
         let config = dir.0.join("config.toml");
         std::fs::write(&config, "").unwrap();
 
-        let first = config_lock(&config, Some(&locks)).unwrap();
-        let error = config_lock(&config, Some(&locks)).err().unwrap();
+        let first = config_lock(&config, &locks).unwrap();
+        let error = config_lock(&config, &locks).err().unwrap();
         assert!(
             matches!(&error, ConfigLockError::Held { path } if *path == std::fs::canonicalize(&config).unwrap()),
             "{error:?}"
         );
 
         drop(first);
-        let _second = config_lock(&config, Some(&locks)).unwrap();
+        let _second = config_lock(&config, &locks).unwrap();
     }
 
     #[test]
@@ -1357,10 +1354,10 @@ mod tests {
             .join(config_lock_name(&std::fs::canonicalize(&config).unwrap()));
         std::fs::write(&lock_file, "").unwrap();
 
-        drop(config_lock(&config, Some(&dir.0)).unwrap());
+        drop(config_lock(&config, &dir.0).unwrap());
 
         assert!(lock_file.exists());
-        let _again = config_lock(&config, Some(&dir.0)).unwrap();
+        let _again = config_lock(&config, &dir.0).unwrap();
     }
 
     #[test]

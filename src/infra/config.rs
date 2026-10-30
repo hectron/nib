@@ -134,6 +134,10 @@ pub enum ConfigCommandError {
         source: std::io::Error,
     },
 
+    #[error("HOME isn't set, so nib can't lock the configuration")]
+    #[diagnostic(code(nib::config::lock))]
+    MissingHome,
+
     #[error("couldn't lock configuration with {}", path.display())]
     #[diagnostic(code(nib::config::lock))]
     Lock {
@@ -585,7 +589,7 @@ pub(crate) fn set(
     path: &Path,
     key: ConfigKey,
     input: &str,
-    lock_dir: Option<&Path>,
+    lock_dir: &Path,
 ) -> Result<ConfigEdit<ConfigValue>, ConfigCommandError> {
     let (config_value, mut edit_value) = edit_value(key, input)?;
     create_config_directory(path)?;
@@ -617,7 +621,7 @@ pub(crate) fn set(
 pub(crate) fn unset(
     path: &Path,
     key: ConfigKey,
-    lock_dir: Option<&Path>,
+    lock_dir: &Path,
 ) -> Result<ConfigEdit<bool>, ConfigCommandError> {
     match fs::symlink_metadata(path) {
         Ok(_) => {}
@@ -761,7 +765,7 @@ fn create_config_directory(path: &Path) -> Result<(), ConfigCommandError> {
 
 fn config_lock(
     path: &Path,
-    lock_dir: Option<&Path>,
+    lock_dir: &Path,
 ) -> Result<crate::infra::host::ConfigLock, ConfigCommandError> {
     crate::infra::host::config_lock(path, lock_dir).map_err(|error| match error {
         crate::infra::host::ConfigLockError::Held { path } => ConfigCommandError::Locked { path },
@@ -1172,14 +1176,9 @@ mod tests {
         );
 
         assert_eq!(
-            set(
-                &path,
-                ConfigKey::CalShowCalendar,
-                "true",
-                Some(&temp.locks())
-            )
-            .unwrap()
-            .value,
+            set(&path, ConfigKey::CalShowCalendar, "true", &temp.locks())
+                .unwrap()
+                .value,
             ConfigValue::Bool(true)
         );
         assert_eq!(
@@ -1192,18 +1191,10 @@ mod tests {
                 .cal
                 .show_calendar
         );
-        assert!(
-            set(
-                &path,
-                ConfigKey::CalShowCalendar,
-                "yes",
-                Some(&temp.locks())
-            )
-            .is_err()
-        );
+        assert!(set(&path, ConfigKey::CalShowCalendar, "yes", &temp.locks()).is_err());
 
         assert!(
-            unset(&path, ConfigKey::CalShowCalendar, Some(&temp.locks()))
+            unset(&path, ConfigKey::CalShowCalendar, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1453,14 +1444,14 @@ mod tests {
             "# heading\n[task]\nlist    = \"Inbox\" # keep me\nparse_inline = false\n",
         );
 
-        set(&path, ConfigKey::TaskList, "Work", Some(&temp.locks())).unwrap();
+        set(&path, ConfigKey::TaskList, "Work", &temp.locks()).unwrap();
         let edited = fs::read_to_string(&path).unwrap();
         assert!(edited.contains("# heading"), "{edited}");
         assert!(edited.contains("list    = \"Work\" # keep me"), "{edited}");
         assert!(edited.contains("parse_inline = false"), "{edited}");
 
         assert!(
-            unset(&path, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&path, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1478,7 +1469,7 @@ mod tests {
                 &path,
                 ConfigKey::CalCalendars,
                 "[\"Work\", \"Home\"]",
-                Some(&temp.locks())
+                &temp.locks()
             )
             .unwrap()
             .value,
@@ -1488,33 +1479,12 @@ mod tests {
             load(&temp.0, Some(&path), no_env).unwrap().cal.calendars,
             ["Work", "Home"]
         );
-        assert!(
-            set(
-                &path,
-                ConfigKey::TaskPriority,
-                "urgent",
-                Some(&temp.locks())
-            )
-            .is_err()
-        );
-        assert!(
-            set(
-                &path,
-                ConfigKey::TaskParseInline,
-                "yes",
-                Some(&temp.locks())
-            )
-            .is_err()
-        );
+        assert!(set(&path, ConfigKey::TaskPriority, "urgent", &temp.locks()).is_err());
+        assert!(set(&path, ConfigKey::TaskParseInline, "yes", &temp.locks()).is_err());
         assert_eq!(
-            set(
-                &path,
-                ConfigKey::CalCalendars,
-                "Work, Home",
-                Some(&temp.locks())
-            )
-            .unwrap()
-            .value,
+            set(&path, ConfigKey::CalCalendars, "Work, Home", &temp.locks())
+                .unwrap()
+                .value,
             ConfigValue::Strings(vec!["Work".into(), "Home".into()])
         );
         assert!(
@@ -1522,7 +1492,7 @@ mod tests {
                 &path,
                 ConfigKey::CalCalendars,
                 "[\"Work\"] trailing",
-                Some(&temp.locks())
+                &temp.locks()
             )
             .is_err()
         );
@@ -1531,11 +1501,11 @@ mod tests {
                 &path,
                 ConfigKey::CalCalendars,
                 "[\"Work\", 3]",
-                Some(&temp.locks())
+                &temp.locks()
             )
             .is_err()
         );
-        let error = set(&path, ConfigKey::CalCalendars, "[", Some(&temp.locks()))
+        let error = set(&path, ConfigKey::CalCalendars, "[", &temp.locks())
             .unwrap_err()
             .to_string();
         assert!(error.contains("Work, Personal"), "{error}");
@@ -1548,25 +1518,19 @@ mod tests {
         let inline = temp.join("inline.toml");
         write(&inline, "task = { list = \"Inbox\" }\n");
 
-        set(
-            &inline,
-            ConfigKey::TaskPriority,
-            "high",
-            Some(&temp.locks()),
-        )
-        .unwrap();
+        set(&inline, ConfigKey::TaskPriority, "high", &temp.locks()).unwrap();
         assert_eq!(
             load(&temp.0, Some(&inline), no_env).unwrap().task.priority,
             Some(Priority::High)
         );
         assert!(
-            unset(&inline, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&inline, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
         assert!(!fs::read_to_string(&inline).unwrap().contains("list"));
         assert!(
-            unset(&inline, ConfigKey::TaskPriority, Some(&temp.locks()))
+            unset(&inline, ConfigKey::TaskPriority, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1574,15 +1538,9 @@ mod tests {
 
         let dotted = temp.join("dotted.toml");
         write(&dotted, "task.list = \"Inbox\"\n");
-        set(
-            &dotted,
-            ConfigKey::TaskPriority,
-            "medium",
-            Some(&temp.locks()),
-        )
-        .unwrap();
+        set(&dotted, ConfigKey::TaskPriority, "medium", &temp.locks()).unwrap();
         assert!(
-            unset(&dotted, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&dotted, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1598,7 +1556,7 @@ mod tests {
         write(&section, &format!("{comments}[note]\nfolder = \"Notes\"\n"));
 
         assert!(
-            unset(&section, ConfigKey::NoteFolder, Some(&temp.locks()))
+            unset(&section, ConfigKey::NoteFolder, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1614,7 +1572,7 @@ mod tests {
         );
 
         assert!(
-            unset(&header_suffix, ConfigKey::NoteFolder, Some(&temp.locks()))
+            unset(&header_suffix, ConfigKey::NoteFolder, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1627,7 +1585,7 @@ mod tests {
         write(&inline, "task = { priority = \"high\" } # mine\n");
 
         assert!(
-            unset(&inline, ConfigKey::TaskPriority, Some(&temp.locks()))
+            unset(&inline, ConfigKey::TaskPriority, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1639,9 +1597,9 @@ mod tests {
         let temp = TempDir::new();
         let path = temp.join("config.toml");
         write(&path, "[task]\nlist = \"Inbox\"\n");
-        let held = crate::infra::host::config_lock(&path, Some(&temp.locks())).unwrap();
+        let held = crate::infra::host::config_lock(&path, &temp.locks()).unwrap();
 
-        let error = set(&path, ConfigKey::TaskList, "Work", Some(&temp.locks())).unwrap_err();
+        let error = set(&path, ConfigKey::TaskList, "Work", &temp.locks()).unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -1656,7 +1614,7 @@ mod tests {
             .unwrap();
         assert!(!rendered.contains('▶'), "{rendered}");
         assert!(matches!(
-            unset(&path, ConfigKey::TaskList, Some(&temp.locks())),
+            unset(&path, ConfigKey::TaskList, &temp.locks()),
             Err(ConfigCommandError::Locked { .. })
         ));
         assert_eq!(
@@ -1665,7 +1623,7 @@ mod tests {
         );
 
         drop(held);
-        set(&path, ConfigKey::TaskList, "Work", Some(&temp.locks())).unwrap();
+        set(&path, ConfigKey::TaskList, "Work", &temp.locks()).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "[task]\nlist = \"Work\"\n"
@@ -1680,9 +1638,9 @@ mod tests {
         write(&path, "[task]\nlist = \"Inbox\"\n");
         write(&legacy, "");
 
-        set(&path, ConfigKey::TaskList, "Work", Some(&temp.locks())).unwrap();
+        set(&path, ConfigKey::TaskList, "Work", &temp.locks()).unwrap();
         assert!(
-            unset(&path, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&path, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1692,42 +1650,13 @@ mod tests {
     }
 
     #[test]
-    fn config_edits_lock_beside_the_file_without_a_lock_folder() {
-        let temp = TempDir::new();
-        let path = temp.join("nib/config.toml");
-
-        set(&path, ConfigKey::TaskList, "Work", None).unwrap();
-        let held = crate::infra::host::config_lock(&path, None).unwrap();
-        assert!(matches!(
-            unset(&path, ConfigKey::TaskList, None),
-            Err(ConfigCommandError::Locked { .. })
-        ));
-        drop(held);
-        assert!(unset(&path, ConfigKey::TaskList, None).unwrap().value);
-
-        let names = fs::read_dir(temp.join("nib"))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(names.len(), 2, "{names:?}");
-        assert!(names.contains(&"config.toml".to_owned()));
-        assert!(
-            names
-                .iter()
-                .any(|name| name.starts_with("config-") && name.strip_suffix(".lock").is_some()),
-            "{names:?}"
-        );
-        assert!(!temp.locks().exists());
-    }
-
-    #[test]
     fn config_lock_failures_name_the_lock_folder() {
         let temp = TempDir::new();
         let path = temp.join("config.toml");
         write(&path, "[task]\nlist = \"Inbox\"\n");
         write(&temp.locks(), "");
 
-        let error = set(&path, ConfigKey::TaskList, "Work", Some(&temp.locks())).unwrap_err();
+        let error = set(&path, ConfigKey::TaskList, "Work", &temp.locks()).unwrap_err();
 
         assert!(
             matches!(&error, ConfigCommandError::Lock { path, .. } if *path == temp.locks()),
@@ -1752,7 +1681,7 @@ mod tests {
         let path = temp.join("config.toml");
         write(&temp.locks(), "");
 
-        let error = set(&path, ConfigKey::TaskList, "Work", Some(&temp.locks())).unwrap_err();
+        let error = set(&path, ConfigKey::TaskList, "Work", &temp.locks()).unwrap_err();
         let mut rendered = String::new();
         GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor())
             .with_width(usize::MAX)
@@ -1796,7 +1725,7 @@ mod tests {
         );
 
         assert!(
-            unset(&path, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&path, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1817,7 +1746,7 @@ mod tests {
         );
 
         assert!(
-            unset(&path, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&path, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1835,7 +1764,7 @@ mod tests {
         write(&inline, "# Inbox\ntask = { list = \"Inbox\" }\n");
 
         assert!(
-            unset(&inline, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&inline, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1849,7 +1778,7 @@ mod tests {
         );
 
         assert!(
-            unset(&schema, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&schema, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1863,7 +1792,7 @@ mod tests {
         write(&dotted, "# Inbox\ntask.list = \"Inbox\"\n");
 
         assert!(
-            unset(&dotted, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&dotted, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1881,7 +1810,7 @@ mod tests {
         );
 
         assert!(
-            unset(&path, ConfigKey::NoteFolder, Some(&temp.locks()))
+            unset(&path, ConfigKey::NoteFolder, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1899,7 +1828,7 @@ mod tests {
         write(&path, "# Header\n[note]\n# folder doc\nfolder = \"x\"\n");
 
         assert!(
-            unset(&path, ConfigKey::NoteFolder, Some(&temp.locks()))
+            unset(&path, ConfigKey::NoteFolder, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1916,7 +1845,7 @@ mod tests {
         );
 
         assert!(
-            unset(&followed, ConfigKey::NoteFolder, Some(&temp.locks()))
+            unset(&followed, ConfigKey::NoteFolder, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1934,11 +1863,11 @@ mod tests {
         write(&path, "# Header\n[note]\n# folder doc\nfolder = \"x\"\n");
 
         assert!(
-            unset(&path, ConfigKey::NoteFolder, Some(&temp.locks()))
+            unset(&path, ConfigKey::NoteFolder, &temp.locks())
                 .unwrap()
                 .value
         );
-        set(&path, ConfigKey::NoteFolder, "Notes", Some(&temp.locks())).unwrap();
+        set(&path, ConfigKey::NoteFolder, "Notes", &temp.locks()).unwrap();
 
         assert_eq!(
             fs::read_to_string(path).unwrap(),
@@ -1956,7 +1885,7 @@ mod tests {
         );
 
         assert!(
-            unset(&path, ConfigKey::TaskList, Some(&temp.locks()))
+            unset(&path, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1972,7 +1901,7 @@ mod tests {
         let temp = TempDir::new();
         let missing = temp.join("missing/config.toml");
         assert!(
-            !unset(&missing, ConfigKey::TaskList, Some(&temp.locks()))
+            !unset(&missing, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1982,7 +1911,7 @@ mod tests {
         let original = "[note]\nfolder = \"Notes\"\n";
         write(&existing, original);
         assert!(
-            !unset(&existing, ConfigKey::TaskList, Some(&temp.locks()))
+            !unset(&existing, ConfigKey::TaskList, &temp.locks())
                 .unwrap()
                 .value
         );
@@ -1995,7 +1924,7 @@ mod tests {
         let path = temp.join("config.toml");
         write(&path, "[task]\r\nlist = 'Inbox'\r\n");
 
-        set(&path, ConfigKey::TaskList, "Work", Some(&temp.locks())).unwrap();
+        set(&path, ConfigKey::TaskList, "Work", &temp.locks()).unwrap();
 
         assert_eq!(
             fs::read_to_string(path).unwrap(),
