@@ -42,6 +42,7 @@ pub struct Event {
     pub title: String,
     pub start: Zoned,
     pub all_day: bool,
+    pub calendar: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +145,7 @@ impl Default for TaskConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CalendarConfig {
     pub calendars: Vec<String>,
+    pub show_calendar: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -157,15 +159,17 @@ pub enum ConfigKey {
     TaskPriority,
     TaskParseInline,
     CalCalendars,
+    CalShowCalendar,
     NoteFolder,
 }
 
 impl ConfigKey {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::TaskList,
         Self::TaskPriority,
         Self::TaskParseInline,
         Self::CalCalendars,
+        Self::CalShowCalendar,
         Self::NoteFolder,
     ];
 
@@ -175,6 +179,7 @@ impl ConfigKey {
             "task.priority" => Some(Self::TaskPriority),
             "task.parse_inline" => Some(Self::TaskParseInline),
             "cal.calendars" => Some(Self::CalCalendars),
+            "cal.show_calendar" => Some(Self::CalShowCalendar),
             "note.folder" => Some(Self::NoteFolder),
             _ => None,
         }
@@ -186,6 +191,7 @@ impl ConfigKey {
             Self::TaskPriority => "task.priority",
             Self::TaskParseInline => "task.parse_inline",
             Self::CalCalendars => "cal.calendars",
+            Self::CalShowCalendar => "cal.show_calendar",
             Self::NoteFolder => "note.folder",
         }
     }

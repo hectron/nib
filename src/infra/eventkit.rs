@@ -1592,6 +1592,10 @@ fn to_event(event: &EKEvent, zone: &TimeZone) -> Option<Event> {
             title: event.title().to_string(),
             start,
             all_day: event.isAllDay(),
+            calendar: event
+                .calendar()
+                .map(|calendar| calendar_title(&calendar))
+                .unwrap_or_default(),
         })
     }
 }

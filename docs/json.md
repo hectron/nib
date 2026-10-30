@@ -47,11 +47,12 @@ Reminder objects contain `id`, `title`, `due`, `due_time`, `due_time_zone`, and 
   "id": "ABC123@2026-10-27T14:00:00Z",
   "title": "Design review",
   "start": "2026-10-27T10:00:00-04:00",
-  "all_day": false
+  "all_day": false,
+  "calendar": "Work"
 }
 ```
 
-Event objects contain `id`, `title`, `start`, and `all_day`. Starts use RFC 3339 with the local UTC offset.
+Event objects contain `id`, `title`, `start`, `all_day`, and `calendar`. Starts use RFC 3339 with the local UTC offset. `calendar` is the name of the event's calendar and is always present, whether or not `--show-calendar` or `cal.show_calendar` is set.
 
 Apple can reuse one identifier for every occurrence of a recurring event. nib appends the occurrence's UTC start to make each event ID distinct.
 
@@ -83,7 +84,8 @@ Resource create and rename commands return the same single-object shape as their
       "id": "event-2",
       "title": "Standup",
       "start": "2026-10-26T09:30:00-04:00",
-      "all_day": false
+      "all_day": false,
+      "calendar": "Work"
     }
   ]
 }
