@@ -302,8 +302,11 @@ fn draw_lists(frame: &mut Frame<'_>, area: Rect, board: &Board, theme: Theme) {
     let table = Table::new(rows, [Constraint::Min(1), Constraint::Length(4)])
         .block(block)
         .row_highlight_style(if focused { HIGHLIGHT } else { STRONG });
-    let mut state = TableState::new().with_selected(Some(selected));
+    let mut state = TableState::new()
+        .with_offset(board.lists_offset())
+        .with_selected(Some(selected));
     frame.render_stateful_widget(table, area, &mut state);
+    board.set_lists_offset(state.offset());
 }
 
 fn draw_items(frame: &mut Frame<'_>, area: Rect, board: &Board, theme: Theme) {
@@ -367,8 +370,11 @@ fn draw_items(frame: &mut Frame<'_>, area: Rect, board: &Board, theme: Theme) {
     } else {
         STRONG
     });
-    let mut state = TableState::new().with_selected(Some(board.cursor()));
+    let mut state = TableState::new()
+        .with_offset(board.items_offset())
+        .with_selected(Some(board.cursor()));
     frame.render_stateful_widget(table, area, &mut state);
+    board.set_items_offset(state.offset());
 }
 
 fn reminder_cells(item: &Item, board: &Board, theme: Theme) -> [Span<'static>; 6] {
@@ -682,7 +688,9 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, board: &Board) {
     ));
     let target = popup(area, 76, width(lines.len() + 2));
     let visible = usize::from(target.height.saturating_sub(2));
-    let scroll = board.help_scroll().min(lines.len().saturating_sub(visible));
+    let limit = lines.len().saturating_sub(visible);
+    board.set_help_limit(limit);
+    let scroll = board.help_scroll().min(limit);
     frame.render_widget(Clear, target);
     frame.render_widget(
         Paragraph::new(lines)
@@ -876,6 +884,21 @@ mod tests {
     }
 
     #[test]
+    fn scrolling_back_up_moves_the_highlight_before_the_rows() {
+        let mut board = board();
+        let mut terminal = Terminal::new(TestBackend::new(50, 8)).unwrap();
+        for _ in 0..4 {
+            act(&mut board, Action::Down);
+            terminal.draw(|frame| draw(frame, &board, false)).unwrap();
+        }
+        act(&mut board, Action::Up);
+        terminal.draw(|frame| draw(frame, &board, false)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("Standup"), "{screen}");
+        assert!(screen.contains("Lunch with Sam"), "{screen}");
+    }
+
+    #[test]
     fn browse_shows_lists_items_and_details() {
         let mut board = board();
         act(&mut board, Action::SelectToggle);
@@ -891,7 +914,7 @@ mod tests {
         "│Events             2││  ◆ Lunch with Sam       Personal tomorrow 12:00    ││ alarms   yes                   │"
         "│                    ││                                                    ││ repeats  no                    │"
         "└────────────────────┘└────────────────────────────────────────────────────┘└────────────────────────────────┘"
-        "/ filter  a add  tab select  x done  e edit  delete delete  ctrl-o act  ] pane  ? help  q quit                "
+        "/ filter  a add  tab select  x done  e edit  backspace delete  ctrl-o act  ] pane  ? help  q quit             "
         
         "#);
     }
@@ -977,7 +1000,7 @@ mod tests {
         "│                    ││                                                    ││ Daily check-in.                │"
         "│                    ││                                                    ││                                │"
         "└────────────────────┘└────────────────────────────────────────────────────┘└────────────────────────────────┘"
-        "/ filter  a add  tab select  x done  e edit  delete delete  ctrl-o act  ] pane  ? help  q quit                "
+        "/ filter  a add  tab select  x done  e edit  backspace delete  ctrl-o act  ] pane  ? help  q quit             "
         
         "#);
     }
@@ -993,7 +1016,7 @@ mod tests {
         "│All                5││    Buy oat milk             Home     today          !!!│"
         "│Today              2││    Buy eggs                 Work                       │"
         "└────────────────────┘└────────────────────────────────────────────────────────┘"
-        "/ filter  a add  tab select  x done  e edit  delete delete  ctrl-o act  ] pane  "
+        "/ filter  a add  tab select  x done  e edit  backspace delete  ctrl-o act  ] pan"
         
         "#);
     }
@@ -1009,7 +1032,7 @@ mod tests {
         "│    Buy oat milk     Home     today          !!!│"
         "│    Buy eggs         Work                       │"
         "└────────────────────────────────────────────────┘"
-        "/ filter  a add  tab select  x done  e edit  delet"
+        "/ filter  a add  tab select  x done  e edit  backs"
         
         "#);
         act(&mut board, Action::PrevPane);
@@ -1021,7 +1044,7 @@ mod tests {
         "│All                                            5│"
         "│Today                                          2│"
         "└────────────────────────────────────────────────┘"
-        "/ filter  a add  tab select  x done  e edit  delet"
+        "/ filter  a add  tab select  x done  e edit  backs"
         
         "#);
     }
@@ -1036,14 +1059,14 @@ mod tests {
         "+                                                                 adds to the default list"
         "  title, then a due date, !low|!medium|!high, and #list, in any order                     "
         "┌ Lists┌ Keys in CAPTURE ─────────────────────────────────────────────────────────┐──────┐"
-        "│All   │ alt-h      -> priority-high: set high priority                           │   !!!│"
-        "│Today │ alt-l      -> priority-low: set low priority                             │      │"
-        "│Home  │ alt-m      -> priority-medium: set medium priority                       │   !! │"
-        "│Work  │ alt-n      -> priority-none: clear priority                              │      │"
-        "│Events│ ctrl-c     -> cancel: cancel                                             │00    │"
-        "│      │ ctrl-n     -> down: move down                                            │      │"
-        "│      │ ctrl-o     -> act-menu: open the action menu                             │      │"
-        "│      │ ctrl-p     -> up: move up                                                │      │"
+        "│All   │ alt-h   -> priority-high: set high priority                              │   !!!│"
+        "│Today │ alt-l   -> priority-low: set low priority                                │      │"
+        "│Home  │ alt-m   -> priority-medium: set medium priority                          │   !! │"
+        "│Work  │ alt-n   -> priority-none: clear priority                                 │      │"
+        "│Events│ ctrl-c  -> cancel: cancel                                                │00    │"
+        "│      │ ctrl-n  -> down: move down                                               │      │"
+        "│      │ ctrl-p  -> up: move up                                                   │      │"
+        "│      │ ctrl-q  -> quit: quit                                                    │      │"
         "└──────└──────────────────────────────────────────────────────────────────────────┘──────┘"
         "up/down scroll  any other key close                                                       "
         
@@ -1068,7 +1091,7 @@ mod tests {
         "/ press / to filter                                                                                  5 results"
         "──────────────────────────────────────────────────────────────────────────────────────────────────────────────"
         "┌ Lists ─────────────┐┌ All · 5 ───────────────────────────────────────────┐┌ Details ───────────────────────┐"
-        "s filter  a add  tab select  x done  e edit  delete delete  ctrl-o act  ] pane  ? help  q quit                "
+        "s filter  a add  tab select  x done  e edit  backspace delete  ctrl-o act  ] pane  ? help  q quit             "
         
         "#);
     }

@@ -2160,6 +2160,7 @@ mod tests {
         alt-a      -> select-all: select all visible items
         alt-k      -> keep-filter: keep the current filter
         alt-x      -> done, down: complete selected reminders; move down
+        backspace  -> delete: delete selected reminders
         ctrl-a     -> top: move to the first item
         ctrl-c     -> quit: quit
         ctrl-d     -> page-down: move one page down
@@ -2232,22 +2233,19 @@ mod tests {
     #[test]
     fn keymap_help_covers_the_default_capture_state() {
         assert_snapshot!(keymap_help(&Keymap::default(), KeymapState::Capture), @r###"
-        alt-h      -> priority-high: set high priority
-        alt-l      -> priority-low: set low priority
-        alt-m      -> priority-medium: set medium priority
-        alt-n      -> priority-none: clear priority
-        ctrl-c     -> cancel: cancel
-        ctrl-n     -> down: move down
-        ctrl-o     -> act-menu: open the action menu
-        ctrl-p     -> up: move up
-        ctrl-q     -> quit: quit
-        down       -> down: move down
-        enter      -> accept: accept
-        esc        -> cancel: cancel
-        f1         -> help: show key help
-        shift-tab  -> prev-pane: focus the previous pane
-        tab        -> next-pane: focus the next pane
-        up         -> up: move up
+        alt-h   -> priority-high: set high priority
+        alt-l   -> priority-low: set low priority
+        alt-m   -> priority-medium: set medium priority
+        alt-n   -> priority-none: clear priority
+        ctrl-c  -> cancel: cancel
+        ctrl-n  -> down: move down
+        ctrl-p  -> up: move up
+        ctrl-q  -> quit: quit
+        down    -> down: move down
+        enter   -> accept: accept
+        esc     -> cancel: cancel
+        f1      -> help: show key help
+        up      -> up: move up
         "###);
     }
 }

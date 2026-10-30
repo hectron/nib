@@ -25,6 +25,20 @@ pub(crate) fn inputs(board: &Board, key: KeyEvent) -> Vec<Input> {
     text_edit(key).map(Input::Text).into_iter().collect()
 }
 
+pub(crate) fn paste(board: &Board, text: &str) -> Vec<Input> {
+    if board.overlay().is_some() || board.mode() == InputState::Browse {
+        return Vec::new();
+    }
+    text.chars()
+        .filter_map(|character| match character {
+            '\n' | '\r' | '\t' => Some(' '),
+            character if character.is_control() => None,
+            character => Some(character),
+        })
+        .map(|character| Input::Text(TextEdit::Insert(character)))
+        .collect()
+}
+
 pub(crate) fn chord(key: KeyEvent) -> Option<KeyChord> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -206,6 +220,21 @@ mod tests {
             [Input::Action(Action::Cancel)]
         );
         assert_eq!(inputs(&board, key(KeyCode::Char('x'), ALT)), []);
+    }
+
+    #[test]
+    fn pasted_text_is_typed_only_while_typing() {
+        let mut board = board_with(data(), Config::default());
+        assert_eq!(paste(&board, "xr1e"), []);
+        board.update(Input::Action(Action::Capture));
+        assert_eq!(
+            paste(&board, "a\nb\u{7}"),
+            [
+                Input::Text(TextEdit::Insert('a')),
+                Input::Text(TextEdit::Insert(' ')),
+                Input::Text(TextEdit::Insert('b')),
+            ]
+        );
     }
 
     #[test]

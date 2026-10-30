@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use jiff::Zoned;
 
 use crate::app::filter::{Filter, FilterKind, FilterRow};
@@ -90,6 +92,12 @@ pub(crate) enum Row<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturePriority {
+    Parsed,
+    Set(Option<Priority>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowIndex {
     Reminder(usize),
     Event(usize),
@@ -169,11 +177,12 @@ pub(crate) struct Board {
     overlay: Option<Overlay>,
     focus: Pane,
     preview: bool,
-    scope: usize,
+    scope: Scope,
     applied: String,
     query: Line,
     filter_error: Option<String>,
     capture: Line,
+    capture_priority: CapturePriority,
     preview_add: Option<Result<NewReminder, String>>,
     filter: Filter,
     rows: Vec<RowIndex>,
@@ -182,6 +191,9 @@ pub(crate) struct Board {
     targets: Vec<String>,
     menu_cursor: usize,
     help_scroll: usize,
+    help_limit: Cell<usize>,
+    items_offset: Cell<usize>,
+    lists_offset: Cell<usize>,
     confirm_input: String,
     status: Option<Status>,
     quit: bool,
@@ -217,11 +229,12 @@ impl Board {
             overlay: None,
             focus: Pane::Items,
             preview: true,
-            scope: 0,
+            scope: Scope::All,
             applied: String::new(),
             query: Line::default(),
             filter_error: None,
             capture: Line::default(),
+            capture_priority: CapturePriority::Parsed,
             preview_add: None,
             filter: Filter::parse("").expect("an empty expression has no tokens to reject"),
             rows: Vec::new(),
@@ -230,6 +243,9 @@ impl Board {
             targets: Vec::new(),
             menu_cursor: 0,
             help_scroll: 0,
+            help_limit: Cell::new(usize::MAX),
+            items_offset: Cell::new(0),
+            lists_offset: Cell::new(0),
             confirm_input: String::new(),
             status,
             quit: false,
@@ -300,7 +316,10 @@ impl Board {
     }
 
     pub(crate) fn scope_cursor(&self) -> usize {
-        self.scope
+        self.scopes()
+            .iter()
+            .position(|scope| *scope == self.scope)
+            .unwrap_or_default()
     }
 
     pub(crate) fn menu_cursor(&self) -> usize {
@@ -309,6 +328,26 @@ impl Board {
 
     pub(crate) fn help_scroll(&self) -> usize {
         self.help_scroll
+    }
+
+    pub(crate) fn set_help_limit(&self, limit: usize) {
+        self.help_limit.set(limit);
+    }
+
+    pub(crate) fn items_offset(&self) -> usize {
+        self.items_offset.get()
+    }
+
+    pub(crate) fn set_items_offset(&self, offset: usize) {
+        self.items_offset.set(offset);
+    }
+
+    pub(crate) fn lists_offset(&self) -> usize {
+        self.lists_offset.get()
+    }
+
+    pub(crate) fn set_lists_offset(&self, offset: usize) {
+        self.lists_offset.set(offset);
     }
 
     pub(crate) fn selected(&self) -> &[String] {
@@ -356,7 +395,7 @@ impl Board {
     }
 
     pub(crate) fn current_scope(&self) -> Scope {
-        self.scopes().swap_remove(self.scope)
+        self.scope.clone()
     }
 
     pub(crate) fn scope_count(&self, scope: &Scope) -> usize {
@@ -565,10 +604,19 @@ impl Board {
 
     fn capture_changed(&mut self) {
         self.status = None;
+        self.preview_add = self.parse_capture();
+    }
+
+    fn parse_capture(&self) -> Option<Result<NewReminder, String>> {
         let text = self.capture.text.trim();
-        self.preview_add = (!text.is_empty()).then(|| {
-            crate::cli::quick_add(text, &self.now, &self.config).map_err(|error| error.to_string())
-        });
+        (!text.is_empty()).then(|| {
+            let mut new = crate::cli::quick_add(text, &self.now, &self.config)
+                .map_err(|error| error.to_string())?;
+            if let CapturePriority::Set(priority) = self.capture_priority {
+                new.priority = priority;
+            }
+            Ok(new)
+        })
     }
 
     fn action(&mut self, action: Action) -> Option<Effect> {
@@ -611,6 +659,7 @@ impl Board {
             Action::Capture | Action::Add => {
                 self.mode = InputState::Capture;
                 self.capture = Line::default();
+                self.capture_priority = CapturePriority::Parsed;
                 self.preview_add = None;
                 self.status = None;
                 None
@@ -673,14 +722,17 @@ impl Board {
 
     fn capturing(&mut self, action: Action) -> Option<Effect> {
         match action {
-            Action::Accept => {
-                let text = self.capture.text.trim();
-                if text.is_empty() {
-                    self.set_status("Type a reminder title first.", true);
-                    return None;
+            Action::Accept => match self.parse_capture() {
+                Some(Ok(new)) => Some(Effect::Session(SessionEffect::AddParsed(new))),
+                Some(Err(error)) => {
+                    self.set_status(&error, true);
+                    None
                 }
-                Some(Effect::Session(SessionEffect::Add(text.to_owned())))
-            }
+                None => {
+                    self.set_status("Type a reminder title first.", true);
+                    None
+                }
+            },
             Action::Cancel => {
                 self.leave_capture();
                 None
@@ -698,18 +750,7 @@ impl Board {
     }
 
     fn capture_priority(&mut self, priority: Option<Priority>) -> Option<Effect> {
-        let mut words: Vec<&str> = self
-            .capture
-            .text
-            .split_whitespace()
-            .filter(|word| priority_token(word).is_none())
-            .collect();
-        let token = priority.map(|priority| format!("!{}", priority.as_str()));
-        if let Some(token) = &token {
-            words.push(token);
-        }
-        let text = words.join(" ");
-        self.capture.set(text);
+        self.capture_priority = CapturePriority::Set(priority);
         self.capture_changed();
         None
     }
@@ -717,6 +758,7 @@ impl Board {
     fn leave_capture(&mut self) {
         self.mode = InputState::Browse;
         self.capture = Line::default();
+        self.capture_priority = CapturePriority::Parsed;
         self.preview_add = None;
     }
 
@@ -863,12 +905,13 @@ impl Board {
     }
 
     fn move_scope(&mut self, action: Action) -> Option<Effect> {
-        let last = self.scopes().len().saturating_sub(1);
-        let next = step(self.scope, last, action);
-        if next == self.scope {
+        let mut scopes = self.scopes();
+        let index = self.scope_cursor();
+        let next = step(index, scopes.len().saturating_sub(1), action);
+        if next == index {
             return None;
         }
-        self.scope = next;
+        self.scope = scopes.swap_remove(next);
         self.query_changed()
     }
 
@@ -877,7 +920,9 @@ impl Board {
             Overlay::Help => {
                 match key {
                     MenuKey::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
-                    MenuKey::Down => self.help_scroll += 1,
+                    MenuKey::Down => {
+                        self.help_scroll = (self.help_scroll + 1).min(self.help_limit.get());
+                    }
                     _ => self.overlay = None,
                 }
                 None
@@ -995,8 +1040,7 @@ impl Board {
         match response {
             Response::Loaded(data) => {
                 self.loading_completed = false;
-                self.data = data;
-                self.clamp_scope();
+                self.replace_data(data);
                 self.refilter()
             }
             Response::Added(item) => {
@@ -1035,13 +1079,14 @@ impl Board {
                 error,
                 data,
             } => {
-                self.selected.clear();
-                self.targets.clear();
                 self.overlay = None;
                 self.set_status(&message, error);
                 let data = data?;
-                self.data = data;
-                self.clamp_scope();
+                if !error {
+                    self.selected.clear();
+                    self.targets.clear();
+                }
+                self.replace_data(data);
                 self.refilter()
             }
             Response::DeleteRefused {
@@ -1050,14 +1095,13 @@ impl Board {
                 data,
             } => {
                 if let Some(data) = data {
-                    self.data = data;
+                    self.replace_data(data);
                 }
                 for item in &mut self.data.items {
                     if partial.contains(&item.id) {
                         item.backup_partial = true;
                     }
                 }
-                self.clamp_scope();
                 self.overlay = Some(Overlay::ConfirmDelete);
                 self.confirm_input.clear();
                 self.set_status(&message, true);
@@ -1072,8 +1116,13 @@ impl Board {
         }
     }
 
-    fn clamp_scope(&mut self) {
-        self.scope = self.scope.min(self.scopes().len().saturating_sub(1));
+    fn replace_data(&mut self, data: Data) {
+        let index = self.scope_cursor();
+        self.data = data;
+        let mut scopes = self.scopes();
+        if !scopes.contains(&self.scope) {
+            self.scope = scopes.swap_remove(index.min(scopes.len() - 1));
+        }
     }
 
     fn set_status(&mut self, text: &str, error: bool) {
@@ -1093,15 +1142,6 @@ fn step(position: usize, last: usize, action: Action) -> usize {
         Action::Top => 0,
         Action::Bottom => last,
         _ => position,
-    }
-}
-
-fn priority_token(word: &str) -> Option<Priority> {
-    match word.to_ascii_lowercase().as_str() {
-        "!high" => Some(Priority::High),
-        "!medium" => Some(Priority::Medium),
-        "!low" => Some(Priority::Low),
-        _ => None,
     }
 }
 
@@ -1380,25 +1420,63 @@ pub(crate) mod tests {
         assert_eq!(preview.due, Some(date(2026, 10, 31)));
         assert_eq!(preview.list.as_deref(), Some("Work"));
         act(&mut board, Action::PriorityHigh);
-        assert_eq!(board.capture().text, "Pay rent tomorrow #Work !high");
         act(&mut board, Action::PriorityLow);
-        assert_eq!(board.capture().text, "Pay rent tomorrow #Work !low");
-        assert_eq!(
-            board.capture_preview().unwrap().as_ref().unwrap().priority,
-            Some(Priority::Low)
-        );
-        assert_eq!(
-            act(&mut board, Action::Accept),
-            Some(Effect::Session(SessionEffect::Add(
-                "Pay rent tomorrow #Work !low".into()
-            )))
-        );
+        assert_eq!(board.capture().text, "Pay rent tomorrow #Work");
+        let Some(Effect::Session(SessionEffect::AddParsed(new))) = act(&mut board, Action::Accept)
+        else {
+            panic!("expected a parsed reminder to add");
+        };
+        assert_eq!(new.title, "Pay rent");
+        assert_eq!(new.due, Some(date(2026, 10, 31)));
+        assert_eq!(new.list.as_deref(), Some("Work"));
+        assert_eq!(new.priority, Some(Priority::Low));
         board.resolve(Response::Failed("no list named Work".into()));
         assert_eq!(board.mode(), InputState::Capture);
         assert_eq!(board.status().map(|status| status.error), Some(true));
         act(&mut board, Action::Cancel);
         assert_eq!(board.mode(), InputState::Browse);
         assert_eq!(board.capture().text, "");
+    }
+
+    fn captured(board: &mut Board) -> NewReminder {
+        match act(board, Action::Accept) {
+            Some(Effect::Session(SessionEffect::AddParsed(new))) => new,
+            other => panic!("expected a parsed reminder to add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capture_priority_keys_override_the_parsed_priority_without_editing_text() {
+        let mut board = board();
+        act(&mut board, Action::Capture);
+        type_text(&mut board, "Discuss !high option !low");
+        act(&mut board, Action::PriorityMedium);
+        assert_eq!(board.capture().text, "Discuss !high option !low");
+        let new = captured(&mut board);
+        assert_eq!(new.title, "Discuss !high option");
+        assert_eq!(new.priority, Some(Priority::Medium));
+
+        let mut config = Config::default();
+        config.task.parse_inline = false;
+        config.task.priority = Some(Priority::Low);
+        let mut board = board_with(data(), config);
+        act(&mut board, Action::Capture);
+        type_text(&mut board, "Ship !high");
+        assert_eq!(
+            board.capture_preview().unwrap().as_ref().unwrap().priority,
+            Some(Priority::Low)
+        );
+        act(&mut board, Action::PriorityHigh);
+        let new = captured(&mut board);
+        assert_eq!(new.title, "Ship !high");
+        assert_eq!(new.priority, Some(Priority::High));
+        act(&mut board, Action::PriorityNone);
+        assert_eq!(captured(&mut board).priority, None);
+
+        act(&mut board, Action::Cancel);
+        act(&mut board, Action::Capture);
+        type_text(&mut board, "Ship");
+        assert_eq!(captured(&mut board).priority, Some(Priority::Low));
     }
 
     #[test]
@@ -1411,6 +1489,106 @@ pub(crate) mod tests {
         assert!(
             matches!(board.capture_preview(), Some(Err(error)) if error.contains("more than once"))
         );
+        assert_eq!(act(&mut board, Action::Accept), None);
+        assert!(
+            board
+                .status()
+                .is_some_and(|status| status.error && status.text.contains("more than once"))
+        );
+    }
+
+    #[test]
+    fn an_added_reminder_shows_in_its_list() {
+        let mut board = board();
+        act(&mut board, Action::PrevPane);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        assert_eq!(board.current_scope(), Scope::List("Home".into()));
+        act(&mut board, Action::Capture);
+        type_text(&mut board, "Water plants");
+        captured(&mut board);
+        let added = item("rem-9", "Water plants", "Home", None, None);
+        assert_eq!(board.resolve(Response::Added(added)), None);
+        assert_eq!(ids(&board), ["rem-1", "rem-9"]);
+        assert_eq!(
+            board.status().map(|status| status.text.as_str()),
+            Some("Added \"Water plants\"")
+        );
+    }
+
+    #[test]
+    fn a_failed_change_keeps_the_selection() {
+        let mut board = board();
+        act(&mut board, Action::SelectAll);
+        act(&mut board, Action::Done);
+        board.resolve(Response::Changed {
+            message: "the editor failed".into(),
+            error: true,
+            data: Some(data()),
+        });
+        assert_eq!(board.selected(), ["rem-1", "rem-2", "rem-3"]);
+        assert_eq!(board.targets(), ["rem-1", "rem-2", "rem-3"]);
+        board.resolve(Response::Changed {
+            message: "Couldn't reload reminders".into(),
+            error: false,
+            data: None,
+        });
+        assert_eq!(board.selected(), ["rem-1", "rem-2", "rem-3"]);
+        board.resolve(Response::Changed {
+            message: "Applied 3 changes.".into(),
+            error: false,
+            data: Some(data()),
+        });
+        assert_eq!(board.selected(), Vec::<String>::new());
+        assert_eq!(board.targets(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_highlighted_list_survives_reloads_that_add_or_remove_lists() {
+        let mut config = Config::default();
+        config.tui.views.insert("Soon".into(), "due:week".into());
+        let mut board = board_with(data(), config);
+        act(&mut board, Action::PrevPane);
+        act(&mut board, Action::Bottom);
+        assert_eq!(board.current_scope(), Scope::View(0));
+
+        let mut more = data();
+        more.items
+            .push(item("rem-8", "Old task", "Archive", None, None));
+        board.resolve(Response::Loaded(more));
+        assert_eq!(board.current_scope(), Scope::View(0));
+        assert_eq!(board.scope_cursor(), 6);
+
+        act(&mut board, Action::Top);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        act(&mut board, Action::Down);
+        assert_eq!(board.current_scope(), Scope::List("Work".into()));
+        let mut fewer = data();
+        fewer.lists.remove(0);
+        fewer.items.remove(0);
+        board.resolve(Response::Loaded(fewer));
+        assert_eq!(board.current_scope(), Scope::List("Work".into()));
+        assert_eq!(ids(&board), ["rem-2", "rem-3"]);
+
+        let mut gone = data();
+        gone.lists.remove(1);
+        gone.items.truncate(1);
+        board.resolve(Response::Loaded(gone));
+        assert_eq!(board.current_scope(), Scope::List("Home".into()));
+    }
+
+    #[test]
+    fn help_scroll_stops_at_the_rendered_limit() {
+        let mut board = board();
+        act(&mut board, Action::Help);
+        board.set_help_limit(2);
+        for _ in 0..10 {
+            menu(&mut board, MenuKey::Down);
+        }
+        assert_eq!(board.help_scroll(), 2);
+        menu(&mut board, MenuKey::Up);
+        assert_eq!(board.help_scroll(), 1);
     }
 
     #[test]

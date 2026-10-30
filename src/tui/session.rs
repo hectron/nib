@@ -9,7 +9,7 @@ use super::state::{Data, Effect, Extras, Item, ListChoice, Response};
 use crate::app::commands::reminder_from_snapshot;
 use crate::app::quick::{self, DeleteError};
 use crate::cli::output::{self, Style, clean};
-use crate::domain::{Backends, Config, Reminder, ReminderSnapshot, TaskChangeRequest};
+use crate::domain::{Backends, Config, NewReminder, Reminder, ReminderSnapshot, TaskChangeRequest};
 use crate::infra::host::{EditFile, Host, JournalFile, JournalLock};
 
 pub(crate) struct Session<'a> {
@@ -32,7 +32,10 @@ impl Session<'_> {
     pub(crate) fn perform(&mut self, effect: Effect, includes_completed: bool) -> Response {
         let result = match effect {
             Effect::LoadCompleted => self.load(true).map(Response::Loaded),
-            Effect::Add(text) => self.add(&text),
+            Effect::Add(text) => crate::cli::quick_add(&text, self.now, self.config)
+                .map_err(|error| miette::miette!("{error}"))
+                .and_then(|new| self.add(new)),
+            Effect::AddParsed(new) => self.add(new),
             Effect::Change { change, ids } => {
                 let (now, backends) = (self.now, self.backends);
                 let request = TaskChangeRequest {
@@ -149,12 +152,21 @@ impl Session<'_> {
         }
     }
 
-    fn add(&mut self, text: &str) -> Result<Response> {
-        let new = crate::cli::quick_add(text, self.now, self.config)
-            .map_err(|error| miette::miette!("{error}"))?;
+    fn add(&mut self, new: NewReminder) -> Result<Response> {
         let list = new.list.clone();
         let added = self.backends.reminders.add(new)?;
+        let list = list.or_else(|| self.default_list());
         Ok(Response::Added(added_item(added, list)))
+    }
+
+    fn default_list(&self) -> Option<String> {
+        self.backends
+            .reminders
+            .lists()
+            .ok()?
+            .into_iter()
+            .find(|list| list.default)
+            .map(|list| list.name)
     }
 }
 
@@ -357,6 +369,17 @@ mod tests {
         assert_eq!(item.due, Some(date(2026, 10, 31)));
         assert_eq!(item.priority, Some(Priority::High));
         assert_eq!(item.list.as_deref(), Some("Work"));
+    }
+
+    #[test]
+    fn add_without_a_list_names_the_default_list() {
+        let response = run(&mut Scripted::new(), |session| {
+            session.perform(Effect::Add("Water plants".into()), false)
+        });
+        let Response::Added(item) = response else {
+            panic!("expected an added reminder, got {response:?}");
+        };
+        assert_eq!(item.list.as_deref(), Some("Reminders"));
     }
 
     #[test]

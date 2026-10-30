@@ -7,6 +7,8 @@ nib board
 NIB_DEMO=1 nib b
 ```
 
+`NIB_DEMO=1 nib board` is read-only: the demo backend doesn't save changes, so actions report success but the reminders reload unchanged, and an added reminder disappears at the next reload.
+
 The board draws on the terminal in the alternate screen and prints nothing when it closes, so `--json` has no effect. Standard input must be a terminal; otherwise `nib board` exits with `nib::board::not_a_terminal`. Scripts can use `nib task list --filter EXPR --json` and `nib cal --week --json` instead. Bare `nib` still prints help.
 
 ## Layout
@@ -22,7 +24,11 @@ Terminals narrower than 100 columns hide the details pane. Below 64 columns, onl
 
 ## Input states
 
-The board starts in BROWSE, where letters are actions. The default keys are listed below; `?` or `f1` shows the active keymap for the current state. See [Keymaps](keymap.md) to change them.
+The board starts in BROWSE, where letters are actions. The main default keys are listed below; `?` or `f1` shows every key bound in the current state. See [Keymaps](keymap.md) to change them.
+
+`alt-` keys need the Option key to send Meta. In Terminal, turn on Settings > Profiles > Keyboard > Use Option as Meta key. In iTerm2, set Settings > Profiles > Keys > General > Left Option key to Esc+. Otherwise Option types a symbol, such as `å` for `alt-a`, into FILTER or CAPTURE.
+
+Pasted text is typed into the filter or capture line, and ignored in BROWSE.
 
 ### BROWSE
 
@@ -30,7 +36,7 @@ The board starts in BROWSE, where letters are actions. The default keys are list
 | --- | --- |
 | `j` / `k`, `down` / `up` | Move in the focused pane |
 | `g` / `G`, `page-up` / `page-down` | Move to the top or bottom, or by a page |
-| `[` / `]`, `left` / `right` | Focus the lists or the items pane |
+| `[` / `]`, `left` / `right` | Switch between the lists and items panes |
 | `enter` | Focus the items pane from the lists pane |
 | `/` | Enter FILTER |
 | `a` or `n` | Enter CAPTURE |
@@ -40,7 +46,7 @@ The board starts in BROWSE, where letters are actions. The default keys are list
 | `1`, `2`, `3`, `0` | Set priority high, medium, low, or none |
 | `m` | Move to a writable list |
 | `e` | Edit in `$VISUAL` or `$EDITOR` |
-| `delete` | Delete |
+| `delete` or `backspace` | Delete, after a confirmation. The key labeled delete on a Mac keyboard sends `backspace` |
 | `ctrl-o` | Open the action menu |
 | `ctrl-l` | Clear the filter |
 | `q`, `esc`, `ctrl-c` | Quit |
@@ -56,9 +62,19 @@ Actions apply to the selected reminders, or to the highlighted one when nothing 
 | `enter` | Keep the filter and return to BROWSE |
 | `esc` | Clear the filter and return to BROWSE |
 | `ctrl-u` | Clear the typed filter and stay in FILTER |
+| `alt-enter` | Keep the filter and return to BROWSE, even when the Add row is highlighted |
+| `insert` | Add the typed text as a reminder |
 | `up` / `down`, `ctrl-p` / `ctrl-n` | Move the highlight |
+| `left` / `right` | Switch between the lists and items panes |
+| `tab`, `shift-tab` | Select the highlighted reminder, and with `shift-tab` move up |
+| `alt-a` | Select every visible reminder |
+| `ctrl-o` | Open the action menu |
+| `ctrl-space` | Hide or show the details pane |
+| `ctrl-q` | Quit |
 | `backspace`, `ctrl-w`, `delete` | Delete a character, the word before the cursor, or the character under it |
 | `ctrl-b` / `ctrl-f` | Move the cursor |
+
+Because `left` and `right` switch panes in FILTER, use `ctrl-b` and `ctrl-f` to move the cursor.
 
 Plain text adds an `Add reminder: <text>` row, as in [`nib pick`](pick.md#adding-a-reminder). Highlight it and press `enter`, or press `insert`, to add the text as a reminder. The filter is then cleared.
 
@@ -72,7 +88,11 @@ The filter combines with the highlighted list or view: a filter of `pri:high` un
 | --- | --- |
 | `enter` | Add the reminder and return to BROWSE |
 | `esc`, `ctrl-c` | Discard the text and return to BROWSE |
-| `alt-h`, `alt-m`, `alt-l`, `alt-n` | Set the priority token to high, medium, low, or none |
+| `alt-h`, `alt-m`, `alt-l`, `alt-n` | Set the new reminder's priority to high, medium, low, or none |
+| `up` / `down`, `ctrl-p` / `ctrl-n` | Move the item highlight |
+| `ctrl-q` | Quit |
+
+The priority keys don't change the text. They replace an inline `!priority` and `task.priority`, and they also work when `task.parse_inline` is `false`. The preview shows the result.
 
 Without `#list`, the reminder goes to `task.list` or the Reminders default list, even when another list is highlighted.
 

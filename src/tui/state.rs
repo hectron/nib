@@ -2,7 +2,7 @@ use jiff::civil::{Date, Time};
 use jiff::{Timestamp, Zoned};
 
 use crate::app::filter::{Filter, FilterKind, FilterRow};
-use crate::domain::{Priority, TaskChange};
+use crate::domain::{NewReminder, Priority, TaskChange};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Item {
@@ -76,6 +76,7 @@ pub(crate) enum Action {
 pub(crate) enum Effect {
     LoadCompleted,
     Add(String),
+    AddParsed(NewReminder),
     Change {
         change: TaskChange,
         ids: Vec<String>,
