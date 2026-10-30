@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::domain::{AutomationStatus, DoctorProbe, EditorSetting, PermissionStatus};
+use crate::tui::keymap::{Action, Keymap, State};
 
 const MINIMUM_MACOS_MAJOR: u64 = 26;
 
@@ -44,6 +45,8 @@ pub fn checks(
     probe: &dyn DoctorProbe,
     config_files: &[ConfigFileCheck],
     config_error: Option<&str>,
+    keymap: Option<&Keymap>,
+    keymap_error: Option<&str>,
     config_locks: &[ConfigLockFile],
 ) -> Vec<Check> {
     let terminal = probe.terminal();
@@ -62,9 +65,61 @@ pub fn checks(
     ));
     checks.push(notes(probe.notes_automation(), &terminal.0));
     checks.extend(configuration(config_files, config_error));
+    checks.push(keymap_check(keymap, keymap_error));
     checks.push(config_lock(config_locks));
     checks.push(editor(probe.editor()));
     checks
+}
+
+fn keymap_check(keymap: Option<&Keymap>, error: Option<&str>) -> Check {
+    if let Some(error) = error {
+        return Check {
+            id: "keymap".into(),
+            status: CheckStatus::Fail,
+            message: error.into(),
+            fix: Some("Fix the keymap setting and run `nib doctor` again.".into()),
+        };
+    }
+    let Some(keymap) = keymap else {
+        return Check {
+            id: "keymap".into(),
+            status: CheckStatus::Warning,
+            message: "keymap wasn't checked because configuration is invalid".into(),
+            fix: Some("Fix the configuration and run `nib doctor` again.".into()),
+        };
+    };
+    let missing = State::ALL
+        .into_iter()
+        .filter(|state| {
+            !keymap.has_action(*state, |action| {
+                matches!(action, Action::Quit | Action::Cancel)
+            })
+        })
+        .map(State::as_str)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Check {
+            id: "keymap".into(),
+            status: CheckStatus::Pass,
+            message: "keymap is valid in browse, filter, and capture states".into(),
+            fix: None,
+        }
+    } else {
+        let states = missing.join(", ");
+        let (state, verb) = if missing.len() == 1 {
+            ("state", "has")
+        } else {
+            ("states", "have")
+        };
+        Check {
+            id: "keymap".into(),
+            status: CheckStatus::Warning,
+            message: format!("{states} {state} {verb} no quit or cancel binding"),
+            fix: Some(format!(
+                "Bind `quit` or `cancel` in the {states} {state}, or restore the default preset."
+            )),
+        }
+    }
 }
 
 fn config_lock(locks: &[ConfigLockFile]) -> Check {
@@ -310,4 +365,53 @@ fn editor(setting: EditorSetting) -> Check {
 
 pub fn failed(checks: &[Check]) -> bool {
     checks.iter().any(|check| check.status == CheckStatus::Fail)
+}
+
+#[cfg(test)]
+mod tests {
+    use insta::assert_debug_snapshot;
+
+    use super::*;
+
+    #[test]
+    fn keymap_check_warns_when_a_state_has_no_exit_binding() {
+        let mut keymap = Keymap::default();
+        let chords = keymap
+            .bindings(State::Capture)
+            .filter(|(_, actions)| {
+                actions
+                    .iter()
+                    .any(|action| matches!(action, Action::Quit | Action::Cancel))
+            })
+            .map(|(chord, _)| chord.clone())
+            .collect::<Vec<_>>();
+        for chord in chords {
+            keymap.bind(State::Capture, chord, vec![Action::None]);
+        }
+
+        assert_debug_snapshot!(keymap_check(Some(&keymap), None), @r###"
+        Check {
+            id: "keymap",
+            status: Warning,
+            message: "capture state has no quit or cancel binding",
+            fix: Some(
+                "Bind `quit` or `cancel` in the capture state, or restore the default preset.",
+            ),
+        }
+        "###);
+    }
+
+    #[test]
+    fn keymap_check_reports_configuration_errors() {
+        assert_debug_snapshot!(keymap_check(None, Some("invalid keymap in config.toml for tui.keys.browse.\"x\": unknown action")), @r###"
+        Check {
+            id: "keymap",
+            status: Fail,
+            message: "invalid keymap in config.toml for tui.keys.browse.\"x\": unknown action",
+            fix: Some(
+                "Fix the keymap setting and run `nib doctor` again.",
+            ),
+        }
+        "###);
+    }
 }

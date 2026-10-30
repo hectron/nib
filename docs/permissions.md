@@ -6,7 +6,7 @@ Check every permission at once without triggering a prompt:
 nib doctor
 ```
 
-`nib doctor` also checks your macOS version, configuration files, and editor. Warnings don't fail the command; a failed check exits with status 1. Add `--json` for scripts.
+`nib doctor` also checks your macOS version, configuration files, active keymap, and editor. Warnings don't fail the command; a failed check exits with status 1. Add `--json` for scripts.
 
 To grant access, run a command for each app from your regular terminal:
 

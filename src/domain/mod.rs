@@ -8,6 +8,8 @@ use jiff::{Timestamp, Zoned};
 use miette::Diagnostic;
 use thiserror::Error;
 
+use crate::tui::keymap::{DEFAULT_PRESET, Keymap};
+
 fn ambiguity_details(matches: &[String]) -> String {
     if matches.is_empty() {
         String::new()
@@ -142,6 +144,7 @@ pub struct Config {
     pub task: TaskConfig,
     pub cal: CalendarConfig,
     pub note: NoteConfig,
+    pub tui: TuiConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +175,21 @@ pub struct NoteConfig {
     pub folder: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiConfig {
+    pub preset: String,
+    pub keymap: Keymap,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            preset: DEFAULT_PRESET.into(),
+            keymap: Keymap::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
     TaskList,
@@ -180,16 +198,18 @@ pub enum ConfigKey {
     CalCalendars,
     CalShowCalendar,
     NoteFolder,
+    TuiPreset,
 }
 
 impl ConfigKey {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::TaskList,
         Self::TaskPriority,
         Self::TaskParseInline,
         Self::CalCalendars,
         Self::CalShowCalendar,
         Self::NoteFolder,
+        Self::TuiPreset,
     ];
 
     pub fn parse(key: &str) -> Option<Self> {
@@ -200,6 +220,7 @@ impl ConfigKey {
             "cal.calendars" => Some(Self::CalCalendars),
             "cal.show_calendar" => Some(Self::CalShowCalendar),
             "note.folder" => Some(Self::NoteFolder),
+            "tui.preset" => Some(Self::TuiPreset),
             _ => None,
         }
     }
@@ -212,6 +233,7 @@ impl ConfigKey {
             Self::CalCalendars => "cal.calendars",
             Self::CalShowCalendar => "cal.show_calendar",
             Self::NoteFolder => "note.folder",
+            Self::TuiPreset => "tui.preset",
         }
     }
 

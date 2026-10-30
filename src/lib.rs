@@ -4,6 +4,7 @@ mod domain;
 mod infra;
 #[cfg(test)]
 mod test_support;
+pub mod tui;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -66,7 +67,15 @@ pub fn doctor(
         .map(|path| app::doctor::ConfigLockFile { path })
         .collect::<Vec<_>>();
     let error = inspection.error().map(ToString::to_string);
-    let checks = app::doctor::checks(&probe, &config_files, error.as_deref(), &config_locks);
+    let keymap_error = inspection.keymap_error();
+    let checks = app::doctor::checks(
+        &probe,
+        &config_files,
+        error.as_deref(),
+        inspection.keymap(),
+        keymap_error.as_deref(),
+        &config_locks,
+    );
     Ok(DoctorOutput {
         text: cli::output::doctor(&checks, json, style)?,
         failed: app::doctor::failed(&checks),
