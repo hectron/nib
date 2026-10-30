@@ -314,13 +314,10 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, state: &State, theme: Theme) {
                 })
                 .collect(),
         ),
-        Mode::ConfirmDelete => (
-            format!("Delete {what}?"),
-            vec![
-                ("y".to_owned(), "delete".to_owned()),
-                ("n".to_owned(), "keep".to_owned()),
-            ],
-        ),
+        Mode::ConfirmDelete => {
+            draw_confirm_delete(frame, area, state, &what, theme);
+            return;
+        }
         Mode::Act | Mode::Filter => (
             format!("Act on {what}"),
             ACTS.iter()
@@ -328,7 +325,6 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, state: &State, theme: Theme) {
                 .collect(),
         ),
     };
-    let highlight = state.mode() != Mode::ConfirmDelete;
     let lines: Vec<Line<'_>> = options
         .into_iter()
         .enumerate()
@@ -340,7 +336,7 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, state: &State, theme: Theme) {
                 ),
                 Span::raw(name),
             ]);
-            if highlight && index == state.menu_cursor() {
+            if index == state.menu_cursor() {
                 line.style(Style::new().add_modifier(Modifier::REVERSED))
             } else {
                 line
@@ -357,6 +353,52 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, state: &State, theme: Theme) {
         .title(Span::styled(title, STRONG));
     frame.render_widget(
         Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()).block(block),
+        area,
+    );
+}
+
+fn draw_confirm_delete(frame: &mut Frame<'_>, area: Rect, state: &State, what: &str, theme: Theme) {
+    let key = |text: String| {
+        Span::styled(
+            format!("{text}  "),
+            theme.paint(Color::Cyan).add_modifier(Modifier::BOLD),
+        )
+    };
+    let mut lines = Vec::new();
+    let hidden = state.hidden_target_count();
+    if hidden > 0 {
+        lines.push(Line::styled(
+            format!("{hidden} not shown by the current query."),
+            theme.paint(Color::Yellow),
+        ));
+    }
+    lines.push(Line::styled(
+        "Undo re-creates deleted reminders with new ids and without alarms, repeats, or links.",
+        MUTED,
+    ));
+    if state.delete_needs_count() {
+        let count = state.targets().len();
+        lines.push(Line::from(vec![
+            Span::raw(format!("Type {count} and press enter: ")),
+            Span::styled(state.confirm_input().to_owned(), STRONG),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            key("y".into()),
+            Span::raw("delete  "),
+            key("n".into()),
+            Span::raw("keep"),
+        ]));
+    }
+    let block = Block::new()
+        .borders(Borders::LEFT)
+        .border_style(MUTED)
+        .padding(Padding::horizontal(1))
+        .title(Span::styled(format!("Delete {what}?"), STRONG));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -453,10 +495,61 @@ mod tests {
         "  Buy oat milk                                 Home today   "
         "  Buy eggs                                     Work         "
         "  File report                                  Work tomorrow"
-        "+ Add reminder: pri:urgent                          enter   "
+        "                                                            "
         "                                                            "
         "                                                            "
         "enter pick  tab select  ctrl-o act  ctrl-n move  esc cancel "
+        "#);
+    }
+
+    #[test]
+    fn delete_confirmation_counts_hidden_selections_and_warns_about_undo() {
+        let (mut state, _) = State::new(data(), "", now());
+        state.update(Action::ToggleDown);
+        type_text(&mut state, "eggs");
+        state.update(Action::ToggleDown);
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        assert_snapshot!(screen(&state, 84), @r#"
+        "> eggs                                                         2 selected  1 matches"
+        "────────────────────────────────────────────────────────────────────────────────────"
+        "+ Buy eggs                       Work       │Delete 2 reminders?                    "
+        "+ Add reminder: eggs                  enter │ 1 not shown by the current query.     "
+        "                                            │ Undo re-creates deleted reminders     "
+        "                                            │ with new ids and without alarms,      "
+        "                                            │ repeats, or links.                    "
+        "                                            │ y  delete  n  keep                    "
+        "esc keep                                                                            "
+        "#);
+    }
+
+    #[test]
+    fn deleting_many_asks_for_the_count() {
+        let mut items = data();
+        items.items.push(crate::tui::state::tests::item(
+            "rem-4",
+            "Water plants",
+            "Home",
+            None,
+            None,
+        ));
+        let (mut state, _) = State::new(items, "", now());
+        for _ in 0..4 {
+            state.update(Action::ToggleDown);
+        }
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        state.update(Action::Hotkey('4'));
+        assert_snapshot!(screen(&state, 60), @r#"
+        ">                                      4 selected  4 matches"
+        "────────────────────────────────────────────────────────────"
+        "│Delete 4 reminders?                                        "
+        "│ Undo re-creates deleted reminders with new ids and        "
+        "│ without alarms, repeats, or links.                        "
+        "│ Type 4 and press enter: 4                                 "
+        "│                                                           "
+        "│                                                           "
+        "esc keep                                                    "
         "#);
     }
 }

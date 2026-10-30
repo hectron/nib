@@ -13,6 +13,7 @@ pub(crate) struct Item {
     pub url: Option<String>,
     pub due: Option<Date>,
     pub due_time: Option<Time>,
+    pub due_time_zone: Option<String>,
     pub due_at: Option<Timestamp>,
     pub priority: Option<Priority>,
     pub completed: bool,
@@ -78,7 +79,11 @@ pub(crate) enum Effect {
 pub(crate) enum Response {
     Loaded(Data),
     Added(Item),
-    Changed { message: String, data: Data },
+    Changed {
+        message: String,
+        error: bool,
+        data: Option<Data>,
+    },
     Failed(String),
 }
 
@@ -107,6 +112,10 @@ pub(crate) const ACTS: [(char, &str); 4] = [
     ('d', "delete"),
 ];
 
+pub(crate) const DELETE_COUNT_THRESHOLD: usize = 3;
+
+const QUICK_ADD_PRIORITIES: [&str; 3] = ["low", "medium", "high"];
+
 pub(crate) const PRIORITIES: [(char, &str, Option<Priority>); 4] = [
     ('h', "high", Some(Priority::High)),
     ('m', "medium", Some(Priority::Medium)),
@@ -121,12 +130,14 @@ pub(crate) struct State {
     caret: usize,
     filter: Filter,
     filter_error: Option<String>,
+    plain_text: bool,
     matches: Vec<usize>,
     cursor: usize,
     selected: Vec<String>,
     mode: Mode,
     menu_cursor: usize,
     targets: Vec<String>,
+    confirm_input: String,
     status: Option<Status>,
     outcome: Option<Outcome>,
     loading_completed: bool,
@@ -141,12 +152,14 @@ impl State {
             caret: query.chars().count(),
             filter: Filter::parse("").expect("an empty expression has no tokens to reject"),
             filter_error: None,
+            plain_text: true,
             matches: Vec::new(),
             cursor: 0,
             selected: Vec::new(),
             mode: Mode::Filter,
             menu_cursor: 0,
             targets: Vec::new(),
+            confirm_input: String::new(),
             status: None,
             outcome: None,
             loading_completed: false,
@@ -219,6 +232,26 @@ impl State {
         &self.targets
     }
 
+    pub(crate) fn confirm_input(&self) -> &str {
+        &self.confirm_input
+    }
+
+    pub(crate) fn delete_needs_count(&self) -> bool {
+        self.targets.len() > DELETE_COUNT_THRESHOLD
+    }
+
+    pub(crate) fn hidden_target_count(&self) -> usize {
+        self.targets
+            .iter()
+            .filter(|id| {
+                !self
+                    .matches
+                    .iter()
+                    .any(|index| self.data.items[*index].id == **id)
+            })
+            .count()
+    }
+
     pub(crate) fn rows(&self) -> Vec<Row<'_>> {
         let mut rows: Vec<Row<'_>> = self
             .matches
@@ -243,7 +276,7 @@ impl State {
 
     fn add_text(&self) -> Option<&str> {
         let text = self.query.trim();
-        (!text.is_empty()).then_some(text)
+        (!text.is_empty() && self.filter_error.is_none() && self.plain_text).then_some(text)
     }
 
     fn row_count(&self) -> usize {
@@ -261,6 +294,7 @@ impl State {
             Ok(filter) => {
                 self.filter = filter;
                 self.filter_error = None;
+                self.plain_text = is_plain_text(&self.query);
             }
             Err(error) => self.filter_error = Some(error.to_string()),
         }
@@ -375,6 +409,7 @@ impl State {
                 }
                 self.move_cursor(action == Action::ToggleDown);
             }
+            Action::Accept | Action::OpenMenu if self.filter_error.is_some() => {}
             Action::Accept => return self.accept(),
             Action::OpenMenu => {
                 self.targets = if self.selected.is_empty() {
@@ -439,6 +474,7 @@ impl State {
             }
             _ => {
                 self.open(Mode::ConfirmDelete);
+                self.confirm_input.clear();
                 None
             }
         }
@@ -475,6 +511,24 @@ impl State {
     }
 
     fn update_confirm(&mut self, action: Action) -> Option<Effect> {
+        if self.delete_needs_count() {
+            return match action {
+                Action::Hotkey(digit) if digit.is_ascii_digit() => {
+                    self.confirm_input.push(digit);
+                    None
+                }
+                Action::Accept if self.confirm_input == self.targets.len().to_string() => {
+                    self.mode = Mode::Filter;
+                    Some(Effect::Delete(self.targets.clone()))
+                }
+                Action::Accept | Action::Hotkey(_) | Action::Cancel => {
+                    self.mode = Mode::Filter;
+                    self.set_status("Nothing was deleted.", false);
+                    None
+                }
+                _ => None,
+            };
+        }
         match action {
             Action::Hotkey('y') => {
                 self.mode = Mode::Filter;
@@ -526,12 +580,17 @@ impl State {
                 self.outcome = Some(Outcome::Picked(vec![id]));
                 None
             }
-            Response::Changed { message, data } => {
-                self.data = data;
+            Response::Changed {
+                message,
+                error,
+                data,
+            } => {
                 self.selected.clear();
                 self.targets.clear();
                 self.mode = Mode::Filter;
-                self.set_status(&message, false);
+                self.set_status(&message, error);
+                let data = data?;
+                self.data = data;
                 self.refilter()
             }
             Response::Failed(message) => {
@@ -573,6 +632,20 @@ impl State {
     }
 }
 
+fn is_plain_text(query: &str) -> bool {
+    let rest: Vec<&str> = query
+        .split_whitespace()
+        .filter(|word| {
+            !word.strip_prefix('!').is_some_and(|value| {
+                QUICK_ADD_PRIORITIES
+                    .iter()
+                    .any(|priority| value.eq_ignore_ascii_case(priority))
+            })
+        })
+        .collect();
+    Filter::parse(&rest.join(" ")).is_ok_and(|filter| filter.is_plain_text())
+}
+
 enum MenuStep {
     Chosen(usize),
     Hotkey(char),
@@ -608,6 +681,7 @@ pub(crate) mod tests {
             url: None,
             due,
             due_time: None,
+            due_time_zone: None,
             due_at: None,
             priority,
             completed: false,
@@ -693,12 +767,59 @@ pub(crate) mod tests {
 
     #[test]
     fn field_tokens_use_the_shared_filter_engine() {
-        assert_eq!(rows(&state("pri:high")), ["rem-1", "add:pri:high"]);
+        assert_eq!(rows(&state("pri:high")), ["rem-1"]);
+        assert_eq!(rows(&state("list:work !due:none")), ["rem-3"]);
+        assert_eq!(rows(&state("due:today")), ["rem-1"]);
+        assert_eq!(rows(&state("buy !eggs")), ["rem-1"]);
+    }
+
+    #[test]
+    fn a_field_query_with_no_matches_offers_no_add_row_and_enter_does_nothing() {
+        let mut items = data();
+        items.items[0].priority = None;
+        let (mut state, _) = State::new(items, "pri:high", now());
+        assert_eq!(rows(&state), Vec::<String>::new());
+        assert_eq!(state.current(), None);
+        assert_eq!(state.update(Action::Accept), None);
+        assert_eq!(state.outcome(), None);
+    }
+
+    #[test]
+    fn quick_add_tokens_keep_the_add_row() {
         assert_eq!(
-            rows(&state("list:work !due:none")),
-            ["rem-3", "add:list:work !due:none"]
+            rows(&state("Pay rent fri !HIGH #bills")),
+            ["add:Pay rent fri !HIGH #bills"]
         );
-        assert_eq!(rows(&state("due:today")), ["rem-1", "add:due:today"]);
+    }
+
+    #[test]
+    fn an_invalid_query_ignores_enter_and_the_act_menu() {
+        let mut state = state("pri:medium");
+        state.update(Action::Backspace);
+        assert_eq!(state.query(), "pri:mediu");
+        assert_eq!(rows(&state), ["rem-3"]);
+        state.update(Action::KillToStart);
+        type_text(&mut state, "pri:high");
+        state.update(Action::Backspace);
+        assert_eq!(state.query(), "pri:hig");
+        assert_eq!(
+            state.filter_error(),
+            Some("invalid value \"hig\" for pri filter; expected high, medium, low, or none")
+        );
+        assert_eq!(rows(&state), ["rem-1"]);
+        assert_eq!(state.update(Action::Accept), None);
+        assert_eq!(state.outcome(), None);
+        assert_eq!(state.update(Action::OpenMenu), None);
+        assert_eq!(state.mode(), Mode::Filter);
+
+        type_text(&mut state, "h");
+        assert_eq!(state.filter_error(), None);
+        assert_eq!(rows(&state), ["rem-1"]);
+        assert_eq!(state.update(Action::Accept), None);
+        assert_eq!(
+            state.outcome(),
+            Some(&Outcome::Picked(vec!["rem-1".into()]))
+        );
     }
 
     #[test]
@@ -708,7 +829,7 @@ pub(crate) mod tests {
             start.filter_error(),
             Some("invalid value \"urgent\" for pri filter; expected high, medium, low, or none")
         );
-        assert_eq!(rows(&start), ["rem-1", "rem-2", "rem-3", "add:pri:urgent"]);
+        assert_eq!(rows(&start), ["rem-1", "rem-2", "rem-3"]);
 
         let mut state = state("eggs");
         type_text(&mut state, " !");
@@ -716,7 +837,7 @@ pub(crate) mod tests {
             state.filter_error(),
             Some("filter token can't be empty after `!`")
         );
-        assert_eq!(rows(&state), ["rem-2", "add:eggs !"]);
+        assert_eq!(rows(&state), ["rem-2"]);
         state.update(Action::Backspace);
         assert_eq!(state.filter_error(), None);
     }
@@ -820,11 +941,11 @@ pub(crate) mod tests {
 
     #[test]
     fn a_failed_add_reports_the_error_and_keeps_the_prompt_open() {
-        let mut state = state("Pay !urgent");
+        let mut state = state("Pay !low !high");
         state.update(Action::Down);
         assert_eq!(
             state.update(Action::Accept),
-            Some(Effect::Add("Pay !urgent".into()))
+            Some(Effect::Add("Pay !low !high".into()))
         );
         state.resolve(Response::Failed("invalid inline priority".into()));
         assert_eq!(state.outcome(), None);
@@ -988,6 +1109,68 @@ pub(crate) mod tests {
         assert_eq!(state.mode(), Mode::Filter);
     }
 
+    fn select_four() -> State {
+        let mut more = data();
+        more.items
+            .push(item("rem-4", "Water plants", "Home", None, None));
+        let (mut state, _) = State::new(more, "", now());
+        for _ in 0..4 {
+            state.update(Action::ToggleDown);
+        }
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        state
+    }
+
+    #[test]
+    fn deleting_more_than_three_needs_the_count_typed() {
+        let mut state = select_four();
+        assert!(state.delete_needs_count());
+        assert_eq!(state.update(Action::Hotkey('y')), None);
+        assert_eq!(state.mode(), Mode::Filter);
+        assert_eq!(
+            state.status().map(|status| status.text.as_str()),
+            Some("Nothing was deleted.")
+        );
+
+        let mut state = select_four();
+        type_text_in_menu(&mut state, "3");
+        assert_eq!(state.update(Action::Accept), None);
+        assert_eq!(state.mode(), Mode::Filter);
+
+        let mut state = select_four();
+        type_text_in_menu(&mut state, "4");
+        assert_eq!(state.confirm_input(), "4");
+        assert_eq!(
+            state.update(Action::Accept),
+            Some(Effect::Delete(vec![
+                "rem-1".into(),
+                "rem-2".into(),
+                "rem-3".into(),
+                "rem-4".into()
+            ]))
+        );
+    }
+
+    #[test]
+    fn delete_counts_selections_hidden_by_the_query() {
+        let mut state = state("");
+        state.update(Action::ToggleDown);
+        state.update(Action::ToggleDown);
+        type_text(&mut state, "eggs");
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        assert_eq!(state.targets(), ["rem-1", "rem-2"]);
+        assert_eq!(state.hidden_target_count(), 1);
+        assert!(!state.delete_needs_count());
+    }
+
+    fn type_text_in_menu(state: &mut State, text: &str) {
+        for character in text.chars() {
+            state.update(Action::Hotkey(character));
+        }
+    }
+
     #[test]
     fn a_finished_change_reloads_data_and_clears_the_selection() {
         let mut state = state("");
@@ -999,7 +1182,8 @@ pub(crate) mod tests {
         assert_eq!(
             state.resolve(Response::Changed {
                 message: "Completed \"Buy oat milk\"".into(),
-                data: reloaded,
+                error: false,
+                data: Some(reloaded),
             }),
             None
         );
@@ -1010,6 +1194,33 @@ pub(crate) mod tests {
             Some(&Status {
                 text: "Completed \"Buy oat milk\"".into(),
                 error: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_change_without_fresh_data_keeps_its_message_and_clears_the_selection() {
+        let mut state = state("");
+        state.update(Action::ToggleDown);
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('x'));
+        let message = "Completed \"Buy oat milk\" Couldn't reload reminders, so the list may be out of date: denied";
+        assert_eq!(
+            state.resolve(Response::Changed {
+                message: message.into(),
+                error: true,
+                data: None,
+            }),
+            None
+        );
+        assert_eq!(rows(&state), ["rem-1", "rem-2", "rem-3"]);
+        assert_eq!(state.selected(), Vec::<String>::new());
+        assert_eq!(state.targets(), Vec::<String>::new());
+        assert_eq!(
+            state.status(),
+            Some(&Status {
+                text: message.into(),
+                error: true
             })
         );
     }
@@ -1035,7 +1246,7 @@ pub(crate) mod tests {
             type_text(&mut state, "is:done"),
             Some(Effect::LoadCompleted)
         );
-        assert_eq!(rows(&state), ["add:is:done"]);
+        assert_eq!(rows(&state), Vec::<String>::new());
         assert_eq!(state.update(Action::Insert(' ')), None);
         let mut completed = data();
         completed.includes_completed = true;
@@ -1043,7 +1254,7 @@ pub(crate) mod tests {
         done.completed = true;
         completed.items.push(done);
         assert_eq!(state.resolve(Response::Loaded(completed)), None);
-        assert_eq!(rows(&state), ["rem-7", "add:is:done"]);
+        assert_eq!(rows(&state), ["rem-7"]);
         assert!(state.includes_completed());
 
         let (state, effect) = State::new(data(), "is:done", now());

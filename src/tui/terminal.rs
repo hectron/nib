@@ -1,12 +1,12 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::terminal;
 use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
 use ratatui::buffer::Cell;
-use ratatui::layout::{Position, Rect, Size};
+use ratatui::layout::{Position, Size};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use rustix::event::{PollFd, PollFlags, Timespec};
 
@@ -23,7 +23,7 @@ pub(super) fn run(state: &mut State, session: &mut Session<'_>, color: bool) -> 
     let query = tty.try_clone()?;
     let _raw = RawMode::enable()?;
     let backend = TtyBackend {
-        inner: CrosstermBackend::new(tty),
+        inner: CrosstermBackend::new(BufWriter::new(tty)),
         query,
     };
     let height = backend.size()?.height.clamp(1, MAX_HEIGHT);
@@ -33,7 +33,7 @@ pub(super) fn run(state: &mut State, session: &mut Session<'_>, color: bool) -> 
             viewport: Viewport::Inline(height),
         },
     )?;
-    let mut area = Rect::default();
+    let mut area = terminal.get_frame().area();
     let result = (|| -> io::Result<()> {
         loop {
             terminal.draw(|frame| {
@@ -83,7 +83,7 @@ impl Drop for RawMode {
 }
 
 struct TtyBackend {
-    inner: CrosstermBackend<File>,
+    inner: CrosstermBackend<BufWriter<File>>,
     query: File,
 }
 

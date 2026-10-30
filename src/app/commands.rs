@@ -2459,6 +2459,7 @@ mod pick_tests {
                 list: Some("Reminders"),
                 due: Some(date(2026, 11, 9)),
                 due_time: Some(time(9, 0, 0, 0)),
+                due_time_zone: Some("America/New_York"),
                 priority: Some(Priority::Low),
                 completed: false,
             },
@@ -2468,6 +2469,7 @@ mod pick_tests {
                 list: None,
                 due: None,
                 due_time: None,
+                due_time_zone: None,
                 priority: None,
                 completed: false,
             },
@@ -2492,6 +2494,7 @@ mod pick_tests {
             "list": "Reminders",
             "due": "2026-11-09",
             "due_time": "09:00",
+            "due_time_zone": "America/New_York",
             "priority": "low",
             "completed": false
           },
@@ -2501,6 +2504,7 @@ mod pick_tests {
             "list": null,
             "due": null,
             "due_time": null,
+            "due_time_zone": null,
             "priority": null,
             "completed": false
           }

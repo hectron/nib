@@ -80,6 +80,23 @@ pub enum SelectError {
     ReadOnlyList { name: String },
 }
 
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+#[derive(Debug, Error, Diagnostic, PartialEq, Eq)]
+pub(crate) enum DeleteError {
+    #[error("\"{title}\" is in the read-only list \"{list}\" and can't be deleted")]
+    #[diagnostic(code(nib::task::read_only_list))]
+    ReadOnly { title: String, list: String },
+
+    #[error("nib can't fully back up \"{title}\", so it won't delete it here")]
+    #[diagnostic(
+        code(nib::task::partial_backup),
+        help(
+            "delete it with `nib task edit`, which warns about the partial backup before applying"
+        )
+    )]
+    PartialBackup { title: String },
+}
+
 pub fn run(
     request: &TaskChangeRequest,
     now: &Zoned,
@@ -121,7 +138,7 @@ pub fn run(
     if let Err(error) =
         journal::record_action(now, change.journal_action(), &changes, &applied, host)
     {
-        host.say("The changes were applied, but nib couldn't record the journal entry.");
+        host.say(journal::UNRECORDED);
         return Err(error);
     }
     Ok(changes
@@ -162,6 +179,24 @@ pub(crate) fn delete(
                 .reminder(id)?
                 .ok_or_else(|| miette::miette!("reminder {} not found", clean(id)))?,
         };
+        if snapshot
+            .lists
+            .iter()
+            .find(|list| list.id == reminder.list_id)
+            .is_some_and(|list| !list.writable)
+        {
+            return Err(DeleteError::ReadOnly {
+                title: clean(&reminder.title),
+                list: clean(&list_name(&snapshot.lists, &reminder.list_id)),
+            }
+            .into());
+        }
+        if reminder.backup_partial {
+            return Err(DeleteError::PartialBackup {
+                title: clean(&reminder.title),
+            }
+            .into());
+        }
         if !selected.iter().any(|existing| existing.id == reminder.id) {
             selected.push(reminder);
         }
@@ -181,7 +216,7 @@ pub(crate) fn delete(
     if let Err(error) =
         journal::record_action(now, JournalAction::TaskDelete, &changes, &applied, host)
     {
-        host.say("The changes were applied, but nib couldn't record the journal entry.");
+        host.say(journal::UNRECORDED);
         return Err(error);
     }
     Ok(selected)
@@ -1007,6 +1042,71 @@ mod tests {
         assert_eq!(error.to_string(), "reminder nope not found");
         assert_eq!(*reminders.borrow(), sample());
         assert_eq!(host.journals, Vec::<(String, String)>::new());
+    }
+
+    fn delete_from(
+        reminders: Vec<StoredReminder>,
+        ids: &[&str],
+        host: &mut Scripted,
+    ) -> (Result<Vec<StoredReminder>>, Vec<StoredReminder>) {
+        let reminders = Shared::new(RefCell::new(reminders));
+        let backends = backends(&reminders, &Calls::default());
+        let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        let result = delete(&ids, &now(), &backends, host);
+        let state = reminders.borrow().clone();
+        (result, state)
+    }
+
+    #[test]
+    fn delete_finds_completed_reminders_by_id() {
+        let mut host = Scripted::new();
+        let (result, state) = delete_from(sample(), &["rem-5"], &mut host);
+        assert_eq!(result.unwrap()[0].title, "Buy stamps");
+        assert!(state.iter().all(|reminder| reminder.id != "rem-5"));
+        assert_eq!(host.journals.len(), 1);
+    }
+
+    #[test]
+    fn delete_refuses_reminders_in_read_only_lists() {
+        let mut reminders = sample();
+        reminders.push(reminder("rem-6", "Shared chore", "list-shared", false));
+        let mut host = Scripted::new();
+        let (result, state) = delete_from(reminders.clone(), &["rem-1", "rem-6"], &mut host);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "\"Shared chore\" is in the read-only list \"Shared\" and can't be deleted"
+        );
+        assert_eq!(state, reminders);
+        assert_eq!(host.backups, Vec::<(String, String)>::new());
+        assert_eq!(host.journals, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn delete_refuses_reminders_whose_backup_would_be_partial() {
+        let mut reminders = sample();
+        reminders[1].backup_partial = true;
+        let mut host = Scripted::new();
+        let (result, state) = delete_from(reminders.clone(), &["rem-2"], &mut host);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "nib can't fully back up \"Buy eggs\", so it won't delete it here"
+        );
+        assert_eq!(state, reminders);
+        assert_eq!(host.backups, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn a_journal_failure_after_a_delete_says_the_change_was_applied() {
+        let mut host = Scripted::new();
+        host.fail_next_journal_save();
+        let (result, state) = delete_from(sample(), &["rem-1"], &mut host);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "injected journal save failure"
+        );
+        assert_eq!(state.len(), 4);
+        assert_eq!(host.backups.len(), 1);
+        assert_eq!(host.said, [journal::UNRECORDED]);
     }
 
     #[test]

@@ -747,6 +747,7 @@ pub struct Scripted {
     sequence: u128,
     fail_replace_once: bool,
     fail_remove_once: bool,
+    fail_save_once: bool,
     journal_replacement_on_answer: Option<(String, String)>,
     journal_removal_on_answer: Option<String>,
     journal_unreadable_on_answer: Option<(String, String)>,
@@ -784,6 +785,7 @@ impl Scripted {
             sequence: 0,
             fail_replace_once: false,
             fail_remove_once: false,
+            fail_save_once: false,
             journal_replacement_on_answer: None,
             journal_removal_on_answer: None,
             journal_unreadable_on_answer: None,
@@ -840,6 +842,10 @@ impl Scripted {
 
     pub fn fail_next_journal_remove(&mut self) {
         self.fail_remove_once = true;
+    }
+
+    pub fn fail_next_journal_save(&mut self) {
+        self.fail_save_once = true;
     }
 
     fn listed_journals(&self) -> Vec<JournalFile> {
@@ -941,6 +947,10 @@ impl Host for Scripted {
     }
 
     fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
+        if self.fail_save_once {
+            self.fail_save_once = false;
+            return Err(io::Error::other("injected journal save failure"));
+        }
         self.sequence += 1;
         let saved_name = if self.journals.iter().any(|(saved, _)| saved == name) {
             let (stem, extension) = name.rsplit_once('.').unwrap_or((name, "json"));

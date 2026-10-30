@@ -113,6 +113,13 @@ impl Filter {
     pub(crate) fn includes_completed(&self) -> bool {
         self.include_completed
     }
+
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    pub(crate) fn is_plain_text(&self) -> bool {
+        self.clauses
+            .iter()
+            .all(|clause| !clause.negated && matches!(clause.predicate, Predicate::Text(_)))
+    }
 }
 
 impl Predicate {
@@ -419,6 +426,17 @@ mod tests {
             error.code().unwrap().to_string(),
             "nib::filter::empty_token"
         );
+    }
+
+    #[test]
+    fn plain_text_has_no_fields_or_negation() {
+        let plain = |expression: &str| Filter::parse(expression).unwrap().is_plain_text();
+        assert!(plain(""));
+        assert!(plain("call mom fri #home note:x"));
+        assert!(!plain("pri:high"));
+        assert!(!plain("buy list:work"));
+        assert!(!plain("buy !eggs"));
+        assert!(!plain("is:done"));
     }
 
     #[test]

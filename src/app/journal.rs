@@ -278,6 +278,9 @@ pub fn record_edit(
     record_action(now, JournalAction::TaskEdit, changes, result, host)
 }
 
+pub(crate) const UNRECORDED: &str =
+    "The changes were applied, but nib couldn't record the journal entry.";
+
 pub fn record_action(
     now: &Zoned,
     action: JournalAction,

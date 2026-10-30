@@ -12,7 +12,7 @@ The prompt is drawn on the terminal itself, not on standard output, so it still 
 
 ## Filtering
 
-The query uses the same syntax as `nib task list --filter`: fuzzy title text plus `list:`, `due:`, `pri:`, and `is:` fields and `!` negation. See [Filtering reminders](filter.md). An invalid field value is shown under the prompt, and the results stay as they were until the query is valid again. Completed reminders are loaded the first time the query contains `is:done`.
+The query uses the same syntax as `nib task list --filter`: fuzzy title text plus `list:`, `due:`, `pri:`, and `is:` fields and `!` negation. See [Filtering reminders](filter.md). An invalid field value is shown under the prompt, and the results stay as they were until the query is valid again. While the query is invalid, Enter and `ctrl-o` do nothing. Completed reminders are loaded the first time the query contains `is:done`.
 
 The highlighted reminder's list, due date, priority, link, and notes appear in a preview on the right when the terminal is at least 80 columns wide.
 
@@ -35,7 +35,7 @@ Selections are kept while you change the query, so you can select reminders from
 
 ## Adding a reminder
 
-When the query isn't empty, the last row is `Add reminder: <query>`. Highlight it and press Enter to create the reminder with the [quick-add](quick-add.md) parser, then print its ID. Because the text isn't parsed by a shell, `!high` and `#list` need no quotes:
+When the query is plain text, the last row is `Add reminder: <query>`. Highlight it and press Enter to create the reminder with the [quick-add](quick-add.md) parser, then print its ID. A query with a `list:`, `due:`, `pri:`, `is:`, or `cal:` field or a `!` negation has no Add row, so Enter does nothing when it matches no reminders. The quick-add priorities `!low`, `!medium`, and `!high` don't count as negations here. Because the text isn't parsed by a shell, `!high` and `#list` need no quotes:
 
 ```text
 > Pay rent fri !high #bills
@@ -50,9 +50,11 @@ When the query isn't empty, the last row is `Add reminder: <query>`. Highlight i
 | `x` | Mark completed, like `nib task done` |
 | `p` | Set priority: `h` high, `m` medium, `l` low, or `n` none, like `nib task priority` |
 | `m` | Move to a writable list, chosen by number or with the arrow keys and Enter, like `nib task move` |
-| `d` | Delete, after confirming with `y` |
+| `d` | Delete, after confirming with `y`, or by typing the count and pressing Enter when more than three reminders are selected |
 
-Each action backs up the reminders and writes a journal entry, as the [one-step commands](task-commands.md) do, so `nib log` lists it and `nib undo` reverses it. Deletes appear in the journal as `task_delete`. After an action, the prompt stays open with the updated reminders and a one-line result, and selections are cleared.
+Each action backs up the reminders and writes a journal entry, as the [one-step commands](task-commands.md) do, so `nib log` lists it and `nib undo` reverses it. Deletes appear in the journal as `task_delete`. Undo can't bring back a deleted reminder itself: it re-creates the reminder with a new ID and without its alarms, repeats, or links, so IDs printed earlier no longer work. After an action, the prompt stays open with the updated reminders and a one-line result, and selections are cleared. If the change worked but nib couldn't reload the reminders or record the journal entry, the result line says so.
+
+The delete confirmation counts selected reminders that the current query hides. Delete refuses reminders in read-only lists. It also refuses reminders that nib can't fully back up; `nib task edit` can delete those after warning about the partial backup.
 
 Editing reminders in `$EDITOR` from the prompt isn't available yet; use `nib task edit`.
 

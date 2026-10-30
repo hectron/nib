@@ -67,13 +67,14 @@ Reminder objects contain `id`, `title`, `due`, `due_time`, `due_time_zone`, and 
     "list": "Reminders",
     "due": "2026-11-09",
     "due_time": "09:00",
+    "due_time_zone": "America/New_York",
     "priority": "low",
     "completed": false
   }
 ]
 ```
 
-`nib pick --json` returns an array with one object per chosen reminder, in the order they were selected. Each object contains `id`, `title`, `list`, `due`, `due_time`, `priority`, and `completed`. `due`, `due_time`, and `priority` use the same forms as reminder objects. `list` is the reminder list's name, or `null` for a reminder added from the prompt without a `#list` token or a configured default list. Cancelling the prompt prints nothing.
+`nib pick --json` returns an array with one object per chosen reminder, in the order they were selected. Each object contains `id`, `title`, `list`, `due`, `due_time`, `due_time_zone`, `priority`, and `completed`. `due`, `due_time`, `due_time_zone`, and `priority` use the same forms as reminder objects. `list` is the reminder list's name, or `null` for a reminder added from the prompt without a `#list` token or a configured default list. Cancelling the prompt prints nothing.
 
 ## Calendar events
 

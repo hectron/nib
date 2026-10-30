@@ -85,6 +85,7 @@ fn finish(state: &State, json: bool, style: Style) -> Result<Picked> {
             list: item.list.as_deref(),
             due: item.due,
             due_time: item.due_time,
+            due_time_zone: item.due_time_zone.as_deref(),
             priority: item.priority,
             completed: item.completed,
         })

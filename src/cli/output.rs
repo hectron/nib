@@ -336,6 +336,7 @@ pub(crate) struct PickedReminder<'a> {
     pub list: Option<&'a str>,
     pub due: Option<Date>,
     pub due_time: Option<jiff::civil::Time>,
+    pub due_time_zone: Option<&'a str>,
     pub priority: Option<Priority>,
     pub completed: bool,
 }
@@ -1205,6 +1206,7 @@ struct PickedJson<'a> {
     list: Option<&'a str>,
     due: Option<Date>,
     due_time: Option<String>,
+    due_time_zone: Option<&'a str>,
     priority: Option<&'static str>,
     completed: bool,
 }
@@ -1221,6 +1223,7 @@ impl<'a> From<&PickedReminder<'a>> for PickedJson<'a> {
                 .due
                 .and(item.due_time)
                 .map(|time| time.strftime("%H:%M").to_string()),
+            due_time_zone: item.due.and(item.due_time).and(item.due_time_zone),
             priority: item.priority.map(Priority::as_str),
             completed: item.completed,
         }

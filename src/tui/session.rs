@@ -7,7 +7,7 @@ use miette::Result;
 
 use super::state::{Data, Effect, Item, ListChoice, Response};
 use crate::app::commands::reminder_from_snapshot;
-use crate::app::quick;
+use crate::app::{journal, quick};
 use crate::cli::output::{self, Style, clean};
 use crate::domain::{Backends, Config, Reminder, ReminderSnapshot, TaskChangeRequest};
 use crate::infra::host::{EditFile, Host, JournalFile, JournalLock};
@@ -58,13 +58,31 @@ impl Session<'_> {
                 })
             }
         };
-        let result = match result {
-            Ok(Response::Changed { message, .. }) => self
-                .load(includes_completed)
-                .map(|data| Response::Changed { message, data }),
-            other => other,
-        };
-        result.unwrap_or_else(|error| Response::Failed(clean(&error.to_string())))
+        match result {
+            Ok(Response::Changed { message, error, .. }) => {
+                self.reloaded(message, error, includes_completed)
+            }
+            Ok(other) => other,
+            Err(error) => Response::Failed(clean(&error.to_string())),
+        }
+    }
+
+    fn reloaded(&self, message: String, error: bool, includes_completed: bool) -> Response {
+        match self.load(includes_completed) {
+            Ok(data) => Response::Changed {
+                message,
+                error,
+                data: Some(data),
+            },
+            Err(reload) => Response::Changed {
+                message: format!(
+                    "{message} Couldn't reload reminders, so the list may be out of date: {}",
+                    clean(&reload.to_string())
+                ),
+                error: true,
+                data: None,
+            },
+        }
     }
 
     fn quietly(&mut self, run: impl FnOnce(&mut dyn Host) -> Result<String>) -> Result<Response> {
@@ -79,10 +97,17 @@ impl Session<'_> {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
+        let applied = host.said.iter().any(|line| line == journal::UNRECORDED);
         match result {
             Ok(summary) => Ok(Response::Changed {
                 message: with_said(summary),
-                data: Data::default(),
+                error: false,
+                data: None,
+            }),
+            Err(error) if applied => Ok(Response::Changed {
+                message: with_said(error.to_string()),
+                error: true,
+                data: None,
             }),
             Err(error) => Err(miette::miette!("{}", with_said(error.to_string()))),
         }
@@ -118,6 +143,7 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
                 url,
                 due: reminder.due,
                 due_time: reminder.due_time,
+                due_time_zone: reminder.due_time_zone,
                 due_at: reminder.due_at,
                 priority: reminder.priority,
                 completed,
@@ -147,6 +173,7 @@ fn added_item(reminder: Reminder, list: Option<String>) -> Item {
         url: None,
         due: reminder.due,
         due_time: reminder.due_time,
+        due_time_zone: reminder.due_time_zone,
         due_at: reminder.due_at,
         priority: reminder.priority,
         completed: false,
@@ -213,7 +240,7 @@ mod tests {
     use jiff::civil::{date, time};
 
     use super::*;
-    use crate::domain::{Priority, TaskChange};
+    use crate::domain::{BackendError, Priority, TaskChange};
     use crate::infra::host::Scripted;
     use crate::tui::state::tests::{now, type_text};
     use crate::tui::state::{Action, Outcome, State};
@@ -299,13 +326,19 @@ mod tests {
                 false,
             )
         });
-        let Response::Changed { message, data } = response else {
+        let Response::Changed {
+            message,
+            error,
+            data: Some(data),
+        } = response
+        else {
             panic!("expected a change, got {response:?}");
         };
         assert_eq!(
             message,
             "Completed \"Pay rent\"; Completed \"Buy groceries\""
         );
+        assert!(!error);
         assert_eq!(data.items.len(), 4);
         assert_eq!(journal_action(&host), "task_done");
         assert_eq!(host.backups.len(), 1);
@@ -347,12 +380,122 @@ mod tests {
         let response = run(&mut host, |session| {
             session.perform(Effect::Delete(vec!["reminder-2".into()]), true)
         });
-        let Response::Changed { message, data } = response else {
+        let Response::Changed {
+            message,
+            data: Some(data),
+            ..
+        } = response
+        else {
             panic!("expected a change, got {response:?}");
         };
         assert_eq!(message, "Deleted \"Pay rent\"");
         assert!(data.includes_completed);
         assert_eq!(journal_action(&host), "task_delete");
+    }
+
+    #[test]
+    fn a_journal_failure_after_apply_reports_the_change_and_reloads() {
+        let mut host = Scripted::new();
+        host.fail_next_journal_save();
+        let response = run(&mut host, |session| {
+            session.perform(Effect::Delete(vec!["reminder-2".into()]), false)
+        });
+        let Response::Changed {
+            message,
+            error,
+            data: Some(_),
+        } = response
+        else {
+            panic!("expected a change, got {response:?}");
+        };
+        assert!(error);
+        assert!(message.ends_with(journal::UNRECORDED), "{message}");
+        assert_eq!(host.journals, Vec::<(String, String)>::new());
+        assert_eq!(host.backups.len(), 1);
+    }
+
+    struct ReloadFails {
+        demo: Backends,
+        snapshots: std::cell::Cell<usize>,
+    }
+
+    impl crate::domain::Reminders for ReloadFails {
+        fn add(&self, reminder: crate::domain::NewReminder) -> Result<Reminder, BackendError> {
+            self.demo.reminders.add(reminder)
+        }
+
+        fn list(&self) -> Result<Vec<Reminder>, BackendError> {
+            self.demo.reminders.list()
+        }
+
+        fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+            self.snapshots.set(self.snapshots.get() + 1);
+            if self.snapshots.get() > 1 {
+                return Err(BackendError::Unsupported {
+                    app: "Reminders",
+                    operation: "reloading",
+                });
+            }
+            self.demo.reminders.snapshot(list)
+        }
+
+        fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+            self.demo.reminders.snapshot_including_completed()
+        }
+
+        fn apply(
+            &self,
+            changes: &[crate::domain::ReminderChange],
+        ) -> Result<crate::domain::ApplyResult, BackendError> {
+            self.demo.reminders.apply(changes)
+        }
+
+        fn reminder(
+            &self,
+            id: &str,
+        ) -> Result<Option<crate::domain::StoredReminder>, BackendError> {
+            self.demo.reminders.reminder(id)
+        }
+    }
+
+    #[test]
+    fn a_reload_failure_keeps_the_success_message() {
+        let now = now();
+        let config = Config::default();
+        let demo = crate::infra::demo::backends(&now);
+        let backends = Backends::new(
+            || -> Box<dyn crate::domain::Notes> { unreachable!() },
+            move || {
+                Box::new(ReloadFails {
+                    demo,
+                    snapshots: std::cell::Cell::new(0),
+                })
+            },
+            || -> Box<dyn crate::domain::Calendar> { unreachable!() },
+        );
+        let mut host = Scripted::new();
+        let mut session = Session {
+            now: &now,
+            config: &config,
+            backends: &backends,
+            host: &mut host,
+        };
+        let response = session.perform(
+            Effect::Change {
+                change: TaskChange::Complete,
+                ids: vec!["reminder-2".into()],
+            },
+            false,
+        );
+        assert_eq!(
+            response,
+            Response::Changed {
+                message: "Completed \"Pay rent\" Couldn't reload reminders, so the list may be out of date: Reminders doesn't support reloading".into(),
+                error: true,
+                data: None,
+            }
+        );
+        assert_eq!(journal_action(&host), "task_done");
     }
 
     #[test]
