@@ -31,7 +31,7 @@ On a repeating reminder, `done` completes the current occurrence the way Reminde
 
 ## Selectors
 
-A selector is a reminder ID, as printed by `--json`, or part of a title. Title matching ignores case and must match exactly one reminder. `done`, `priority`, and `move` match titles among open reminders, while `reopen` matches completed ones. An ID selects its reminder in any list, but `done` refuses one that is already completed, and `reopen` refuses one that is still open.
+A selector is a reminder ID, as printed by `--json`, or part of a title. Title matching ignores case and must match exactly one reminder. `done`, `priority`, and `move` match titles among open reminders, while `reopen` finds completed reminders by ID or title. An ID selects its reminder in any list, but `done` refuses one that is already completed, and `reopen` refuses one that is still open.
 
 Add `--list <NAME>` to match titles in one list only. It takes an exact list name, not a list ID, and doesn't restrict selectors that are IDs:
 
@@ -49,7 +49,7 @@ When a title matches no reminder, or more than one, nothing changes. An ambiguou
 
 nib resolves every selector before it changes anything, so one bad selector leaves all of the reminders as they were.
 
-With live Reminders data, `nib task reopen` finds completed reminders by ID only; searching completed reminders by title isn't available yet. The `id` field in the output of `nib task done --json` is the ID to pass. Title search for `reopen` works with `NIB_DEMO=1`.
+`reopen` reads every completed reminder before it matches, so it can be slow with a very large completed history.
 
 ## Undo
 

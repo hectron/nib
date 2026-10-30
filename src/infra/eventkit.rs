@@ -215,31 +215,16 @@ impl Reminders for EventKitReminders {
     fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
         autoreleasepool(|_| {
             let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
-            let calendars: Vec<Retained<EKCalendar>> = calendars(&store, EKEntityType::Reminder)
-                .into_iter()
-                .filter(|calendar| list.is_none_or(|name| calendar_title(calendar) == name))
-                .collect();
-            if let Some(name) = list
-                && calendars.is_empty()
-            {
-                return Err(BackendError::NotFound {
-                    kind: "reminder list",
-                    name: name.into(),
-                });
-            }
-            let lists = calendars
-                .iter()
-                .map(|calendar| reminder_list(calendar))
-                .collect();
-            if calendars.is_empty() {
-                self.update_cache(&store);
-                return Ok(ReminderSnapshot::default());
-            }
-            let chosen = NSArray::from_retained_slice(&calendars);
-            let predicate = incomplete_reminders_predicate(&store, Some(&chosen));
-            let mut reminders = fetch_reminders(&store, &predicate, to_stored)?;
-            reminders.sort_by(compare_stored_reminders);
-            let snapshot = ReminderSnapshot { lists, reminders };
+            let snapshot = reminder_snapshot(&store, list, false)?;
+            self.update_cache(&store);
+            Ok(snapshot)
+        })
+    }
+
+    fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
+            let snapshot = reminder_snapshot(&store, None, true)?;
             self.update_cache(&store);
             Ok(snapshot)
         })
@@ -462,6 +447,50 @@ fn incomplete_reminders_predicate(
             None, None, calendars,
         )
     }
+}
+
+fn all_reminders_predicate(
+    store: &EKEventStore,
+    calendars: Option<&NSArray<EKCalendar>>,
+) -> Retained<NSPredicate> {
+    // SAFETY: The retained store and optional retained calendar array are valid for this
+    // synchronous predicate construction.
+    unsafe { store.predicateForRemindersInCalendars(calendars) }
+}
+
+fn reminder_snapshot(
+    store: &EKEventStore,
+    list: Option<&str>,
+    include_completed: bool,
+) -> Result<ReminderSnapshot, BackendError> {
+    let calendars: Vec<Retained<EKCalendar>> = calendars(store, EKEntityType::Reminder)
+        .into_iter()
+        .filter(|calendar| list.is_none_or(|name| calendar_title(calendar) == name))
+        .collect();
+    if let Some(name) = list
+        && calendars.is_empty()
+    {
+        return Err(BackendError::NotFound {
+            kind: "reminder list",
+            name: name.into(),
+        });
+    }
+    let lists = calendars
+        .iter()
+        .map(|calendar| reminder_list(calendar))
+        .collect();
+    if calendars.is_empty() {
+        return Ok(ReminderSnapshot::default());
+    }
+    let chosen = NSArray::from_retained_slice(&calendars);
+    let predicate = if include_completed {
+        all_reminders_predicate(store, Some(&chosen))
+    } else {
+        incomplete_reminders_predicate(store, Some(&chosen))
+    };
+    let mut reminders = fetch_reminders(store, &predicate, to_stored)?;
+    reminders.sort_by(compare_stored_reminders);
+    Ok(ReminderSnapshot { lists, reminders })
 }
 
 fn fetch_reminders<T: Send + 'static>(

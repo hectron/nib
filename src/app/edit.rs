@@ -308,6 +308,10 @@ mod tests {
             Ok(self.snapshot.clone())
         }
 
+        fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+            Ok(self.snapshot.clone())
+        }
+
         fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
             assert!(
                 self.journal_locks.get() > 0,
@@ -581,6 +585,10 @@ mod tests {
             }
 
             fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+                Ok(self.0.clone())
+            }
+
+            fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
                 Ok(self.0.clone())
             }
 

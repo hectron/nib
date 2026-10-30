@@ -36,6 +36,25 @@ pub struct Reminder {
     pub priority: Option<Priority>,
 }
 
+pub(crate) fn reminder_due_is_overdue(
+    due: Option<Date>,
+    due_time: Option<Time>,
+    due_at: Option<Timestamp>,
+    now: &Zoned,
+) -> bool {
+    let Some(date) = due else {
+        return false;
+    };
+    let Some(time) = due_time else {
+        return date < now.date();
+    };
+    if let Some(due_at) = due_at {
+        return due_at < now.timestamp();
+    }
+    let civil = date.at(time.hour(), time.minute(), 0, 0);
+    civil < now.datetime()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub id: String,
@@ -645,6 +664,7 @@ pub trait Reminders {
     fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError>;
     fn list(&self) -> Result<Vec<Reminder>, BackendError>;
     fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError>;
+    fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError>;
     fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
         self.snapshot(None).map(|snapshot| {
             snapshot
@@ -681,12 +701,6 @@ pub trait Reminders {
     fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError>;
     fn reminder(&self, _id: &str) -> Result<Option<StoredReminder>, BackendError> {
         Ok(None)
-    }
-    fn completed_reminders(&self) -> Result<Vec<StoredReminder>, BackendError> {
-        Err(BackendError::Unsupported {
-            app: "Reminders",
-            operation: "finding completed reminders by title",
-        })
     }
     fn validate_time_zone(&self, _name: &str) -> Result<(), BackendError> {
         Ok(())

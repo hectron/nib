@@ -38,7 +38,7 @@ nib cal --week
 nib doctor
 ```
 
-`n` and `t` are capture commands. With a title, they create an item; without one, they list items. Note titles use single spaces between words, and a note folder name must match exactly one folder across your accounts.
+`n` and `t` are capture commands. With a title, they create an item; without one, they list items. Note titles use single spaces between words, and a note folder name must match exactly one folder across your accounts. Use `nib task list --filter "due:week !pri:low"` to narrow reminders; see [Filtering reminders](docs/filter.md) for the complete syntax.
 
 ```bash
 nib note new "Meeting with Team" --folder Work

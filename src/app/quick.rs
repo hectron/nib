@@ -78,13 +78,6 @@ pub enum SelectError {
     #[error("reminder list \"{name}\" is read-only")]
     #[diagnostic(code(nib::task::read_only_list), help("choose a list you can change"))]
     ReadOnlyList { name: String },
-
-    #[error("nib can't search completed reminders by title yet, so \"{selector}\" wasn't found")]
-    #[diagnostic(
-        code(nib::task::completed_title_search),
-        help("pass the reminder's id, as printed by `nib task done --json`")
-    )]
-    CompletedTitleSearch { selector: String },
 }
 
 pub fn run(
@@ -98,35 +91,25 @@ pub fn run(
         selectors,
         list,
     } = request;
-    let snapshot = backends.reminders.snapshot(None)?;
-    let completed = if *change == TaskChange::Reopen {
-        match backends.reminders.completed_reminders() {
-            Ok(completed) => Some(completed),
-            Err(BackendError::Unsupported { .. }) => None,
-            Err(error) => return Err(error.into()),
-        }
+    let reopen = *change == TaskChange::Reopen;
+    let snapshot = if reopen {
+        backends.reminders.snapshot_including_completed()?
     } else {
-        Some(Vec::new())
+        backends.reminders.snapshot(None)?
     };
-    let open: Vec<StoredReminder> = snapshot
-        .reminders
-        .into_iter()
-        .filter(|reminder| !reminder.completed)
-        .collect();
-    let pool = if *change == TaskChange::Reopen {
-        completed.as_deref()
-    } else {
-        Some(open.as_slice())
-    };
-    let known: Vec<&StoredReminder> = open.iter().chain(completed.iter().flatten()).collect();
     let selected = select(
         change,
         selectors,
         list.as_deref(),
         &snapshot.lists,
-        &known,
-        pool,
-        |id| backends.reminders.reminder(id),
+        &snapshot.reminders,
+        |id| {
+            if reopen {
+                Ok(None)
+            } else {
+                backends.reminders.reminder(id)
+            }
+        },
     )?;
     let changes = plan(change, &selected, &snapshot.lists)?;
     if changes.is_empty() {
@@ -163,15 +146,11 @@ pub(crate) fn select(
     selectors: &[String],
     list: Option<&str>,
     lists: &[ReminderList],
-    known: &[&StoredReminder],
-    pool: Option<&[StoredReminder]>,
+    known: &[StoredReminder],
     mut fetch: impl FnMut(&str) -> std::result::Result<Option<StoredReminder>, BackendError>,
 ) -> Result<Vec<StoredReminder>> {
-    let state = if *change == TaskChange::Reopen {
-        "completed"
-    } else {
-        "open"
-    };
+    let reopen = *change == TaskChange::Reopen;
+    let state = if reopen { "completed" } else { "open" };
     let scope_ids = list
         .map(|name| {
             let ids: HashSet<&str> = lists
@@ -193,22 +172,22 @@ pub(crate) fn select(
     for selector in selectors {
         let reminder = if let Some(found) = known.iter().find(|reminder| reminder.id == *selector) {
             check_state(change, found)?;
-            (*found).clone()
+            found.clone()
         } else {
             let needle = selector.to_lowercase();
-            let matches: Option<Vec<&StoredReminder>> = pool.map(|pool| {
-                pool.iter()
-                    .filter(|reminder| {
-                        scope_ids
+            let matches: Vec<&StoredReminder> = known
+                .iter()
+                .filter(|reminder| {
+                    reminder.completed == reopen
+                        && scope_ids
                             .as_ref()
                             .is_none_or(|ids| ids.contains(reminder.list_id.as_str()))
-                            && reminder.title.to_lowercase().contains(&needle)
-                    })
-                    .collect()
-            });
-            match matches.as_deref() {
-                Some([only]) => (*only).clone(),
-                Some(candidates @ [_, _, ..]) => {
+                        && reminder.title.to_lowercase().contains(&needle)
+                })
+                .collect();
+            match matches.as_slice() {
+                [only] => (*only).clone(),
+                candidates @ [_, _, ..] => {
                     return Err(SelectError::Ambiguous {
                         selector: clean(selector),
                         state,
@@ -226,15 +205,10 @@ pub(crate) fn select(
                     }
                     .into());
                 }
-                _ => {
+                [] => {
                     if let Some(found) = fetch(selector)? {
                         check_state(change, &found)?;
                         found
-                    } else if pool.is_none() {
-                        return Err(SelectError::CompletedTitleSearch {
-                            selector: clean(selector),
-                        }
-                        .into());
                     } else {
                         return Err(SelectError::NoMatch {
                             selector: clean(selector),
@@ -376,10 +350,11 @@ mod tests {
     use crate::infra::host::Scripted;
 
     type Shared = Rc<RefCell<Vec<StoredReminder>>>;
+    type Calls = Rc<RefCell<Vec<String>>>;
 
     struct Store {
         reminders: Shared,
-        completed_search: bool,
+        calls: Calls,
     }
 
     impl Reminders for Store {
@@ -392,6 +367,7 @@ mod tests {
         }
 
         fn snapshot(&self, _: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+            self.calls.borrow_mut().push("snapshot".into());
             Ok(ReminderSnapshot {
                 lists: lists(),
                 reminders: self
@@ -404,29 +380,24 @@ mod tests {
             })
         }
 
+        fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+            self.calls
+                .borrow_mut()
+                .push("snapshot_including_completed".into());
+            Ok(ReminderSnapshot {
+                lists: lists(),
+                reminders: self.reminders.borrow().clone(),
+            })
+        }
+
         fn reminder(&self, id: &str) -> Result<Option<StoredReminder>, BackendError> {
+            self.calls.borrow_mut().push(format!("reminder {id}"));
             Ok(self
                 .reminders
                 .borrow()
                 .iter()
                 .find(|reminder| reminder.id == id)
                 .cloned())
-        }
-
-        fn completed_reminders(&self) -> Result<Vec<StoredReminder>, BackendError> {
-            if !self.completed_search {
-                return Err(BackendError::Unsupported {
-                    app: "Reminders",
-                    operation: "finding completed reminders by title",
-                });
-            }
-            Ok(self
-                .reminders
-                .borrow()
-                .iter()
-                .filter(|reminder| reminder.completed)
-                .cloned()
-                .collect())
         }
 
         fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
@@ -509,16 +480,12 @@ mod tests {
             .unwrap()
     }
 
-    fn backends(reminders: &Shared, completed_search: bool) -> Backends {
+    fn backends(reminders: &Shared, calls: &Calls) -> Backends {
         let reminders = reminders.clone();
+        let calls = calls.clone();
         Backends::new(
             || -> Box<dyn Notes> { unreachable!() },
-            move || {
-                Box::new(Store {
-                    reminders,
-                    completed_search,
-                })
-            },
+            move || Box::new(Store { reminders, calls }),
             || -> Box<dyn Calendar> { unreachable!() },
         )
     }
@@ -535,16 +502,31 @@ mod tests {
         change: &TaskChange,
         selectors: &[&str],
     ) -> (Result<Vec<Changed>>, Vec<StoredReminder>, Scripted) {
+        let (result, state, host, _) = change_with_calls(change, selectors);
+        (result, state, host)
+    }
+
+    fn change_with_calls(
+        change: &TaskChange,
+        selectors: &[&str],
+    ) -> (
+        Result<Vec<Changed>>,
+        Vec<StoredReminder>,
+        Scripted,
+        Vec<String>,
+    ) {
         let reminders = Shared::new(RefCell::new(sample()));
+        let calls = Calls::default();
         let mut host = Scripted::new();
         let result = run(
             &request(change, selectors),
             &now(),
-            &backends(&reminders, true),
+            &backends(&reminders, &calls),
             &mut host,
         );
         let state = reminders.borrow().clone();
-        (result, state, host)
+        let calls = calls.borrow().clone();
+        (result, state, host, calls)
     }
 
     fn select_ids(
@@ -553,23 +535,10 @@ mod tests {
         list: Option<&str>,
     ) -> Result<Vec<String>> {
         let all = sample();
-        let pool: Vec<StoredReminder> = all
-            .iter()
-            .filter(|reminder| reminder.completed == (*task_change == TaskChange::Reopen))
-            .cloned()
-            .collect();
-        let known: Vec<&StoredReminder> =
-            all.iter().filter(|reminder| !reminder.completed).collect();
         let selectors: Vec<String> = selectors.iter().map(ToString::to_string).collect();
-        select(
-            task_change,
-            &selectors,
-            list,
-            &lists(),
-            &known,
-            Some(&pool),
-            |id: &str| Ok(all.iter().find(|reminder| reminder.id == id).cloned()),
-        )
+        select(task_change, &selectors, list, &lists(), &all, |_: &str| {
+            Ok(None)
+        })
         .map(|selected| selected.into_iter().map(|reminder| reminder.id).collect())
     }
 
@@ -581,7 +550,6 @@ mod tests {
             .filter(|reminder| !reminder.completed)
             .cloned()
             .collect();
-        let known: Vec<&StoredReminder> = open.iter().collect();
         let mut fetched = Vec::new();
         let selectors: Vec<String> = ["rem-2", "OAT", "report", "rem-4"]
             .iter()
@@ -592,8 +560,7 @@ mod tests {
             &selectors,
             None,
             &lists(),
-            &known,
-            Some(&open),
+            &open,
             |id: &str| {
                 fetched.push(id.to_owned());
                 Ok(all.iter().find(|reminder| reminder.id == id).cloned())
@@ -737,31 +704,62 @@ mod tests {
     }
 
     #[test]
-    fn reopen_by_title_needs_a_completed_search_but_ids_still_work() {
-        let reminders = Shared::new(RefCell::new(sample()));
-        let backends = backends(&reminders, false);
-        let mut host = Scripted::new();
-        let error = run(
-            &request(&TaskChange::Reopen, &["dentist"]),
-            &now(),
-            &backends,
-            &mut host,
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("can't search completed reminders by title")
+    fn reopen_reads_completed_reminders_from_one_full_snapshot() {
+        let (result, state, _, calls) = change_with_calls(&TaskChange::Reopen, &["dentist"]);
+        assert_eq!(result.unwrap()[0].reminder.id, "rem-4");
+        assert!(!state[3].completed);
+        assert_eq!(calls, ["snapshot_including_completed"]);
+
+        let (result, state, _, calls) =
+            change_with_calls(&TaskChange::Reopen, &["rem-5", "nothing"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "no completed reminder matches \"nothing\""
         );
-        let changed = run(
-            &request(&TaskChange::Reopen, &["rem-4"]),
-            &now(),
-            &backends,
-            &mut host,
-        )
-        .unwrap();
-        assert_eq!(changed[0].reminder.id, "rem-4");
-        assert!(!reminders.borrow()[3].completed);
+        assert_eq!(state, sample());
+        assert_eq!(calls, ["snapshot_including_completed"]);
+    }
+
+    #[test]
+    fn reopen_by_id_finds_completed_reminders_and_refuses_open_ones() {
+        let (result, state, _, calls) = change_with_calls(&TaskChange::Reopen, &["rem-5"]);
+        assert_eq!(result.unwrap()[0].reminder.title, "Buy stamps");
+        assert!(!state[4].completed);
+        assert_eq!(calls, ["snapshot_including_completed"]);
+
+        let (result, _, _, _) = change_with_calls(&TaskChange::Reopen, &["rem-1"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "\"Buy oat milk\" isn't completed"
+        );
+    }
+
+    #[test]
+    fn done_priority_and_move_match_titles_among_open_reminders_only() {
+        for task_change in [
+            TaskChange::Complete,
+            TaskChange::Priority(Some(Priority::Low)),
+            TaskChange::Move("Work".into()),
+        ] {
+            let (result, state, _, calls) = change_with_calls(&task_change, &["stamps"]);
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "no open reminder matches \"stamps\"",
+                "{task_change:?}"
+            );
+            assert_eq!(state, sample());
+            assert_eq!(calls, ["snapshot", "reminder stamps"], "{task_change:?}");
+        }
+    }
+
+    #[test]
+    fn done_on_a_completed_id_fetches_it_to_report_its_state() {
+        let (result, _, _, calls) = change_with_calls(&TaskChange::Complete, &["rem-4"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "\"Call the dentist\" is already completed"
+        );
+        assert_eq!(calls, ["snapshot", "reminder rem-4"]);
     }
 
     #[test]
@@ -832,7 +830,7 @@ mod tests {
     #[test]
     fn undo_reverses_a_done() {
         let reminders = Shared::new(RefCell::new(sample()));
-        let backends = backends(&reminders, true);
+        let backends = backends(&reminders, &Calls::default());
         let mut host = Scripted::new().answer("y");
         run(
             &request(&TaskChange::Complete, &["oat"]),
@@ -859,7 +857,7 @@ mod tests {
 
     fn assert_undo_restores(task_change: &TaskChange, selector: &str, action: JournalAction) {
         let reminders = Shared::new(RefCell::new(sample()));
-        let backends = backends(&reminders, true);
+        let backends = backends(&reminders, &Calls::default());
         let mut host = Scripted::new().answer("y");
         let changed = run(
             &request(task_change, &[selector]),

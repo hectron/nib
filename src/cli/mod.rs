@@ -49,6 +49,7 @@ pub enum Action {
     },
     AddTask(NewReminder),
     ListTasks,
+    FilterTasks(String),
     ListReminderLists,
     CreateReminderList(NewResource),
     RenameReminderList {
@@ -285,6 +286,9 @@ struct Folder {
 pub struct TaskArgs {
     #[command(subcommand)]
     action: Option<TaskAction>,
+    /// Filter reminders by text or fields
+    #[arg(short, long, value_name = "EXPR")]
+    filter: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -298,7 +302,11 @@ enum TaskAction {
     },
     /// List reminders (the default)
     #[command(visible_alias = "ls")]
-    List,
+    List {
+        /// Filter reminders by text or fields
+        #[arg(short, long, value_name = "EXPR")]
+        filter: Option<String>,
+    },
     /// List and manage reminder lists
     Lists(ReminderListsArgs),
     /// Edit reminders as a Markdown file in $VISUAL or $EDITOR
@@ -522,6 +530,10 @@ pub(crate) enum ActionError {
     NoteFoldersFilter,
     #[error("--week, --calendar, and --show-calendar can't be used with `nib cal calendars`")]
     CalendarResourceFilter,
+    #[error("--filter can only be used with `nib task` or `nib task list`")]
+    TaskFilter,
+    #[error("--filter can't be specified both before and after `list`")]
+    DuplicateTaskFilter,
 }
 
 fn note_action(
@@ -563,15 +575,27 @@ fn note_action(
 
 fn task_action(
     action: Option<TaskAction>,
+    filter: Option<String>,
     now: &Zoned,
     config: &Config,
 ) -> Result<Action, ActionError> {
+    if filter.is_some() && !matches!(action, Some(TaskAction::List { .. }) | None) {
+        return Err(ActionError::TaskFilter);
+    }
     Ok(match action {
         Some(TaskAction::Add {
             title: Title { words },
             opts,
         }) => opts.add(&words, now, config)?,
-        Some(TaskAction::List) | None => Action::ListTasks,
+        Some(TaskAction::List {
+            filter: list_filter,
+        }) => match (filter, list_filter) {
+            (Some(_), Some(_)) => return Err(ActionError::DuplicateTaskFilter),
+            (filter, list_filter) => filter
+                .or(list_filter)
+                .map_or(Action::ListTasks, Action::FilterTasks),
+        },
+        None => filter.map_or(Action::ListTasks, Action::FilterTasks),
         Some(TaskAction::Lists(ReminderListsArgs { action })) => match action {
             None => Action::ListReminderLists,
             Some(ReminderListAction::Create { name, source }) => {
@@ -690,7 +714,7 @@ impl Command {
                     })
                 }
             }
-            Command::Task(TaskArgs { action }) => task_action(action, now, config)?,
+            Command::Task(TaskArgs { action, filter }) => task_action(action, filter, now, config)?,
             Command::T(TaskCapture { words, opts }) => {
                 if words.is_empty() {
                     Action::ListTasks
@@ -1003,6 +1027,14 @@ mod tests {
             (&["task"], Action::ListTasks),
             (&["todo", "ls"], Action::ListTasks),
             (&["task", "--json", "list"], Action::ListTasks),
+            (
+                &["task", "--filter", "due:today"],
+                Action::FilterTasks("due:today".into()),
+            ),
+            (
+                &["task", "list", "-f", "pri:high"],
+                Action::FilterTasks("pri:high".into()),
+            ),
             (&["task", "lists"], Action::ListReminderLists),
             (&["--json", "todo", "lists"], Action::ListReminderLists),
             (
@@ -1139,6 +1171,20 @@ mod tests {
         assert!(matches!(
             action_with_config(&now, &["note", "folders", "--folder", "Work"], &config),
             Err(ActionError::NoteFoldersFilter)
+        ));
+        let error =
+            action_with_config(&now, &["task", "--filter", "work", "lists"], &config).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--filter can only be used with `nib task` or `nib task list`"
+        );
+        assert!(matches!(
+            action_with_config(
+                &now,
+                &["task", "--filter", "work", "list", "--filter", "home"],
+                &config
+            ),
+            Err(ActionError::DuplicateTaskFilter)
         ));
         for args in [
             &["cal", "calendars", "--week"][..],
