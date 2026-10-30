@@ -8,6 +8,8 @@ nib task --filter "list:work !due:none"
 nib task list -f "due:week !pri:low" --json
 ```
 
+`-f` is short for `--filter` on `nib task list`, `nib task`, and `nib pick`. On `nib note`, `-f` is short for `--folder` instead; no single command accepts both.
+
 The expression is split into whitespace-separated tokens. Every token must match. Prefix a token with `!` to negate it.
 
 | Field | Values |
