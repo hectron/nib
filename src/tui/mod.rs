@@ -62,7 +62,12 @@ pub(crate) fn pick(
 }
 
 fn start(session: &mut Session<'_>, query: &str) -> Result<State> {
-    let (mut state, mut effect) = State::new(session.load(false)?, query, session.now.clone());
+    let (mut state, mut effect) = State::new(
+        session.load(false)?,
+        query,
+        session.now.clone(),
+        session.config.task.parse_inline,
+    );
     while let Some(next) = effect {
         effect = state.resolve(session.perform(next, state.includes_completed()));
     }

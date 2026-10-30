@@ -24,11 +24,7 @@ pub trait Host {
     fn edit(&mut self, path: &Path) -> io::Result<Duration>;
     fn ask(&mut self, prompt: &str) -> io::Result<String>;
     fn say(&mut self, message: &str);
-
-    fn say_unrecorded(&mut self, message: &str) {
-        self.say(message);
-    }
-
+    fn say_unrecorded(&mut self, message: &str);
     fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf>;
     fn save_journal(&mut self, name: &str, contents: &str) -> io::Result<PathBuf>;
     fn replace_journal(&mut self, id: &str, contents: &str) -> io::Result<PathBuf>;
@@ -593,6 +589,10 @@ impl Host for System {
         eprintln!("{message}");
     }
 
+    fn say_unrecorded(&mut self, message: &str) {
+        self.say(message);
+    }
+
     fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
         let dir = backups_dir()?;
         std::fs::create_dir_all(&dir)?;
@@ -677,6 +677,10 @@ impl Host for Memory {
 
     fn say(&mut self, message: &str) {
         self.system.say(message);
+    }
+
+    fn say_unrecorded(&mut self, message: &str) {
+        self.system.say_unrecorded(message);
     }
 
     fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {
@@ -944,6 +948,10 @@ impl Host for Scripted {
 
     fn say(&mut self, message: &str) {
         self.said.push(message.into());
+    }
+
+    fn say_unrecorded(&mut self, message: &str) {
+        self.say(message);
     }
 
     fn save_backup(&mut self, name: &str, contents: &str) -> io::Result<PathBuf> {

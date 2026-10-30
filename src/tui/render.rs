@@ -325,7 +325,6 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, state: &State, theme: Theme) {
                 .collect(),
         ),
     };
-    let hidden = hidden_line(state, theme);
     let lines: Vec<Line<'_>> = options
         .into_iter()
         .enumerate()
@@ -343,22 +342,57 @@ fn draw_menu(frame: &mut Frame<'_>, area: Rect, state: &State, theme: Theme) {
                 line
             }
         })
-        .chain(hidden)
         .collect();
-    let skip = state
-        .menu_cursor()
-        .saturating_sub(usize::from(area.height.saturating_sub(2)));
     let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(MUTED)
         .padding(Padding::horizontal(1))
         .title(Span::styled(title, STRONG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let hidden = hidden_line(state, theme);
+    let hidden_height = hidden.as_ref().map_or(0, |line| {
+        wrapped_rows(line, inner.width).min(inner.height.saturating_sub(1))
+    });
+    let [hidden_area, options_area] =
+        Layout::vertical([Constraint::Length(hidden_height), Constraint::Min(0)]).areas(inner);
+    if let Some(line) = hidden {
+        frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), hidden_area);
+    }
+    let skip = state
+        .menu_cursor()
+        .saturating_sub(usize::from(options_area.height.saturating_sub(1)));
     frame.render_widget(
-        Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>())
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()),
+        options_area,
     );
+}
+
+fn wrapped_rows(line: &Line<'_>, width: u16) -> u16 {
+    let width = usize::from(width.max(1));
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    let mut rows = 1;
+    let mut column = 0;
+    for word in text.split(' ') {
+        let length = Line::raw(word).width();
+        column = if column == 0 {
+            length
+        } else if column + 1 + length <= width {
+            column + 1 + length
+        } else {
+            rows += 1;
+            length
+        };
+        while column > width {
+            rows += 1;
+            column -= width;
+        }
+    }
+    u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
 fn hidden_line(state: &State, theme: Theme) -> Option<Line<'static>> {
@@ -471,7 +505,7 @@ mod tests {
     fn the_prompt_shows_results_a_preview_and_the_add_row() {
         let mut items = data();
         items.items[0].notes = Some("2% or oat".into());
-        let (mut state, _) = State::new(items, "", now());
+        let (mut state, _) = State::new(items, "", now(), true);
         type_text(&mut state, "buy");
         state.update(Action::ToggleDown);
         state.update(Action::Up);
@@ -490,7 +524,7 @@ mod tests {
 
     #[test]
     fn the_act_menu_replaces_the_preview() {
-        let (mut state, _) = State::new(data(), "", now());
+        let (mut state, _) = State::new(data(), "", now(), true);
         state.update(Action::ToggleDown);
         state.update(Action::ToggleDown);
         state.update(Action::OpenMenu);
@@ -510,7 +544,7 @@ mod tests {
 
     #[test]
     fn narrow_terminals_hide_the_preview_and_show_errors_inline() {
-        let (state, _) = State::new(data(), "pri:urgent", now());
+        let (state, _) = State::new(data(), "pri:urgent", now(), true);
         assert_snapshot!(screen(&state, 60), @r#"
         "> pri:urgent                                       3 matches"
         "  invalid value "urgent" for pri filter; expected high, medi"
@@ -526,7 +560,7 @@ mod tests {
 
     #[test]
     fn delete_confirmation_counts_hidden_selections_and_warns_about_undo() {
-        let (mut state, _) = State::new(data(), "", now());
+        let (mut state, _) = State::new(data(), "", now(), true);
         state.update(Action::ToggleDown);
         type_text(&mut state, "eggs");
         state.update(Action::ToggleDown);
@@ -555,7 +589,7 @@ mod tests {
             None,
             None,
         ));
-        let (mut state, _) = State::new(items, "", now());
+        let (mut state, _) = State::new(items, "", now(), true);
         for _ in 0..4 {
             state.update(Action::ToggleDown);
         }
@@ -579,7 +613,7 @@ mod tests {
     fn a_partial_backup_asks_for_the_count_and_says_what_undo_loses() {
         let mut items = data();
         items.items[1].backup_partial = true;
-        let (mut state, _) = State::new(items, "", now());
+        let (mut state, _) = State::new(items, "", now(), true);
         state.update(Action::ToggleDown);
         state.update(Action::ToggleDown);
         state.update(Action::OpenMenu);
@@ -597,9 +631,96 @@ mod tests {
         "#);
     }
 
+    fn long_move_menu() -> State {
+        let mut items = data();
+        items.lists = (1..=8)
+            .map(|number| crate::tui::state::ListChoice {
+                id: format!("list-{number}"),
+                name: if number % 3 == 0 {
+                    format!("List {number} with a name far too long to fit on one row of the menu")
+                } else {
+                    format!("List {number}")
+                },
+            })
+            .collect();
+        let (mut state, _) = State::new(items, "", now(), true);
+        state.update(Action::ToggleDown);
+        type_text(&mut state, "eggs");
+        state.update(Action::ToggleDown);
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('m'));
+        state
+    }
+
+    fn highlighted(state: &State, width: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 9)).unwrap();
+        terminal.draw(|frame| draw(frame, state, false)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let menu_x = if width >= PREVIEW_WIDTH * 2 {
+            width - PREVIEW_WIDTH
+        } else {
+            0
+        };
+        (0..buffer.area.height)
+            .flat_map(|y| (menu_x..buffer.area.width).map(move |x| (x, y)))
+            .map(|(x, y)| &buffer[(x, y)])
+            .filter(|cell| cell.modifier.contains(Modifier::REVERSED))
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    }
+
+    #[test]
+    fn long_move_menus_keep_the_hidden_count_and_the_highlight_visible() {
+        let mut state = long_move_menu();
+        assert_snapshot!(screen(&state, 60), @r#"
+        "> eggs                                 2 selected  1 matches"
+        "────────────────────────────────────────────────────────────"
+        "│Move 2 reminders to                                        "
+        "│ 1 selected not shown by the current query.                "
+        "│ 1  List 1                                                 "
+        "│ 2  List 2                                                 "
+        "│ 3  List 3 with a name far too long to fit on one row of t "
+        "│ 4  List 4                                                 "
+        "enter choose  esc back                                      "
+        "#);
+        assert_eq!(highlighted(&state, 60), "1  List 1");
+        for _ in 0..5 {
+            state.update(Action::Down);
+        }
+        assert_snapshot!(screen(&state, 60), @r#"
+        "> eggs                                 2 selected  1 matches"
+        "────────────────────────────────────────────────────────────"
+        "│Move 2 reminders to                                        "
+        "│ 1 selected not shown by the current query.                "
+        "│ 3  List 3 with a name far too long to fit on one row of t "
+        "│ 4  List 4                                                 "
+        "│ 5  List 5                                                 "
+        "│ 6  List 6 with a name far too long to fit on one row of t "
+        "enter choose  esc back                                      "
+        "#);
+        assert!(highlighted(&state, 60).starts_with("6  List 6 with a name"));
+        for _ in 0..2 {
+            state.update(Action::Down);
+        }
+        assert_snapshot!(screen(&state, 84), @r#"
+        "> eggs                                                         2 selected  1 matches"
+        "────────────────────────────────────────────────────────────────────────────────────"
+        "+ Buy eggs                       Work       │Move 2 reminders to                    "
+        "+ Add reminder: eggs                  enter │ 1 selected not shown by the current   "
+        "                                            │ query.                                "
+        "                                            │ 6  List 6 with a name far too long to "
+        "                                            │ 7  List 7                             "
+        "                                            │ 8  List 8                             "
+        "enter choose  esc back                                                              "
+        "#);
+        assert_eq!(highlighted(&state, 84), "8  List 8");
+    }
+
     #[test]
     fn menus_count_selections_hidden_by_the_query() {
-        let (mut state, _) = State::new(data(), "", now());
+        let (mut state, _) = State::new(data(), "", now(), true);
         state.update(Action::ToggleDown);
         type_text(&mut state, "eggs");
         state.update(Action::ToggleDown);
@@ -609,12 +730,12 @@ mod tests {
         "> eggs                                                         2 selected  1 matches"
         "────────────────────────────────────────────────────────────────────────────────────"
         "+ Buy eggs                       Work       │Priority for 2 reminders               "
-        "+ Add reminder: eggs                  enter │ h  high                               "
+        "+ Add reminder: eggs                  enter │ 1 selected not shown by the current   "
+        "                                            │ query.                                "
+        "                                            │ h  high                               "
         "                                            │ m  medium                             "
         "                                            │ l  low                                "
         "                                            │ n  none                               "
-        "                                            │ 1 selected not shown by the current   "
-        "                                            │ query.                                "
         "enter choose  esc back                                                              "
         "#);
     }

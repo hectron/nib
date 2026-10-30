@@ -86,6 +86,12 @@ pub(crate) enum DeleteError {
     #[error("\"{title}\" is in the read-only list \"{list}\" and can't be deleted")]
     #[diagnostic(code(nib::task::read_only_list))]
     ReadOnly { title: String, list: String },
+
+    #[error(
+        "\"{title}\" now has alarms, repeats, or links that undo can't bring back; type the count to delete it"
+    )]
+    #[diagnostic(code(nib::task::partial_backup))]
+    PartialBackup { title: String, ids: Vec<String> },
 }
 
 pub fn run(
@@ -152,6 +158,7 @@ pub fn run(
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub(crate) fn delete(
     ids: &[String],
+    partial_confirmed: bool,
     now: &Zoned,
     backends: &Backends,
     host: &mut dyn Host,
@@ -188,6 +195,19 @@ pub(crate) fn delete(
     }
     if selected.is_empty() {
         return Ok(Vec::new());
+    }
+    if !partial_confirmed
+        && let Some(first) = selected.iter().find(|reminder| reminder.backup_partial)
+    {
+        return Err(DeleteError::PartialBackup {
+            title: clean(&first.title),
+            ids: selected
+                .iter()
+                .filter(|reminder| reminder.backup_partial)
+                .map(|reminder| reminder.id.clone())
+                .collect(),
+        }
+        .into());
     }
     let changes: Vec<ReminderChange> = selected
         .iter()
@@ -987,7 +1007,7 @@ mod tests {
         let backends = backends(&reminders, &calls);
         let mut host = Scripted::new().answer("y");
         let ids = ["rem-2".to_owned(), "rem-4".to_owned(), "rem-2".to_owned()];
-        let deleted = delete(&ids, &now(), &backends, &mut host).unwrap();
+        let deleted = delete(&ids, false, &now(), &backends, &mut host).unwrap();
         assert_eq!(
             deleted
                 .iter()
@@ -1019,6 +1039,7 @@ mod tests {
         let mut host = Scripted::new();
         let error = delete(
             &["rem-1".to_owned(), "nope".to_owned()],
+            false,
             &now(),
             &backends,
             &mut host,
@@ -1034,10 +1055,19 @@ mod tests {
         ids: &[&str],
         host: &mut Scripted,
     ) -> (Result<Vec<StoredReminder>>, Vec<StoredReminder>) {
+        confirmed_delete_from(reminders, ids, false, host)
+    }
+
+    fn confirmed_delete_from(
+        reminders: Vec<StoredReminder>,
+        ids: &[&str],
+        partial_confirmed: bool,
+        host: &mut Scripted,
+    ) -> (Result<Vec<StoredReminder>>, Vec<StoredReminder>) {
         let reminders = Shared::new(RefCell::new(reminders));
         let backends = backends(&reminders, &Calls::default());
         let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
-        let result = delete(&ids, &now(), &backends, host);
+        let result = delete(&ids, partial_confirmed, &now(), &backends, host);
         let state = reminders.borrow().clone();
         (result, state)
     }
@@ -1067,11 +1097,32 @@ mod tests {
     }
 
     #[test]
-    fn delete_backs_up_reminders_whose_backup_is_partial() {
+    fn delete_refuses_a_partial_backup_the_user_did_not_confirm() {
+        let mut reminders = sample();
+        reminders[1].backup_partial = true;
+        reminders[3].backup_partial = true;
+        let mut host = Scripted::new();
+        let (result, state) =
+            delete_from(reminders.clone(), &["rem-1", "rem-2", "rem-4"], &mut host);
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<DeleteError>(),
+            Some(&DeleteError::PartialBackup {
+                title: "Buy eggs".into(),
+                ids: vec!["rem-2".into(), "rem-4".into()],
+            })
+        );
+        assert_eq!(state, reminders);
+        assert_eq!(host.backups, Vec::<(String, String)>::new());
+        assert_eq!(host.journals, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn delete_backs_up_a_confirmed_partial_backup() {
         let mut reminders = sample();
         reminders[1].backup_partial = true;
         let mut host = Scripted::new();
-        let (result, state) = delete_from(reminders, &["rem-2"], &mut host);
+        let (result, state) = confirmed_delete_from(reminders, &["rem-2"], true, &mut host);
         assert_eq!(result.unwrap()[0].title, "Buy eggs");
         assert!(state.iter().all(|reminder| reminder.id != "rem-2"));
         assert_eq!(host.backups.len(), 1);

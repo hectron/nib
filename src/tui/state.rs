@@ -73,7 +73,10 @@ pub(crate) enum Effect {
         change: TaskChange,
         ids: Vec<String>,
     },
-    Delete(Vec<String>),
+    Delete {
+        ids: Vec<String>,
+        partial_confirmed: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +86,11 @@ pub(crate) enum Response {
     Changed {
         message: String,
         error: bool,
+        data: Option<Data>,
+    },
+    DeleteRefused {
+        message: String,
+        partial: Vec<String>,
         data: Option<Data>,
     },
     Failed(String),
@@ -129,6 +137,7 @@ pub(crate) struct State {
     caret: usize,
     filter: Filter,
     filter_error: Option<String>,
+    parse_inline: bool,
     plain_text: bool,
     matches: Vec<usize>,
     cursor: usize,
@@ -143,7 +152,12 @@ pub(crate) struct State {
 }
 
 impl State {
-    pub(crate) fn new(data: Data, query: &str, now: Zoned) -> (Self, Option<Effect>) {
+    pub(crate) fn new(
+        data: Data,
+        query: &str,
+        now: Zoned,
+        parse_inline: bool,
+    ) -> (Self, Option<Effect>) {
         let mut state = Self {
             now,
             data,
@@ -151,6 +165,7 @@ impl State {
             caret: query.chars().count(),
             filter: Filter::parse("").expect("an empty expression has no tokens to reject"),
             filter_error: None,
+            parse_inline,
             plain_text: true,
             matches: Vec::new(),
             cursor: 0,
@@ -236,7 +251,9 @@ impl State {
     }
 
     pub(crate) fn delete_needs_count(&self) -> bool {
-        self.targets.len() > DELETE_COUNT_THRESHOLD || self.partial_target_count() > 0
+        self.targets.len() > DELETE_COUNT_THRESHOLD
+            || self.partial_target_count() > 0
+            || self.targets.iter().any(|id| self.item(id).is_none())
     }
 
     pub(crate) fn partial_target_count(&self) -> usize {
@@ -300,7 +317,7 @@ impl State {
             Ok(filter) => {
                 self.filter = filter;
                 self.filter_error = None;
-                self.plain_text = is_plain_text(&self.query);
+                self.plain_text = is_plain_text(&self.query, self.parse_inline);
             }
             Err(error) => self.filter_error = Some(error.to_string()),
         }
@@ -529,7 +546,10 @@ impl State {
                 }
                 Action::Accept if self.confirm_input == self.targets.len().to_string() => {
                     self.mode = Mode::Filter;
-                    Some(Effect::Delete(self.targets.clone()))
+                    Some(Effect::Delete {
+                        ids: self.targets.clone(),
+                        partial_confirmed: self.partial_target_count() > 0,
+                    })
                 }
                 Action::Accept | Action::Hotkey(_) | Action::Cancel => {
                     self.mode = Mode::Filter;
@@ -542,7 +562,10 @@ impl State {
         match action {
             Action::Hotkey('y') => {
                 self.mode = Mode::Filter;
-                Some(Effect::Delete(self.targets.clone()))
+                Some(Effect::Delete {
+                    ids: self.targets.clone(),
+                    partial_confirmed: false,
+                })
             }
             Action::Hotkey(_) | Action::Cancel => {
                 self.mode = Mode::Filter;
@@ -603,6 +626,24 @@ impl State {
                 self.data = data;
                 self.refilter()
             }
+            Response::DeleteRefused {
+                message,
+                partial,
+                data,
+            } => {
+                if let Some(data) = data {
+                    self.data = data;
+                }
+                for item in &mut self.data.items {
+                    if partial.contains(&item.id) {
+                        item.backup_partial = true;
+                    }
+                }
+                self.mode = Mode::ConfirmDelete;
+                self.confirm_input.clear();
+                self.set_status(&message, true);
+                self.refilter()
+            }
             Response::Failed(message) => {
                 self.loading_completed = false;
                 self.mode = Mode::Filter;
@@ -642,8 +683,8 @@ impl State {
     }
 }
 
-fn is_plain_text(query: &str) -> bool {
-    let title = crate::cli::quick_add_title(query);
+fn is_plain_text(query: &str, parse_inline: bool) -> bool {
+    let title = crate::cli::quick_add_title(query, parse_inline);
     !title.is_empty() && Filter::parse(&title).is_ok_and(|filter| filter.is_plain_text())
 }
 
@@ -724,7 +765,7 @@ pub(crate) mod tests {
     }
 
     fn state(query: &str) -> State {
-        let (state, effect) = State::new(data(), query, now());
+        let (state, effect) = State::new(data(), query, now(), true);
         assert_eq!(effect, None);
         state
     }
@@ -779,7 +820,7 @@ pub(crate) mod tests {
     fn a_field_query_with_no_matches_offers_no_add_row_and_enter_does_nothing() {
         let mut items = data();
         items.items[0].priority = None;
-        let (mut state, _) = State::new(items, "pri:high", now());
+        let (mut state, _) = State::new(items, "pri:high", now(), true);
         assert_eq!(rows(&state), Vec::<String>::new());
         assert_eq!(state.current(), None);
         assert_eq!(state.update(Action::Accept), None);
@@ -803,6 +844,28 @@ pub(crate) mod tests {
         assert_eq!(rows(&state("!high zzz")), Vec::<String>::new());
         assert_eq!(rows(&state("!high")), ["rem-1", "rem-2", "rem-3"]);
         assert_eq!(rows(&state("!high #bills")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn quick_add_errors_keep_the_add_row_so_enter_reports_them() {
+        assert_eq!(rows(&state("Pay !low !high")), ["add:Pay !low !high"]);
+        assert_eq!(
+            rows(&state("Call mom tomorrow fri")),
+            ["add:Call mom tomorrow fri"]
+        );
+        assert_eq!(rows(&state("!high Pay rent")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn without_inline_parsing_the_whole_query_is_the_title() {
+        let (state, _) = State::new(data(), "today", now(), false);
+        assert_eq!(rows(&state), ["add:today"]);
+        let (state, _) = State::new(data(), "Pay rent fri", now(), false);
+        assert_eq!(rows(&state), ["add:Pay rent fri"]);
+        let (state, _) = State::new(data(), "today", now(), true);
+        assert_eq!(rows(&state), Vec::<String>::new());
+        let (state, _) = State::new(data(), "Pay !high", now(), false);
+        assert_eq!(rows(&state), Vec::<String>::new());
     }
 
     #[test]
@@ -974,7 +1037,7 @@ pub(crate) mod tests {
 
     #[test]
     fn enter_with_no_rows_does_nothing() {
-        let (mut state, _) = State::new(Data::default(), "", now());
+        let (mut state, _) = State::new(Data::default(), "", now(), true);
         assert_eq!(state.update(Action::Accept), None);
         assert_eq!(state.outcome(), None);
     }
@@ -1096,7 +1159,7 @@ pub(crate) mod tests {
     fn move_without_writable_lists_reports_an_error() {
         let mut empty = data();
         empty.lists.clear();
-        let (mut state, _) = State::new(empty, "", now());
+        let (mut state, _) = State::new(empty, "", now(), true);
         state.update(Action::OpenMenu);
         assert_eq!(state.update(Action::Hotkey('m')), None);
         assert_eq!(state.mode(), Mode::Filter);
@@ -1118,7 +1181,10 @@ pub(crate) mod tests {
         state.update(Action::Hotkey('d'));
         assert_eq!(
             state.update(Action::Hotkey('y')),
-            Some(Effect::Delete(vec!["rem-1".into()]))
+            Some(Effect::Delete {
+                ids: vec!["rem-1".into()],
+                partial_confirmed: false,
+            })
         );
         assert_eq!(state.mode(), Mode::Filter);
     }
@@ -1127,7 +1193,7 @@ pub(crate) mod tests {
         let mut more = data();
         more.items
             .push(item("rem-4", "Water plants", "Home", None, None));
-        let (mut state, _) = State::new(more, "", now());
+        let (mut state, _) = State::new(more, "", now(), true);
         for _ in 0..4 {
             state.update(Action::ToggleDown);
         }
@@ -1157,12 +1223,15 @@ pub(crate) mod tests {
         assert_eq!(state.confirm_input(), "4");
         assert_eq!(
             state.update(Action::Accept),
-            Some(Effect::Delete(vec![
-                "rem-1".into(),
-                "rem-2".into(),
-                "rem-3".into(),
-                "rem-4".into()
-            ]))
+            Some(Effect::Delete {
+                ids: vec![
+                    "rem-1".into(),
+                    "rem-2".into(),
+                    "rem-3".into(),
+                    "rem-4".into()
+                ],
+                partial_confirmed: false,
+            })
         );
     }
 
@@ -1179,12 +1248,15 @@ pub(crate) mod tests {
         type_text_in_menu(&mut state, "4");
         assert_eq!(
             state.update(Action::Accept),
-            Some(Effect::Delete(vec![
-                "rem-1".into(),
-                "rem-2".into(),
-                "rem-3".into(),
-                "rem-4".into()
-            ]))
+            Some(Effect::Delete {
+                ids: vec![
+                    "rem-1".into(),
+                    "rem-2".into(),
+                    "rem-3".into(),
+                    "rem-4".into()
+                ],
+                partial_confirmed: false,
+            })
         );
     }
 
@@ -1210,7 +1282,7 @@ pub(crate) mod tests {
         for item in &mut items.items {
             item.backup_partial = ids.contains(&item.id.as_str());
         }
-        let (state, _) = State::new(items, "", now());
+        let (state, _) = State::new(items, "", now(), true);
         state
     }
 
@@ -1240,7 +1312,10 @@ pub(crate) mod tests {
         type_text_in_menu(&mut state, "2");
         assert_eq!(
             state.update(Action::Accept),
-            Some(Effect::Delete(vec!["rem-1".into(), "rem-2".into()]))
+            Some(Effect::Delete {
+                ids: vec!["rem-1".into(), "rem-2".into()],
+                partial_confirmed: true,
+            })
         );
     }
 
@@ -1251,6 +1326,67 @@ pub(crate) mod tests {
         state.update(Action::Hotkey('d'));
         assert_eq!(state.partial_target_count(), 0);
         assert!(!state.delete_needs_count());
+    }
+
+    #[test]
+    fn a_refused_delete_reloads_and_asks_for_the_count() {
+        let mut state = state("");
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        assert_eq!(
+            state.update(Action::Hotkey('y')),
+            Some(Effect::Delete {
+                ids: vec!["rem-1".into()],
+                partial_confirmed: false,
+            })
+        );
+        let mut reloaded = data();
+        reloaded.items[0].title = "Buy oat milk, 2%".into();
+        assert_eq!(
+            state.resolve(Response::DeleteRefused {
+                message: "refused".into(),
+                partial: vec!["rem-1".into()],
+                data: Some(reloaded),
+            }),
+            None
+        );
+        assert_eq!(state.mode(), Mode::ConfirmDelete);
+        assert_eq!(state.item("rem-1").unwrap().title, "Buy oat milk, 2%");
+        assert!(state.delete_needs_count());
+        assert_eq!(state.targets(), ["rem-1"]);
+        assert_eq!(state.status().map(|status| status.error), Some(true));
+        type_text_in_menu(&mut state, "1");
+        assert_eq!(
+            state.update(Action::Accept),
+            Some(Effect::Delete {
+                ids: vec!["rem-1".into()],
+                partial_confirmed: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_refused_delete_without_fresh_data_still_asks_for_the_count() {
+        let mut state = state("");
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        state.update(Action::Hotkey('y'));
+        state.resolve(Response::DeleteRefused {
+            message: "refused".into(),
+            partial: vec!["rem-1".into()],
+            data: None,
+        });
+        assert!(state.item("rem-1").unwrap().backup_partial);
+        assert!(state.delete_needs_count());
+    }
+
+    #[test]
+    fn a_target_missing_from_the_list_needs_the_count_typed() {
+        let mut state = state("");
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        state.resolve(Response::Loaded(Data::default()));
+        assert!(state.delete_needs_count());
     }
 
     #[test]
@@ -1358,7 +1494,7 @@ pub(crate) mod tests {
         assert_eq!(rows(&state), ["rem-7"]);
         assert!(state.includes_completed());
 
-        let (state, effect) = State::new(data(), "is:done", now());
+        let (state, effect) = State::new(data(), "is:done", now(), true);
         assert_eq!(effect, Some(Effect::LoadCompleted));
         assert_eq!(state.match_count(), 0);
     }

@@ -284,7 +284,7 @@ pub(crate) enum InlineError {
 
 pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> {
     let mut end = words.len();
-    let (list, due, priority) = inline_fields(words, &mut end)?;
+    let (list, due, priority) = inline_fields(words, &mut end, true)?;
     let title = inline_title(&words[..end]);
     if title.is_empty() {
         return Err(InlineError::EmptyTitle);
@@ -300,16 +300,23 @@ pub(super) fn parse_inline(words: &[String]) -> Result<InlineTask, InlineError> 
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub(super) fn inline_title_len(words: &[String]) -> usize {
     let mut end = words.len();
-    let _ = inline_fields(words, &mut end);
+    let _ = inline_fields(words, &mut end, false);
     end
 }
 
 type InlineFields = (Option<String>, Option<Due>, Option<Priority>);
 
-fn inline_fields(words: &[String], end: &mut usize) -> Result<InlineFields, InlineError> {
+fn inline_fields(
+    words: &[String],
+    end: &mut usize,
+    reject_duplicates: bool,
+) -> Result<InlineFields, InlineError> {
     let mut list = None;
     let mut due = None;
     let mut priority = None;
+    let set_once = |result: Result<(), InlineError>| {
+        if reject_duplicates { result } else { Ok(()) }
+    };
 
     while *end > 0 {
         let end_now = *end;
@@ -327,7 +334,7 @@ fn inline_fields(words: &[String], end: &mut usize) -> Result<InlineFields, Inli
                 "high" => Priority::High,
                 _ => return Err(InlineError::Priority(word.clone())),
             };
-            set_once(&mut priority, value, "priority")?;
+            set_once(set_field(&mut priority, value, "priority"))?;
             *end -= 1;
             continue;
         }
@@ -335,13 +342,13 @@ fn inline_fields(words: &[String], end: &mut usize) -> Result<InlineFields, Inli
             if value.is_empty() {
                 return Err(InlineError::EmptyList);
             }
-            set_once(&mut list, value.to_owned(), "list")?;
+            set_once(set_field(&mut list, value.to_owned(), "list"))?;
             *end -= 1;
             continue;
         }
         match inline_due_suffix(&words[..end_now]) {
             Ok(Some((value, count))) => {
-                set_once(&mut due, value, "due date")?;
+                set_once(set_field(&mut due, value, "due date"))?;
                 *end -= count;
             }
             Ok(None) => break,
@@ -489,7 +496,7 @@ fn is_escaped_inline_word(words: &[String], index: usize) -> bool {
             .is_some_and(|next| is_escaped_due_phrase(&words[index], next))
 }
 
-fn set_once<T>(slot: &mut Option<T>, value: T, field: &'static str) -> Result<(), InlineError> {
+fn set_field<T>(slot: &mut Option<T>, value: T, field: &'static str) -> Result<(), InlineError> {
     if slot.is_some() {
         return Err(InlineError::Duplicate { field });
     }
@@ -821,13 +828,16 @@ mod tests {
     }
 
     #[test]
-    fn the_title_length_stops_before_trailing_fields_or_a_bad_one() {
+    fn the_title_length_skips_duplicate_fields_and_stops_at_a_bad_one() {
         let cases = [
             (&["Pay", "rent", "fri", "!high", "#bills"][..], 2),
             (&["!high", "Pay", "rent"][..], 3),
             (&["!high"][..], 0),
-            (&["Call", "mom", "tomorrow", "fri"][..], 3),
+            (&["Call", "mom", "tomorrow", "fri"][..], 2),
+            (&["Pay", "!low", "!high"][..], 1),
+            (&["Pay", "#home", "#work"][..], 1),
             (&["Pay", "!urgent"][..], 2),
+            (&["Pay", "!urgent", "!high"][..], 2),
         ];
         for (words, expected) in cases {
             let words: Vec<String> = words.iter().map(ToString::to_string).collect();

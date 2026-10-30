@@ -514,9 +514,14 @@ pub(crate) fn quick_add(
 }
 
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
-pub(crate) fn quick_add_title(text: &str) -> String {
+pub(crate) fn quick_add_title(text: &str, parse_inline: bool) -> String {
     let words: Vec<String> = text.split_whitespace().map(ToOwned::to_owned).collect();
-    words[..inline_title_len(&words)].join(" ")
+    let end = if parse_inline {
+        inline_title_len(&words)
+    } else {
+        words.len()
+    };
+    words[..end].join(" ")
 }
 
 impl TaskOpts {

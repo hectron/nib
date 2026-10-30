@@ -7,7 +7,7 @@ use miette::Result;
 
 use super::state::{Data, Effect, Item, ListChoice, Response};
 use crate::app::commands::reminder_from_snapshot;
-use crate::app::quick;
+use crate::app::quick::{self, DeleteError};
 use crate::cli::output::{self, Style, clean};
 use crate::domain::{Backends, Config, Reminder, ReminderSnapshot, TaskChangeRequest};
 use crate::infra::host::{EditFile, Host, JournalFile, JournalLock};
@@ -46,10 +46,13 @@ impl Session<'_> {
                     Ok(message.lines().collect::<Vec<_>>().join("; "))
                 })
             }
-            Effect::Delete(ids) => {
+            Effect::Delete {
+                ids,
+                partial_confirmed,
+            } => {
                 let (now, backends) = (self.now, self.backends);
                 self.quietly(|host| {
-                    let deleted = quick::delete(&ids, now, backends, host)?;
+                    let deleted = quick::delete(&ids, partial_confirmed, now, backends, host)?;
                     Ok(match deleted.as_slice() {
                         [] => "No changes.".to_owned(),
                         [only] => format!("Deleted \"{}\"", clean(&only.title)),
@@ -63,25 +66,43 @@ impl Session<'_> {
                 self.reloaded(message, error, includes_completed)
             }
             Ok(other) => other,
-            Err(error) => Response::Failed(clean(&error.to_string())),
+            Err(error) => match error.downcast_ref::<DeleteError>() {
+                Some(DeleteError::PartialBackup { ids, .. }) => {
+                    self.refused(clean(&error.to_string()), ids.clone(), includes_completed)
+                }
+                _ => Response::Failed(clean(&error.to_string())),
+            },
+        }
+    }
+
+    fn refused(&self, message: String, partial: Vec<String>, includes_completed: bool) -> Response {
+        let (message, data) = self.reload(message, includes_completed);
+        Response::DeleteRefused {
+            message,
+            partial,
+            data,
         }
     }
 
     fn reloaded(&self, message: String, error: bool, includes_completed: bool) -> Response {
+        let (message, data) = self.reload(message, includes_completed);
+        Response::Changed {
+            message,
+            error: error || data.is_none(),
+            data,
+        }
+    }
+
+    fn reload(&self, message: String, includes_completed: bool) -> (String, Option<Data>) {
         match self.load(includes_completed) {
-            Ok(data) => Response::Changed {
-                message,
-                error,
-                data: Some(data),
-            },
-            Err(reload) => Response::Changed {
-                message: format!(
+            Ok(data) => (message, Some(data)),
+            Err(reload) => (
+                format!(
                     "{message} Couldn't reload reminders, so the list may be out of date: {}",
                     clean(&reload.to_string())
                 ),
-                error: true,
-                data: None,
-            },
+                None,
+            ),
         }
     }
 
@@ -102,6 +123,7 @@ impl Session<'_> {
                 error: false,
                 data: None,
             }),
+            Err(error) if host.said.is_empty() => Err(error),
             Err(error) => {
                 let message = said
                     .chain(std::iter::once(error.to_string()))
@@ -275,6 +297,13 @@ mod tests {
         test(&mut session)
     }
 
+    fn delete(ids: &[&str]) -> Effect {
+        Effect::Delete {
+            ids: ids.iter().map(ToString::to_string).collect(),
+            partial_confirmed: false,
+        }
+    }
+
     fn journal_action(host: &Scripted) -> String {
         let journal: serde_json::Value = serde_json::from_str(&host.journals[0].1).unwrap();
         journal["action"].as_str().unwrap().to_owned()
@@ -395,7 +424,7 @@ mod tests {
     fn delete_journals_a_task_delete() {
         let mut host = Scripted::new();
         let response = run(&mut host, |session| {
-            session.perform(Effect::Delete(vec!["reminder-2".into()]), true)
+            session.perform(delete(&["reminder-2"]), true)
         });
         let Response::Changed {
             message,
@@ -415,7 +444,7 @@ mod tests {
         let mut host = Scripted::new();
         host.fail_next_journal_save();
         let response = run(&mut host, |session| {
-            session.perform(Effect::Delete(vec!["reminder-2".into()]), false)
+            session.perform(delete(&["reminder-2"]), false)
         });
         let Response::Changed {
             message,
@@ -518,6 +547,160 @@ mod tests {
         assert_eq!(journal_action(&host), "task_done");
     }
 
+    struct GainsAlarm {
+        demo: Backends,
+        snapshots: std::cell::Cell<usize>,
+    }
+
+    impl GainsAlarm {
+        fn mark(&self, mut snapshot: ReminderSnapshot) -> ReminderSnapshot {
+            if self.snapshots.get() > 1 {
+                for reminder in &mut snapshot.reminders {
+                    reminder.backup_partial |= reminder.id == "reminder-2";
+                }
+            }
+            snapshot
+        }
+    }
+
+    impl crate::domain::Reminders for GainsAlarm {
+        fn add(&self, reminder: crate::domain::NewReminder) -> Result<Reminder, BackendError> {
+            self.demo.reminders.add(reminder)
+        }
+
+        fn list(&self) -> Result<Vec<Reminder>, BackendError> {
+            self.demo.reminders.list()
+        }
+
+        fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
+            self.snapshots.set(self.snapshots.get() + 1);
+            Ok(self.mark(self.demo.reminders.snapshot(list)?))
+        }
+
+        fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+            self.snapshots.set(self.snapshots.get() + 1);
+            Ok(self.mark(self.demo.reminders.snapshot_including_completed()?))
+        }
+
+        fn apply(
+            &self,
+            changes: &[crate::domain::ReminderChange],
+        ) -> Result<crate::domain::ApplyResult, BackendError> {
+            self.demo.reminders.apply(changes)
+        }
+
+        fn reminder(
+            &self,
+            id: &str,
+        ) -> Result<Option<crate::domain::StoredReminder>, BackendError> {
+            self.demo.reminders.reminder(id)
+        }
+    }
+
+    #[test]
+    fn a_reminder_that_gains_an_alarm_after_loading_needs_the_count_typed() {
+        let now = now();
+        let config = Config::default();
+        let demo = crate::infra::demo::backends(&now);
+        let backends = Backends::new(
+            || -> Box<dyn crate::domain::Notes> { unreachable!() },
+            move || {
+                Box::new(GainsAlarm {
+                    demo,
+                    snapshots: std::cell::Cell::new(0),
+                })
+            },
+            || -> Box<dyn crate::domain::Calendar> { unreachable!() },
+        );
+        let mut host = Scripted::new();
+        let mut session = Session {
+            now: &now,
+            config: &config,
+            backends: &backends,
+            host: &mut host,
+        };
+        let (mut state, _) = State::new(session.load(false).unwrap(), "rent", now.clone(), true);
+        assert!(!state.item("reminder-2").unwrap().backup_partial);
+        state.update(Action::OpenMenu);
+        state.update(Action::Hotkey('d'));
+        let effect = state.update(Action::Hotkey('y')).unwrap();
+        let response = session.perform(effect, false);
+        let Response::DeleteRefused {
+            partial,
+            data: Some(_),
+            ..
+        } = &response
+        else {
+            panic!("expected a refusal with fresh data, got {response:?}");
+        };
+        assert_eq!(partial, &["reminder-2"]);
+        assert_eq!(state.resolve(response), None);
+        assert_eq!(
+            state.status(),
+            Some(&crate::tui::state::Status {
+                text: "\"Pay rent\" now has alarms, repeats, or links that undo can't bring back; type the count to delete it".into(),
+                error: true,
+            })
+        );
+        assert!(state.item("reminder-2").unwrap().backup_partial);
+        assert_eq!(state.mode(), crate::tui::state::Mode::ConfirmDelete);
+        assert!(state.delete_needs_count());
+        assert_eq!(host.backups, Vec::<(String, String)>::new());
+        assert_eq!(host.journals, Vec::<(String, String)>::new());
+
+        let mut session = Session {
+            now: &now,
+            config: &config,
+            backends: &backends,
+            host: &mut host,
+        };
+        state.update(Action::Hotkey('1'));
+        let effect = state.update(Action::Accept).unwrap();
+        assert_eq!(
+            effect,
+            Effect::Delete {
+                ids: vec!["reminder-2".into()],
+                partial_confirmed: true,
+            }
+        );
+        let response = session.perform(effect, false);
+        assert!(
+            matches!(&response, Response::Changed { message, error: false, data: Some(_) } if message == "Deleted \"Pay rent\""),
+            "{response:?}"
+        );
+        assert_eq!(journal_action(&host), "task_delete");
+        assert!(
+            host.backups[0].1.contains("\"partial\": true"),
+            "{}",
+            host.backups[0].1
+        );
+    }
+
+    #[test]
+    fn loading_copies_partial_backups_into_items() {
+        let now = now();
+        let mut snapshot = crate::infra::demo::backends(&now)
+            .reminders
+            .snapshot(None)
+            .unwrap();
+        snapshot.reminders[0].backup_partial = true;
+        let first = snapshot.reminders[0].id.clone();
+        let data = data(snapshot, false, &now);
+        assert!(
+            data.items
+                .iter()
+                .find(|item| item.id == first)
+                .unwrap()
+                .backup_partial
+        );
+        assert!(
+            data.items
+                .iter()
+                .filter(|item| item.id != first)
+                .all(|item| !item.backup_partial)
+        );
+    }
+
     #[test]
     fn failures_come_back_as_messages() {
         let mut host = Scripted::new();
@@ -541,7 +724,7 @@ mod tests {
     fn the_act_menu_drives_a_change_end_to_end() {
         let mut host = Scripted::new();
         run(&mut host, |session| {
-            let (mut state, _) = State::new(session.load(false).unwrap(), "", now());
+            let (mut state, _) = State::new(session.load(false).unwrap(), "", now(), true);
             type_text(&mut state, "rent");
             state.update(Action::OpenMenu);
             let effect = state.update(Action::Hotkey('x')).unwrap();
