@@ -76,13 +76,8 @@ pub fn run(
         Action::ListEvents {
             query,
             show_calendar,
-        } => output::events(
-            &backends.calendar.events(query)?,
-            show_calendar,
-            json,
-            now,
-            style,
-        ),
+            details,
+        } => list_events(query, show_calendar, details, json, now, backends, style),
         Action::ListCalendars => output::list(&backends.calendar.calendars()?, json, now, style),
         Action::CreateCalendar(calendar) => output::single(
             &backends.calendar.create_calendar(calendar)?,
@@ -217,6 +212,19 @@ fn stored_due_time(parts: &ReminderDueComponents) -> Option<Time> {
         0,
     )
     .ok()
+}
+
+fn list_events(
+    query: EventQuery,
+    show_calendar: bool,
+    details: bool,
+    json: bool,
+    now: &Zoned,
+    backends: &Backends,
+    style: Style,
+) -> Result<String> {
+    let events = backends.calendar.events(query)?;
+    output::events(&events, show_calendar, details, json, now, style)
 }
 
 fn today(
@@ -601,12 +609,19 @@ mod tests {
                         && (query.calendars.is_empty()
                             || query.calendars.iter().any(|name| name == calendar))
                 })
-                .map(|(id, title, start, all_day, calendar)| Event {
-                    id: id.into(),
-                    title: title.into(),
-                    start,
-                    all_day,
-                    calendar: calendar.into(),
+                .map(|(id, title, start, all_day, calendar)| {
+                    let review = id == "event-3";
+                    Event {
+                        id: id.into(),
+                        title: title.into(),
+                        start,
+                        all_day,
+                        calendar: calendar.into(),
+                        location: review.then(|| "Room 4B".into()),
+                        notes: review
+                            .then(|| "Bring the mockups.\nJoin: https://zoom.us/j/1".into()),
+                        meeting_url: review.then(|| "https://zoom.us/j/1".into()),
+                    }
                 })
                 .collect())
         }
@@ -833,6 +848,9 @@ mod tests {
             start: at(day, hour, 0),
             all_day: false,
             calendar: "Work".into(),
+            location: None,
+            notes: None,
+            meeting_url: None,
         }
     }
 
@@ -1203,7 +1221,10 @@ mod tests {
               "title": "Design review",
               "start": "2026-10-26T14:00:00-04:00",
               "all_day": false,
-              "calendar": "Work"
+              "calendar": "Work",
+              "location": null,
+              "notes": null,
+              "meeting_url": null
             }
           ]
         }
@@ -1615,6 +1636,48 @@ mod tests {
     }
 
     #[test]
+    fn cal_details_list_each_event_with_its_fields() {
+        assert_snapshot!(nib(&["cal", "--week", "--details"]), @r"
+        2026-10-26 10:00  Team sync
+          calendar  Work
+
+        2026-10-28 all day  Offsite
+          calendar  Work
+
+        2026-10-29 14:30  Design review
+          calendar  Work
+          location  Room 4B
+          meeting   https://zoom.us/j/1
+          notes     Bring the mockups.
+                    Join: https://zoom.us/j/1
+        ");
+        assert_eq!(
+            nib(&["--json", "cal", "--week", "--details"]),
+            nib(&["--json", "cal", "--week"])
+        );
+    }
+
+    #[test]
+    fn cal_details_strip_control_characters() {
+        let mut hostile = event("event-x", "Sync\u{1b}[31m", date(2026, 10, 26), 10);
+        hostile.location = Some("Room\u{7}1".into());
+        hostile.notes = Some("line one\r\n\u{202e}line two\t!".into());
+        hostile.meeting_url = Some("https://zoom.us/j/1\u{1b}]8;;".into());
+        let output = agenda(&["cal", "--details"], Vec::new(), vec![hostile]);
+        assert!(!output.contains('\u{1b}'));
+        assert!(!output.contains('\u{7}'));
+        assert!(!output.contains('\u{202e}'));
+        assert_snapshot!(output, @r"
+        2026-10-26 10:00  Sync�[31m
+          calendar  Work
+          location  Room�1
+          meeting   https://zoom.us/j/1�]8;;
+          notes     line one
+                    �line two !
+        ");
+    }
+
+    #[test]
     fn event_list_json() {
         assert_snapshot!(nib(&["cal", "--week", "--json"]), @r#"
         [
@@ -1623,21 +1686,30 @@ mod tests {
             "title": "Team sync",
             "start": "2026-10-26T10:00:00-04:00",
             "all_day": false,
-            "calendar": "Work"
+            "calendar": "Work",
+            "location": null,
+            "notes": null,
+            "meeting_url": null
           },
           {
             "id": "event-5",
             "title": "Offsite",
             "start": "2026-10-28T00:00:00-04:00",
             "all_day": true,
-            "calendar": "Work"
+            "calendar": "Work",
+            "location": null,
+            "notes": null,
+            "meeting_url": null
           },
           {
             "id": "event-3",
             "title": "Design review",
             "start": "2026-10-29T14:30:00-04:00",
             "all_day": false,
-            "calendar": "Work"
+            "calendar": "Work",
+            "location": "Room 4B",
+            "notes": "Bring the mockups.\nJoin: https://zoom.us/j/1",
+            "meeting_url": "https://zoom.us/j/1"
           }
         ]
         "#);
