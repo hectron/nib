@@ -118,23 +118,15 @@ pub fn run(
     } else {
         Some(open.as_slice())
     };
-    let lookup = |id: &str| -> std::result::Result<Option<StoredReminder>, BackendError> {
-        if let Some(found) = open
-            .iter()
-            .chain(completed.iter().flatten())
-            .find(|reminder| reminder.id == id)
-        {
-            return Ok(Some(found.clone()));
-        }
-        backends.reminders.reminder(id)
-    };
+    let known: Vec<&StoredReminder> = open.iter().chain(completed.iter().flatten()).collect();
     let selected = select(
         change,
         selectors,
         list.as_deref(),
         &snapshot.lists,
+        &known,
         pool,
-        lookup,
+        |id| backends.reminders.reminder(id),
     )?;
     let changes = plan(change, &selected, &snapshot.lists)?;
     if changes.is_empty() {
@@ -171,8 +163,9 @@ pub(crate) fn select(
     selectors: &[String],
     list: Option<&str>,
     lists: &[ReminderList],
+    known: &[&StoredReminder],
     pool: Option<&[StoredReminder]>,
-    mut lookup: impl FnMut(&str) -> std::result::Result<Option<StoredReminder>, BackendError>,
+    mut fetch: impl FnMut(&str) -> std::result::Result<Option<StoredReminder>, BackendError>,
 ) -> Result<Vec<StoredReminder>> {
     let state = if *change == TaskChange::Reopen {
         "completed"
@@ -198,41 +191,28 @@ pub(crate) fn select(
         .unwrap_or_default();
     let mut selected: Vec<StoredReminder> = Vec::new();
     for selector in selectors {
-        let reminder = if let Some(found) = lookup(selector)? {
-            check_state(change, &found)?;
-            found
+        let reminder = if let Some(found) = known.iter().find(|reminder| reminder.id == *selector) {
+            check_state(change, found)?;
+            (*found).clone()
         } else {
-            let Some(pool) = pool else {
-                return Err(SelectError::CompletedTitleSearch {
-                    selector: clean(selector),
-                }
-                .into());
-            };
             let needle = selector.to_lowercase();
-            let matches: Vec<&StoredReminder> = pool
-                .iter()
-                .filter(|reminder| {
-                    scope_ids
-                        .as_ref()
-                        .is_none_or(|ids| ids.contains(reminder.list_id.as_str()))
-                        && reminder.title.to_lowercase().contains(&needle)
-                })
-                .collect();
-            match matches.as_slice() {
-                [] => {
-                    return Err(SelectError::NoMatch {
-                        selector: clean(selector),
-                        state,
-                        scope,
-                    }
-                    .into());
-                }
-                [only] => (*only).clone(),
-                _ => {
+            let matches: Option<Vec<&StoredReminder>> = pool.map(|pool| {
+                pool.iter()
+                    .filter(|reminder| {
+                        scope_ids
+                            .as_ref()
+                            .is_none_or(|ids| ids.contains(reminder.list_id.as_str()))
+                            && reminder.title.to_lowercase().contains(&needle)
+                    })
+                    .collect()
+            });
+            match matches.as_deref() {
+                Some([only]) => (*only).clone(),
+                Some(candidates @ [_, _, ..]) => {
                     return Err(SelectError::Ambiguous {
                         selector: clean(selector),
                         state,
-                        candidates: matches
+                        candidates: candidates
                             .iter()
                             .map(|reminder| {
                                 format!(
@@ -245,6 +225,24 @@ pub(crate) fn select(
                             .collect(),
                     }
                     .into());
+                }
+                _ => {
+                    if let Some(found) = fetch(selector)? {
+                        check_state(change, &found)?;
+                        found
+                    } else if pool.is_none() {
+                        return Err(SelectError::CompletedTitleSearch {
+                            selector: clean(selector),
+                        }
+                        .into());
+                    } else {
+                        return Err(SelectError::NoMatch {
+                            selector: clean(selector),
+                            state,
+                            scope,
+                        }
+                        .into());
+                    }
                 }
             }
         };
@@ -560,16 +558,56 @@ mod tests {
             .filter(|reminder| reminder.completed == (*task_change == TaskChange::Reopen))
             .cloned()
             .collect();
+        let known: Vec<&StoredReminder> =
+            all.iter().filter(|reminder| !reminder.completed).collect();
         let selectors: Vec<String> = selectors.iter().map(ToString::to_string).collect();
         select(
             task_change,
             &selectors,
             list,
             &lists(),
+            &known,
             Some(&pool),
             |id: &str| Ok(all.iter().find(|reminder| reminder.id == id).cloned()),
         )
         .map(|selected| selected.into_iter().map(|reminder| reminder.id).collect())
+    }
+
+    #[test]
+    fn selectors_found_in_the_snapshot_skip_the_id_fetch() {
+        let all = sample();
+        let open: Vec<StoredReminder> = all
+            .iter()
+            .filter(|reminder| !reminder.completed)
+            .cloned()
+            .collect();
+        let known: Vec<&StoredReminder> = open.iter().collect();
+        let mut fetched = Vec::new();
+        let selectors: Vec<String> = ["rem-2", "OAT", "report", "rem-4"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let selected = select(
+            &TaskChange::Priority(None),
+            &selectors,
+            None,
+            &lists(),
+            &known,
+            Some(&open),
+            |id: &str| {
+                fetched.push(id.to_owned());
+                Ok(all.iter().find(|reminder| reminder.id == id).cloned())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            selected
+                .into_iter()
+                .map(|reminder| reminder.id)
+                .collect::<Vec<_>>(),
+            ["rem-2", "rem-1", "rem-3", "rem-4"]
+        );
+        assert_eq!(fetched, ["rem-4"]);
     }
 
     #[test]
@@ -817,5 +855,60 @@ mod tests {
                 .any(|line| line.contains("○ incomplete \"Buy oat milk\""))
         );
         assert_eq!(*reminders.borrow(), sample());
+    }
+
+    fn assert_undo_restores(task_change: &TaskChange, selector: &str, action: JournalAction) {
+        let reminders = Shared::new(RefCell::new(sample()));
+        let backends = backends(&reminders, true);
+        let mut host = Scripted::new().answer("y");
+        let changed = run(
+            &request(task_change, &[selector]),
+            &now(),
+            &backends,
+            &mut host,
+        )
+        .unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_ne!(*reminders.borrow(), sample());
+
+        let log = journal::log(now().timestamp(), &mut host).unwrap();
+        assert_eq!(log[0].action, action);
+
+        let outcome = undo::run(None, &now(), &backends, &mut host).unwrap();
+        assert!(matches!(outcome, undo::Outcome::Applied { .. }));
+        assert_eq!(*reminders.borrow(), sample());
+    }
+
+    #[test]
+    fn undo_reverses_a_reopen() {
+        assert_undo_restores(&TaskChange::Reopen, "dentist", JournalAction::TaskReopen);
+    }
+
+    #[test]
+    fn undo_reverses_setting_changing_and_clearing_a_priority() {
+        assert_undo_restores(
+            &TaskChange::Priority(Some(Priority::Medium)),
+            "oat",
+            JournalAction::TaskPriority,
+        );
+        assert_undo_restores(
+            &TaskChange::Priority(Some(Priority::Low)),
+            "report",
+            JournalAction::TaskPriority,
+        );
+        assert_undo_restores(
+            &TaskChange::Priority(None),
+            "report",
+            JournalAction::TaskPriority,
+        );
+    }
+
+    #[test]
+    fn undo_reverses_a_move() {
+        assert_undo_restores(
+            &TaskChange::Move("Work".into()),
+            "oat",
+            JournalAction::TaskMove,
+        );
     }
 }
