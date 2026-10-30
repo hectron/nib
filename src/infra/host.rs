@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::hash::BuildHasher;
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -283,25 +284,22 @@ fn remove_stale_temporary_files(directory: &Path, file_name: &str, now: SystemTi
 }
 
 pub(crate) struct ConfigLock {
-    path: PathBuf,
     _file: File,
-}
-
-impl Drop for ConfigLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigLockError {
-    #[error("configuration lock {} is already held", path.display())]
+    #[error("configuration {} is already locked", path.display())]
     Held { path: PathBuf },
     #[error(transparent)]
     Io(#[from] io::Error),
 }
 
-pub(crate) fn config_lock_path(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn config_lock_dir() -> io::Result<PathBuf> {
+    backups_dir()
+}
+
+pub(crate) fn legacy_config_lock_path(path: &Path) -> io::Result<PathBuf> {
     let target = resolved_target(path)?;
     let file_name = target
         .file_name()
@@ -311,22 +309,45 @@ pub(crate) fn config_lock_path(path: &Path) -> io::Result<PathBuf> {
     Ok(target.with_file_name(lock_name))
 }
 
-pub(crate) fn config_lock(path: &Path) -> Result<ConfigLock, ConfigLockError> {
-    let lock_path = config_lock_path(path)?;
-    match OpenOptions::new()
+fn config_lock_target(path: &Path) -> io::Result<PathBuf> {
+    let target = resolved_target(path)?;
+    if target.exists() {
+        return Ok(target);
+    }
+    let canonical_parent = target
+        .parent()
+        .zip(target.file_name())
+        .and_then(|(parent, name)| Some(std::fs::canonicalize(parent).ok()?.join(name)));
+    Ok(canonical_parent.unwrap_or(target))
+}
+
+fn config_lock_name(target: &Path) -> String {
+    format!(
+        "config-{:016x}.lock",
+        fnv1a_64(target.as_os_str().as_bytes())
+    )
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+pub(crate) fn config_lock(path: &Path, dir: &Path) -> Result<ConfigLock, ConfigLockError> {
+    let target = config_lock_target(path)?;
+    std::fs::create_dir_all(dir)?;
+    let file = OpenOptions::new()
+        .read(true)
         .write(true)
-        .create_new(true)
-        .mode(0o666)
-        .open(&lock_path)
-    {
-        Ok(file) => Ok(ConfigLock {
-            path: lock_path,
-            _file: file,
-        }),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            Err(ConfigLockError::Held { path: lock_path })
-        }
-        Err(error) => Err(error.into()),
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join(config_lock_name(&target)))?;
+    match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(ConfigLock { _file: file }),
+        Err(rustix::io::Errno::WOULDBLOCK) => Err(ConfigLockError::Held { path: target }),
+        Err(error) => Err(io::Error::from(error).into()),
     }
 }
 
@@ -1294,6 +1315,70 @@ mod tests {
 
         drop(held);
         assert!(try_lock_journal_in(&dir.0).unwrap().is_some());
+    }
+
+    #[test]
+    fn config_lock_is_exclusive_until_dropped() {
+        let dir = TestDir::new();
+        let locks = dir.0.join("backups");
+        let config = dir.0.join("config.toml");
+        std::fs::write(&config, "").unwrap();
+
+        let first = config_lock(&config, &locks).unwrap();
+        let error = config_lock(&config, &locks).err().unwrap();
+        assert!(
+            matches!(&error, ConfigLockError::Held { path } if *path == std::fs::canonicalize(&config).unwrap()),
+            "{error:?}"
+        );
+
+        drop(first);
+        let _second = config_lock(&config, &locks).unwrap();
+    }
+
+    #[test]
+    fn config_lock_keeps_its_file_and_reuses_one_left_by_a_crash() {
+        let dir = TestDir::new();
+        let config = dir.0.join("config.toml");
+        std::fs::write(&config, "").unwrap();
+        let lock_file = dir
+            .0
+            .join(config_lock_name(&std::fs::canonicalize(&config).unwrap()));
+        std::fs::write(&lock_file, "").unwrap();
+
+        drop(config_lock(&config, &dir.0).unwrap());
+
+        assert!(lock_file.exists());
+        let _again = config_lock(&config, &dir.0).unwrap();
+    }
+
+    #[test]
+    fn config_lock_names_a_missing_file_by_its_canonical_folder() {
+        let dir = TestDir::new();
+        let config = dir.0.join("config.toml");
+        let before = config_lock_target(&config).unwrap();
+        std::fs::write(&config, "").unwrap();
+
+        assert_eq!(before, config_lock_target(&config).unwrap());
+    }
+
+    #[test]
+    fn config_lock_names_are_stable_and_distinct() {
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(
+            config_lock_name(Path::new("/Users/me/.config/nib/config.toml")),
+            config_lock_name(Path::new("/Users/me/.config/nib/config.toml"))
+        );
+        assert_ne!(
+            config_lock_name(Path::new("/Users/me/project/nib.toml")),
+            config_lock_name(Path::new("/Users/me/project/.nib.local.toml"))
+        );
+        assert!(
+            config_lock_name(Path::new("/Users/me/project/nib.toml"))
+                .strip_prefix("config-")
+                .and_then(|name| name.strip_suffix(".lock"))
+                .is_some_and(|hash| hash.len() == 16)
+        );
     }
 
     #[test]

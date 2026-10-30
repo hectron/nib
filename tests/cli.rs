@@ -55,6 +55,7 @@ fn config_command(root: &std::path::Path) -> assert_cmd::Command {
     command
         .current_dir(root)
         .env("NIB_DEMO", "1")
+        .env("HOME", root.join("home"))
         .env("XDG_CONFIG_HOME", root.join("xdg"));
     command
 }
@@ -671,6 +672,7 @@ fn config_new_files_honor_the_umask() {
         .current_dir(&root)
         .env("NO_COLOR", "1")
         .env("NIB_DEMO", "1")
+        .env("HOME", root.join("home"))
         .env("XDG_CONFIG_HOME", root.join("xdg"))
         .env_remove("NIB_TASK_LIST")
         .env_remove("NIB_TASK_PRIORITY")

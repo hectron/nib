@@ -1,10 +1,8 @@
 use std::path::PathBuf;
-use std::time::Duration;
 
 use crate::domain::{AutomationStatus, DoctorProbe, EditorSetting, PermissionStatus};
 
 const MINIMUM_MACOS_MAJOR: u64 = 26;
-const STALE_CONFIG_LOCK_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckStatus {
@@ -40,7 +38,6 @@ pub struct ConfigFileCheck {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigLockFile {
     pub path: PathBuf,
-    pub age: Duration,
 }
 
 pub fn checks(
@@ -79,41 +76,22 @@ fn config_lock(locks: &[ConfigLockFile]) -> Check {
             fix: None,
         };
     }
-    let (stale, held): (Vec<&ConfigLockFile>, Vec<&ConfigLockFile>) = locks
-        .iter()
-        .partition(|lock| lock.age > STALE_CONFIG_LOCK_AFTER);
-    let held = lock_paths(&held);
-    if stale.is_empty() {
-        Check {
-            id: "config_lock".into(),
-            status: CheckStatus::Warning,
-            message: format!("configuration lock is held by another nib config command: {held}"),
-            fix: Some("Wait for that command to finish, then run `nib doctor` again.".into()),
-        }
-    } else {
-        let stale = lock_paths(&stale);
-        let message = if held.is_empty() {
-            format!("stale configuration lock: {stale}")
-        } else {
-            format!("stale configuration lock: {stale}; held by another nib config command: {held}")
-        };
-        Check {
-            id: "config_lock".into(),
-            status: CheckStatus::Fail,
-            message,
-            fix: Some(format!(
-                "Remove {stale} if no nib config command is running."
-            )),
-        }
-    }
-}
-
-fn lock_paths(locks: &[&ConfigLockFile]) -> String {
-    locks
+    let paths = locks
         .iter()
         .map(|lock| lock.path.display().to_string())
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(", ");
+    let (files, pronoun) = if locks.len() == 1 {
+        ("file", "it")
+    } else {
+        ("files", "them")
+    };
+    Check {
+        id: "config_lock".into(),
+        status: CheckStatus::Warning,
+        message: format!("leftover lock {files} from an older nib: {paths}"),
+        fix: Some(format!("Remove {paths}; nib no longer uses {pronoun}.")),
+    }
 }
 
 fn macos(version: Result<String, String>) -> Check {

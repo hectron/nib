@@ -21,7 +21,6 @@ fn main() -> miette::Result<()> {
     if cli.is_doctor() {
         let result = nib::doctor(
             &inspection,
-            now,
             std::env::var_os("TERM_PROGRAM"),
             std::env::var_os("VISUAL"),
             std::env::var_os("EDITOR"),
