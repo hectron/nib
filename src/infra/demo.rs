@@ -307,6 +307,27 @@ impl Reminders for Demo {
         })
     }
 
+    fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+        let mut snapshot = self.snapshot(None)?;
+        snapshot.reminders.push(StoredReminder {
+            id: "reminder-completed".into(),
+            list_id: DEMO_LIST.into(),
+            title: "File expense report".into(),
+            notes: None,
+            due: None,
+            due_components: None,
+            priority: None,
+            completed: true,
+            modified: None,
+            alarms_present: false,
+            absolute_alarms: Some(Vec::new()),
+            recurrence_present: false,
+            url: None,
+            backup_partial: false,
+        });
+        Ok(snapshot)
+    }
+
     fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
         Ok(vec![ReminderListInfo {
             id: DEMO_LIST.into(),
@@ -707,6 +728,21 @@ mod tests {
         Renew passport       2026-11-09 09:00  low
         Buy groceries
         ");
+    }
+
+    #[test]
+    fn completed_snapshot_includes_demo_completed_reminders() {
+        let demo = demo_backend();
+        let normal = Reminders::snapshot(&demo, None).unwrap();
+        let including_completed = Reminders::snapshot_including_completed(&demo).unwrap();
+
+        assert!(normal.reminders.iter().all(|reminder| !reminder.completed));
+        assert!(
+            including_completed
+                .reminders
+                .iter()
+                .any(|reminder| reminder.completed)
+        );
     }
 
     #[test]

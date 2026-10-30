@@ -241,6 +241,10 @@ mod tests {
             unreachable!()
         }
 
+        fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+            unreachable!()
+        }
+
         fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
             assert!(
                 self.journal_locks.get() > 0,

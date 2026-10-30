@@ -9,7 +9,8 @@ use serde::{Serialize, Serializer};
 use crate::app::doctor::{Check, CheckStatus};
 use crate::domain::{
     CalendarInfo, ChangeCounts, ConfigEntry, ConfigOrigin, ConfigValue, Event, JournalStatus,
-    JournalSummary, Note, NoteFolder, Priority, Reminder, ReminderListInfo, time_zone_is_local_at,
+    JournalSummary, Note, NoteFolder, Priority, Reminder, ReminderListInfo,
+    reminder_due_is_overdue, time_zone_is_local_at,
 };
 
 pub trait Tabular: Serialize {
@@ -880,17 +881,7 @@ fn format_reminder_due(reminder: &Reminder, now: Option<&Zoned>) -> String {
 }
 
 pub(crate) fn reminder_is_overdue(reminder: &Reminder, now: &Zoned) -> bool {
-    let Some(date) = reminder.due else {
-        return false;
-    };
-    let Some(time) = reminder.due_time else {
-        return date < now.date();
-    };
-    if let Some(due_at) = reminder.due_at {
-        return due_at < now.timestamp();
-    }
-    let civil = date.at(time.hour(), time.minute(), 0, 0);
-    civil < now.datetime()
+    reminder_due_is_overdue(reminder.due, reminder.due_time, reminder.due_at, now)
 }
 
 pub(crate) fn reminder_is_due_today(reminder: &Reminder, date: Date, now: &Zoned) -> bool {

@@ -94,6 +94,10 @@ impl Reminders for Unimplemented {
         self.fail()
     }
 
+    fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
+        self.fail()
+    }
+
     fn apply(&self, _: &[ReminderChange]) -> Result<ApplyResult, BackendError> {
         self.fail()
     }
