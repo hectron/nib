@@ -7,9 +7,8 @@ mod test_support;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
 
-use jiff::{Timestamp, Zoned};
+use jiff::Zoned;
 use miette::IntoDiagnostic;
 
 pub use cli::Cli;
@@ -46,7 +45,6 @@ pub fn inspect_config(
 
 pub fn doctor(
     inspection: &ConfigInspection,
-    now: Timestamp,
     term_program: Option<OsString>,
     visual: Option<OsString>,
     editor: Option<OsString>,
@@ -63,12 +61,9 @@ pub fn doctor(
         })
         .collect::<Vec<_>>();
     let config_locks = inspection
-        .config_lock_files()
+        .legacy_config_lock_files()
         .into_iter()
-        .map(|(path, modified)| app::doctor::ConfigLockFile {
-            path,
-            age: lock_age(now, modified),
-        })
+        .map(|path| app::doctor::ConfigLockFile { path })
         .collect::<Vec<_>>();
     let error = inspection.error().map(ToString::to_string);
     let checks = app::doctor::checks(&probe, &config_files, error.as_deref(), &config_locks);
@@ -83,6 +78,7 @@ pub fn run_config(
     inspection: ConfigInspection,
     current_dir: &Path,
     user_config: Option<&Path>,
+    config_lock_directory: Option<&Path>,
     style: Style,
 ) -> miette::Result<ConfigOutput> {
     let Some((json, action)) = cli.into_config() else {
@@ -121,14 +117,14 @@ pub fn run_config(
             warning = inspection
                 .origin(key)
                 .and_then(|origin| override_warning(key, origin, target, &path, current_dir));
-            let edit = infra::config::set(&path, key, &value)?;
+            let edit = infra::config::set(&path, key, &value, config_lock_directory)?;
             append_warning(&mut warning, edit.warning);
             cli::output::config_set(key.as_str(), &edit.value, &path, json, style)?
         }
         cli::ConfigAction::Unset { key, target } => {
             let key = infra::config::key(&key)?;
             let path = config_target(current_dir, user_config, target)?;
-            let edit = infra::config::unset(&path, key)?;
+            let edit = infra::config::unset(&path, key, config_lock_directory)?;
             append_warning(&mut warning, edit.warning);
             cli::output::config_unset(key.as_str(), &path, edit.value, json, style)?
         }
@@ -154,14 +150,6 @@ fn append_warning(warning: &mut Option<String>, added: Option<String>) {
     } else {
         *warning = Some(added);
     }
-}
-
-fn lock_age(now: Timestamp, modified: SystemTime) -> Duration {
-    Timestamp::try_from(modified)
-        .map(|modified| now.duration_since(modified))
-        .ok()
-        .filter(|age| !age.is_negative())
-        .map_or(Duration::ZERO, jiff::SignedDuration::unsigned_abs)
 }
 
 fn config_target(
@@ -291,15 +279,5 @@ mod tests {
             run(cli, &Config::default(), &now, true, None, Style::default(),).unwrap(),
             "[]"
         );
-    }
-
-    #[test]
-    fn lock_age_is_elapsed_time_and_clamps_future_times_to_zero() {
-        let now = Timestamp::from_second(1_800_000_000).unwrap();
-        let past = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000 - 90);
-        let future = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000 + 30);
-
-        assert_eq!(lock_age(now, past), Duration::from_secs(90));
-        assert_eq!(lock_age(now, future), Duration::ZERO);
     }
 }

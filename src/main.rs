@@ -21,7 +21,6 @@ fn main() -> miette::Result<()> {
     if cli.is_doctor() {
         let result = nib::doctor(
             &inspection,
-            now,
             std::env::var_os("TERM_PROGRAM"),
             std::env::var_os("VISUAL"),
             std::env::var_os("EDITOR"),
@@ -40,6 +39,7 @@ fn main() -> miette::Result<()> {
             inspection,
             &current_dir,
             user_config.as_deref(),
+            config_lock_directory().as_deref(),
             nib::Style::detect(),
         )?;
         print_output(&result.text)?;
@@ -91,6 +91,13 @@ fn cache_directory() -> Option<std::path::PathBuf> {
         .filter(|path| !path.is_empty())
         .map(std::path::PathBuf::from)
         .map(|home| home.join("Library/Caches/nib"))
+}
+
+fn config_lock_directory() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join("Library/Application Support/nib/backups"))
 }
 
 fn local_zone() -> TimeZone {

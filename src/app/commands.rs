@@ -1838,54 +1838,31 @@ mod tests {
     }
 
     #[test]
-    fn doctor_reports_stale_and_held_config_locks() {
+    fn doctor_warns_about_lock_files_from_older_versions() {
         let checks = crate::app::doctor::checks(
-            &FakeDoctor,
-            &[],
-            None,
-            &[
-                crate::app::doctor::ConfigLockFile {
-                    path: "/Users/me/project/nib.toml.lock".into(),
-                    age: std::time::Duration::from_secs(600),
-                },
-                crate::app::doctor::ConfigLockFile {
-                    path: "/Users/me/project/.nib.local.toml.lock".into(),
-                    age: std::time::Duration::from_secs(2),
-                },
-            ],
-        );
-        let lock = checks
-            .iter()
-            .find(|check| check.id == "config_lock")
-            .unwrap();
-        assert_eq!(lock.status, crate::app::doctor::CheckStatus::Fail);
-        assert_eq!(
-            lock.message,
-            "stale configuration lock: /Users/me/project/nib.toml.lock; held by another nib config command: /Users/me/project/.nib.local.toml.lock"
-        );
-        assert_eq!(
-            lock.fix.as_deref(),
-            Some("Remove /Users/me/project/nib.toml.lock if no nib config command is running.")
-        );
-
-        let held = crate::app::doctor::checks(
             &FakeDoctor,
             &[],
             None,
             &[crate::app::doctor::ConfigLockFile {
                 path: "/Users/me/project/nib.toml.lock".into(),
-                age: std::time::Duration::from_secs(2),
             }],
         );
-        let lock = held.iter().find(|check| check.id == "config_lock").unwrap();
+        let lock = checks
+            .iter()
+            .find(|check| check.id == "config_lock")
+            .unwrap();
         assert_eq!(lock.status, crate::app::doctor::CheckStatus::Warning);
         assert_eq!(
             lock.message,
-            "configuration lock is held by another nib config command: /Users/me/project/nib.toml.lock"
+            "leftover lock file from an older nib: /Users/me/project/nib.toml.lock"
+        );
+        assert_eq!(
+            lock.fix.as_deref(),
+            Some("Remove /Users/me/project/nib.toml.lock; nib no longer uses it.")
         );
     }
 
-    fn mixed_config_lock_checks() -> Vec<crate::app::doctor::Check> {
+    fn legacy_config_lock_checks() -> Vec<crate::app::doctor::Check> {
         crate::app::doctor::checks(
             &FakeDoctor,
             &[],
@@ -1893,19 +1870,17 @@ mod tests {
             &[
                 crate::app::doctor::ConfigLockFile {
                     path: "/Users/me/project/nib.toml.lock".into(),
-                    age: std::time::Duration::from_secs(600),
                 },
                 crate::app::doctor::ConfigLockFile {
                     path: "/Users/me/project/.nib.local.toml.lock".into(),
-                    age: std::time::Duration::from_secs(2),
                 },
             ],
         )
     }
 
     #[test]
-    fn doctor_text_reports_stale_and_held_config_locks() {
-        let checks = mixed_config_lock_checks();
+    fn doctor_text_reports_leftover_config_locks() {
+        let checks = legacy_config_lock_checks();
         assert_snapshot!(output::doctor(&checks, false, Style::default()).unwrap(), @r###"
         ✓ macOS 26.1 is supported
         ✓ macOS attributes permissions to Ghostty
@@ -1915,16 +1890,16 @@ mod tests {
         ! Apple Notes Automation access is checked on first use
           Fix: When prompted, allow Ghostty to control Notes; later changes are in System Settings > Privacy & Security > Automation.
         ✓ no config files loaded; built-in defaults are valid
-        ✗ stale configuration lock: /Users/me/project/nib.toml.lock; held by another nib config command: /Users/me/project/.nib.local.toml.lock
-          Fix: Remove /Users/me/project/nib.toml.lock if no nib config command is running.
+        ! leftover lock files from an older nib: /Users/me/project/nib.toml.lock, /Users/me/project/.nib.local.toml.lock
+          Fix: Remove /Users/me/project/nib.toml.lock, /Users/me/project/.nib.local.toml.lock; nib no longer uses them.
         ! $VISUAL uses `code` without a wait flag
           Fix: Set VISUAL="code --wait".
         "###);
     }
 
     #[test]
-    fn doctor_json_reports_stale_and_held_config_locks() {
-        let checks = mixed_config_lock_checks();
+    fn doctor_json_reports_leftover_config_locks() {
+        let checks = legacy_config_lock_checks();
         assert_snapshot!(output::doctor(&checks, true, Style::default()).unwrap(), @r###"
         {
           "id": "doctor",
@@ -1968,9 +1943,9 @@ mod tests {
             },
             {
               "id": "config_lock",
-              "status": "fail",
-              "message": "stale configuration lock: /Users/me/project/nib.toml.lock; held by another nib config command: /Users/me/project/.nib.local.toml.lock",
-              "fix": "Remove /Users/me/project/nib.toml.lock if no nib config command is running."
+              "status": "warning",
+              "message": "leftover lock files from an older nib: /Users/me/project/nib.toml.lock, /Users/me/project/.nib.local.toml.lock",
+              "fix": "Remove /Users/me/project/nib.toml.lock, /Users/me/project/.nib.local.toml.lock; nib no longer uses them."
             },
             {
               "id": "editor",

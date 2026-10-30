@@ -22,6 +22,14 @@ nib config path
 
 Like Git, `nib config set` and `nib config unset` replace the configuration file atomically. Replacing a read-only file is allowed when its directory is writable, and replacing one name of a hard-linked file splits that name from the other links.
 
+While `set` or `unset` edits a file, it holds a lock on that file, so a second `set` or `unset` on the same file fails with `nib::config::locked` instead of overwriting the first change. The lock is a `flock` on a file in `~/Library/Application Support/nib/backups` named `config-<hash>.lock`, where the hash comes from the configuration file's resolved path. macOS releases the lock when nib exits, even after a crash, so it never has to be removed by hand.
+
+When `HOME` is unset or empty, nib puts the `config-<hash>.lock` file in the folder of the file the configuration resolves to instead (symlinks are followed, so a configuration linked into a dotfiles repository puts it there), so `set` and `unset` never need `HOME`. That is the only case where nib writes a lock file next to your configuration, and a lock file beside a project's `nib.toml` could be committed by mistake. A nib run with `HOME` set and one without it lock different files for the same configuration, so they don't exclude each other.
+
+When `HOME` is set, the lock is per user, because it lives in your home folder, so two people editing a shared `nib.toml` don't block each other. In the `HOME`-less case the lock sits beside the file, so people editing that shared file do block each other. Each write replaces the file atomically, so no one sees a half-written file, but each edit rewrites the whole file from the copy it read. If another user changes a different key at the same time, one of the two changes can be lost. A lock folder that can't be created or opened is reported with `nib::config::lock` and the folder or lock file's path.
+
+nib 0.4.1 and earlier locked by creating `<file>.lock` next to the configuration file, such as `nib.toml.lock`. nib no longer creates or reads those files, so any that remain can be deleted. `nib doctor` reports them as a warning.
+
 All config commands that print output accept `--json`. In text mode, `get` exits with status 1 and prints nothing when a setting is unset and has no built-in default. In JSON mode it still exits with status 1 but prints an object whose `value` is `null`. JSON list entries always include a typed `origin` object; `--origin` controls only the text table. Unsetting a key absent from the selected file succeeds without creating or rewriting anything and reports that nothing changed.
 
 Add a `nib.toml` to a work repository:
