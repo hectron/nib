@@ -9,7 +9,7 @@ nib cal --week --json
 nib note list --folder Work --json
 ```
 
-Lists return arrays. Creating a note or reminder returns one item object, while `nib today` returns an agenda object. Empty lists return `[]`, and optional values stay present as `null`.
+Lists return arrays. Creating a note or reminder returns one item object, changing reminders returns an array, and `nib today` returns an agenda object. Empty lists return `[]`, and optional values stay present as `null`.
 
 ## Notes
 
@@ -39,6 +39,23 @@ Note objects contain `id`, `title`, `folder`, `modified`, and `locked`. `modifie
 ```
 
 Reminder objects contain `id`, `title`, `due`, `due_time`, `due_time_zone`, and `priority`. `due` keeps its `YYYY-MM-DD` shape. `due_time` uses `HH:MM`, or is `null` for a date-only or undated reminder. `due_time_zone` is an IANA name for a zoned time and is `null` for a floating time or a reminder with no time. Priority is `low`, `medium`, `high`, or `null`.
+
+## Reminder changes
+
+```json
+[
+  {
+    "id": "reminder-2",
+    "title": "Pay rent",
+    "list": "Reminders",
+    "completed": true,
+    "priority": "medium",
+    "change": "completed"
+  }
+]
+```
+
+`nib task done`, `reopen`, `priority`, and `move` return an array with one object per changed reminder, in selector order. Each object contains `id`, `title`, `list`, `completed`, `priority`, and `change`, with the values after the change. `list` is the reminder list's name. `change` is `completed`, `reopened`, `priority`, or `moved`. Reminders that didn't need to change are left out, so the array can be `[]`.
 
 ## Calendar events
 

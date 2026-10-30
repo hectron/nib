@@ -3,4 +3,5 @@ pub(crate) mod doctor;
 pub(crate) mod edit;
 pub(crate) mod journal;
 pub(crate) mod markdown;
+pub(crate) mod quick;
 pub(crate) mod undo;

@@ -335,6 +335,13 @@ impl Reminders for EventKitReminders {
         })
     }
 
+    fn reminder(&self, id: &str) -> Result<Option<StoredReminder>, BackendError> {
+        autoreleasepool(|_| {
+            let store = authorized_store(EKEntityType::Reminder, REMINDERS)?;
+            Ok(find_reminder(&store, id).map(|reminder| to_stored(&reminder)))
+        })
+    }
+
     fn validate_time_zone(&self, name: &str) -> Result<(), BackendError> {
         autoreleasepool(|_| {
             NSTimeZone::timeZoneWithName(&NSString::from_str(name))

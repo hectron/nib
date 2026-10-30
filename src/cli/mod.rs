@@ -8,10 +8,12 @@ use thiserror::Error;
 
 use crate::domain::{
     Config, EventQuery, NewNote, NewReminder, NewResource, NoteQuery, Priority, ResourceSelector,
+    TaskChangeRequest,
 };
 
 pub(crate) mod completions;
 pub mod output;
+mod quick;
 mod task;
 
 use task::{Due, InlineTask, due, parse_inline};
@@ -56,6 +58,7 @@ pub enum Action {
     EditTasks {
         list: Option<String>,
     },
+    ChangeTasks(TaskChangeRequest),
     ListEvents {
         query: EventQuery,
         show_calendar: bool,
@@ -95,7 +98,7 @@ pub enum Command {
     Today(TodayArgs),
     /// Create and list notes
     Note(NoteArgs),
-    /// Add and list reminders
+    /// Add, list, and change reminders
     #[command(visible_alias = "todo")]
     Task(TaskArgs),
     /// Show calendar events
@@ -105,7 +108,7 @@ pub enum Command {
     N(NoteCapture),
     /// Add a reminder from the rest of the line, or list reminders
     T(TaskCapture),
-    /// List recent task edit and undo journal entries
+    /// List recent task change and undo journal entries
     Log,
     /// Undo a journal entry, or the latest entry when omitted
     Undo(UndoArgs),
@@ -303,6 +306,25 @@ enum TaskAction {
         /// Only edit this list
         #[arg(short, long)]
         list: Option<String>,
+    },
+    /// Mark reminders completed
+    Done(quick::Selectors),
+    /// Mark completed reminders open again
+    Reopen(quick::Selectors),
+    /// Set or clear the priority of reminders
+    Priority {
+        #[arg(value_enum)]
+        level: quick::PriorityLevel,
+        #[command(flatten)]
+        targets: quick::Selectors,
+    },
+    /// Move reminders to another list
+    Move {
+        /// Name of the list to move to
+        #[arg(value_name = "LIST", value_parser = resource_value)]
+        destination: String,
+        #[command(flatten)]
+        targets: quick::Selectors,
     },
 }
 
@@ -571,6 +593,13 @@ fn task_action(
         Some(TaskAction::Edit { list }) => Action::EditTasks {
             list: list.or_else(|| config.task.list.clone()),
         },
+        Some(TaskAction::Done(targets)) => quick::done(targets),
+        Some(TaskAction::Reopen(targets)) => quick::reopen(targets),
+        Some(TaskAction::Priority { level, targets }) => quick::priority(level, targets),
+        Some(TaskAction::Move {
+            destination,
+            targets,
+        }) => quick::move_to(destination, targets),
     })
 }
 

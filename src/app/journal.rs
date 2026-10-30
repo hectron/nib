@@ -34,6 +34,10 @@ struct Entry {
 #[serde(rename_all = "snake_case")]
 enum Action {
     TaskEdit,
+    TaskDone,
+    TaskReopen,
+    TaskPriority,
+    TaskMove,
     Undo,
 }
 
@@ -270,7 +274,17 @@ pub fn record_edit(
     result: &ApplyResult,
     host: &mut dyn Host,
 ) -> Result<String> {
-    let id = record(now, Action::TaskEdit, None, changes, result, host)?;
+    record_action(now, JournalAction::TaskEdit, changes, result, host)
+}
+
+pub fn record_action(
+    now: &Zoned,
+    action: JournalAction,
+    changes: &[ReminderChange],
+    result: &ApplyResult,
+    host: &mut dyn Host,
+) -> Result<String> {
+    let id = record(now, Action::from(action), None, changes, result, host)?;
     warn_unrecorded(result, host);
     Ok(id)
 }
@@ -530,9 +544,7 @@ pub fn undo_changes(wanted: Option<&str>, now: Timestamp, host: &mut dyn Host) -
         }
         None => entries
             .into_iter()
-            .find(|loaded| {
-                loaded.entry.action == Action::TaskEdit && !inactive.contains(&loaded.id)
-            })
+            .find(|loaded| loaded.entry.action != Action::Undo && !inactive.contains(&loaded.id))
             .ok_or_else(|| miette!("there are no journal entries to undo"))?,
     };
     let id = loaded.id;
@@ -724,7 +736,24 @@ fn status(value: Status) -> JournalStatus {
 fn action(value: Action) -> JournalAction {
     match value {
         Action::TaskEdit => JournalAction::TaskEdit,
+        Action::TaskDone => JournalAction::TaskDone,
+        Action::TaskReopen => JournalAction::TaskReopen,
+        Action::TaskPriority => JournalAction::TaskPriority,
+        Action::TaskMove => JournalAction::TaskMove,
         Action::Undo => JournalAction::Undo,
+    }
+}
+
+impl From<JournalAction> for Action {
+    fn from(value: JournalAction) -> Self {
+        match value {
+            JournalAction::TaskEdit => Self::TaskEdit,
+            JournalAction::TaskDone => Self::TaskDone,
+            JournalAction::TaskReopen => Self::TaskReopen,
+            JournalAction::TaskPriority => Self::TaskPriority,
+            JournalAction::TaskMove => Self::TaskMove,
+            JournalAction::Undo => Self::Undo,
+        }
     }
 }
 
