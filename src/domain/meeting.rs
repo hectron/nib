@@ -38,7 +38,29 @@ fn link_at(text: &str) -> &str {
     let end = text
         .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"'))
         .unwrap_or(text.len());
-    text[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '\''])
+    let mut link = &text[..end];
+    loop {
+        let trimmed = link.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '*']);
+        let trimmed = match trimmed.chars().next_back() {
+            Some(close @ (')' | ']' | '}')) if has_unmatched_close(trimmed, close) => {
+                &trimmed[..trimmed.len() - 1]
+            }
+            _ => trimmed,
+        };
+        if trimmed.len() == link.len() {
+            return link;
+        }
+        link = trimmed;
+    }
+}
+
+fn has_unmatched_close(text: &str, close: char) -> bool {
+    let open = match close {
+        ')' => '(',
+        ']' => '[',
+        _ => '{',
+    };
+    text.matches(close).count() > text.matches(open).count()
 }
 
 fn is_meeting_url(url: &str) -> bool {
@@ -49,7 +71,7 @@ fn is_meeting_url(url: &str) -> bool {
     else {
         return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit('@').next().unwrap_or_default();
     let host = host
         .split(':')
@@ -70,6 +92,27 @@ mod tests {
 
     fn from_notes(notes: &str) -> Option<String> {
         meeting_url(None, None, Some(notes))
+    }
+
+    #[test]
+    fn backslash_does_not_hide_the_host() {
+        assert_eq!(from_notes("https://evil.example\\@zoom.us/j/1"), None);
+    }
+
+    #[test]
+    fn closing_brackets_stay_when_balanced_and_markdown_is_trimmed() {
+        assert_eq!(
+            from_notes("(https://zoom.us/j/1)").as_deref(),
+            Some("https://zoom.us/j/1")
+        );
+        assert_eq!(
+            from_notes("join https://zoom.us/join/(abc)").as_deref(),
+            Some("https://zoom.us/join/(abc)")
+        );
+        assert_eq!(
+            from_notes("**https://zoom.us/j/1**").as_deref(),
+            Some("https://zoom.us/j/1")
+        );
     }
 
     #[test]
