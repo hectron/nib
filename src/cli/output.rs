@@ -7,9 +7,10 @@ use miette::{IntoDiagnostic, Result};
 use serde::{Serialize, Serializer};
 
 use crate::app::doctor::{Check, CheckStatus};
+use crate::app::quick::Changed;
 use crate::domain::{
     CalendarInfo, ChangeCounts, ConfigEntry, ConfigOrigin, ConfigValue, Event, JournalStatus,
-    JournalSummary, Note, NoteFolder, Priority, Reminder, ReminderListInfo,
+    JournalSummary, Note, NoteFolder, Priority, Reminder, ReminderListInfo, TaskChange,
     reminder_due_is_overdue, time_zone_is_local_at,
 };
 
@@ -285,6 +286,41 @@ pub fn undo(
         "Undid {} from {id}.",
         count(counts.total(), "change")
     )))
+}
+
+pub fn changed_reminders(changed: &[Changed], json: bool, style: Style) -> Result<String> {
+    if json {
+        let items = changed.iter().map(ChangedJson::from).collect::<Vec<_>>();
+        return to_json(&items, style);
+    }
+    if changed.is_empty() {
+        return Ok("No changes.".into());
+    }
+    Ok(changed
+        .iter()
+        .map(|item| {
+            let (verb, suffix) = match &item.change {
+                TaskChange::Complete => ("Completed", String::new()),
+                TaskChange::Reopen => ("Reopened", String::new()),
+                TaskChange::Priority(Some(priority)) => {
+                    ("Set", format!(" to {} priority", priority.as_str()))
+                }
+                TaskChange::Priority(None) => ("Cleared priority on", String::new()),
+                TaskChange::Move(_) => ("Moved", format!(" to {}", clean(&item.list))),
+            };
+            let title = clean(&item.reminder.title);
+            if style.color {
+                format!(
+                    "{} \"{}\"{suffix}",
+                    style.paint(verb, Tone::Success),
+                    style.paint(&title, Tone::Heading)
+                )
+            } else {
+                format!("{verb} \"{title}\"{suffix}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 pub fn undo_cancelled(id: &str, json: bool, style: Style) -> Result<String> {
@@ -1101,6 +1137,34 @@ struct JournalJson<'a> {
     completed: usize,
     deleted: usize,
     unrecorded: usize,
+}
+
+#[derive(Serialize)]
+struct ChangedJson<'a> {
+    id: &'a str,
+    title: &'a str,
+    list: &'a str,
+    completed: bool,
+    priority: Option<&'static str>,
+    change: &'static str,
+}
+
+impl<'a> From<&'a Changed> for ChangedJson<'a> {
+    fn from(item: &'a Changed) -> Self {
+        Self {
+            id: &item.reminder.id,
+            title: &item.reminder.title,
+            list: &item.list,
+            completed: item.reminder.completed,
+            priority: item.reminder.priority.map(Priority::as_str),
+            change: match item.change {
+                TaskChange::Complete => "completed",
+                TaskChange::Reopen => "reopened",
+                TaskChange::Priority(_) => "priority",
+                TaskChange::Move(_) => "moved",
+            },
+        }
+    }
 }
 
 #[derive(Serialize)]

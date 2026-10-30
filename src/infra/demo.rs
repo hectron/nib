@@ -9,6 +9,7 @@ use crate::domain::{
 };
 
 const DEMO_LIST: &str = "demo-list";
+const DEMO_WORK_LIST: &str = "demo-list-work";
 
 #[derive(Clone, Copy)]
 struct DemoResource {
@@ -32,12 +33,20 @@ const NOTE_FOLDERS: &[DemoResource] = &[
         owner_id: "account-icloud",
     },
 ];
-const REMINDER_LISTS: &[DemoResource] = &[DemoResource {
-    id: DEMO_LIST,
-    name: "Reminders",
-    owner: "iCloud",
-    owner_id: "source-icloud",
-}];
+const REMINDER_LISTS: &[DemoResource] = &[
+    DemoResource {
+        id: DEMO_LIST,
+        name: "Reminders",
+        owner: "iCloud",
+        owner_id: "source-icloud",
+    },
+    DemoResource {
+        id: DEMO_WORK_LIST,
+        name: "Work",
+        owner: "iCloud",
+        owner_id: "source-icloud",
+    },
+];
 const CALENDARS: &[DemoResource] = &[
     DemoResource {
         id: "calendar-personal",
@@ -175,7 +184,11 @@ impl Notes for Demo {
 
 impl Reminders for Demo {
     fn add(&self, reminder: NewReminder) -> Result<Reminder, BackendError> {
-        if let Some(name) = reminder.list.as_deref().filter(|name| *name != "Reminders") {
+        if let Some(name) = reminder
+            .list
+            .as_deref()
+            .filter(|name| !REMINDER_LISTS.iter().any(|list| list.name == *name))
+        {
             return Err(BackendError::NotFound {
                 kind: "writable reminder list",
                 name: name.into(),
@@ -261,7 +274,18 @@ impl Reminders for Demo {
     }
 
     fn snapshot(&self, list: Option<&str>) -> Result<ReminderSnapshot, BackendError> {
-        if let Some(name) = list.filter(|name| *name != "Reminders") {
+        let lists: Vec<ReminderList> = REMINDER_LISTS
+            .iter()
+            .filter(|resource| list.is_none_or(|name| name == resource.name))
+            .map(|resource| ReminderList {
+                id: resource.id.into(),
+                name: resource.name.into(),
+                writable: true,
+            })
+            .collect();
+        if let Some(name) = list
+            && lists.is_empty()
+        {
             return Err(BackendError::NotFound {
                 kind: "reminder list",
                 name: name.into(),
@@ -296,48 +320,41 @@ impl Reminders for Demo {
                     backup_partial: false,
                 }
             })
+            .filter(|reminder| lists.iter().any(|list| list.id == reminder.list_id))
             .collect();
-        Ok(ReminderSnapshot {
-            lists: vec![ReminderList {
-                id: DEMO_LIST.into(),
-                name: "Reminders".into(),
-                writable: true,
-            }],
-            reminders,
-        })
+        Ok(ReminderSnapshot { lists, reminders })
     }
 
     fn snapshot_including_completed(&self) -> Result<ReminderSnapshot, BackendError> {
         let mut snapshot = self.snapshot(None)?;
-        snapshot.reminders.push(StoredReminder {
-            id: "reminder-completed".into(),
-            list_id: DEMO_LIST.into(),
-            title: "File expense report".into(),
-            notes: None,
-            due: None,
-            due_components: None,
-            priority: None,
-            completed: true,
-            modified: None,
-            alarms_present: false,
-            absolute_alarms: Some(Vec::new()),
-            recurrence_present: false,
-            url: None,
-            backup_partial: false,
-        });
+        snapshot.reminders.extend([
+            completed_reminder("reminder-6", "Call the dentist"),
+            completed_reminder("reminder-7", "File expense report"),
+        ]);
         Ok(snapshot)
     }
 
     fn lists(&self) -> Result<Vec<ReminderListInfo>, BackendError> {
-        Ok(vec![ReminderListInfo {
-            id: DEMO_LIST.into(),
-            name: "Reminders".into(),
-            source: Some("iCloud".into()),
-            source_id: Some("source-icloud".into()),
-            kind: CalendarKind::Local,
-            writable: true,
-            default: true,
-        }])
+        Ok(REMINDER_LISTS
+            .iter()
+            .map(|resource| ReminderListInfo {
+                id: resource.id.into(),
+                name: resource.name.into(),
+                source: Some(resource.owner.into()),
+                source_id: Some(resource.owner_id.into()),
+                kind: CalendarKind::Local,
+                writable: true,
+                default: resource.id == DEMO_LIST,
+            })
+            .collect())
+    }
+
+    fn reminder(&self, id: &str) -> Result<Option<StoredReminder>, BackendError> {
+        Ok(self
+            .snapshot_including_completed()?
+            .reminders
+            .into_iter()
+            .find(|reminder| reminder.id == id))
     }
 
     fn create_list(&self, list: NewResource) -> Result<ReminderListInfo, BackendError> {
@@ -379,7 +396,7 @@ impl Reminders for Demo {
             source_id: Some(selected.owner_id.into()),
             kind: CalendarKind::Local,
             writable: true,
-            default: true,
+            default: selected.id == DEMO_LIST,
         })
     }
 
@@ -392,6 +409,25 @@ impl Reminders for Demo {
                 .collect(),
             unrecorded: Vec::new(),
         })
+    }
+}
+
+fn completed_reminder(id: &str, title: &str) -> StoredReminder {
+    StoredReminder {
+        id: id.into(),
+        list_id: DEMO_LIST.into(),
+        title: title.into(),
+        notes: None,
+        due: None,
+        due_components: None,
+        priority: None,
+        completed: true,
+        modified: None,
+        alarms_present: false,
+        absolute_alarms: Some(Vec::new()),
+        recurrence_present: false,
+        url: None,
+        backup_partial: false,
     }
 }
 

@@ -823,3 +823,89 @@ fn demo_backend_shows_the_calendar_column_on_request() {
     let hidden = run(&["cal", "--week"]);
     assert!(!hidden.contains("CALENDAR"), "{hidden}");
 }
+
+fn demo(args: &[&str]) -> std::process::Output {
+    command()
+        .args(args)
+        .env("NIB_DEMO", "1")
+        .output()
+        .expect("the nib test process should start")
+}
+
+#[test]
+fn demo_one_step_task_commands_change_reminders_in_memory() {
+    for (args, expected) in [
+        (&["task", "done", "rent"][..], "Completed \"Pay rent\"\n"),
+        (
+            &["task", "reopen", "dentist"],
+            "Reopened \"Call the dentist\"\n",
+        ),
+        (
+            &["task", "priority", "low", "groceries"],
+            "Set \"Buy groceries\" to low priority\n",
+        ),
+        (
+            &["task", "priority", "none", "rent"],
+            "Cleared priority on \"Pay rent\"\n",
+        ),
+        (
+            &["task", "move", "Work", "passport"],
+            "Moved \"Renew passport\" to Work\n",
+        ),
+    ] {
+        let out = demo(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(out.stdout).expect("stdout should be UTF-8"),
+            expected,
+            "{args:?}"
+        );
+        assert!(out.stderr.is_empty(), "{args:?}: {:?}", out.stderr);
+    }
+}
+
+#[test]
+fn demo_one_step_task_commands_print_json() {
+    let out = demo(&["task", "done", "--json", "reminder-1", "groceries"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let values: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("done output should be JSON");
+    let items = values.as_array().expect("done prints an array");
+    assert_eq!(items.len(), 2);
+    assert!(out.stdout.starts_with(b"[\n  {\n    \"id\":"));
+    let first = items[0].as_object().expect("each item is an object");
+    for key in ["title", "list", "completed", "priority", "change"] {
+        assert!(first.contains_key(key), "{key}");
+    }
+    assert_eq!(first["id"], "reminder-1");
+    assert_eq!(first["completed"], true);
+    assert_eq!(first["change"], "completed");
+}
+
+#[test]
+fn demo_one_step_task_commands_reject_bad_selectors() {
+    for (args, message) in [
+        (&["task", "done", "re"][..], "matches 3 open reminders"),
+        (&["task", "done", "nothing"], "no open reminder matches"),
+        (&["task", "reopen", "rent"], "no completed reminder matches"),
+        (&["task", "done", "reminder-6"], "is already completed"),
+        (
+            &["task", "move", "Nope", "rent"],
+            "reminder list \"Nope\" not found",
+        ),
+    ] {
+        let out = demo(args);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+        let stderr = String::from_utf8(out.stderr).expect("stderr should be UTF-8");
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
+    }
+}

@@ -6,11 +6,12 @@ use jiff::tz::TimeZone;
 use miette::Result;
 
 use crate::app::filter::{Filter, FilterKind, FilterRow};
-use crate::app::{edit, journal, undo};
+use crate::app::{edit, journal, quick, undo};
 use crate::cli::Action;
 use crate::cli::output::{self, Style};
 use crate::domain::{
     Backends, EventQuery, Reminder, ReminderDueComponents, ReminderSnapshot, StoredReminder,
+    TaskChangeRequest,
 };
 use crate::infra::host::Host;
 
@@ -74,6 +75,7 @@ pub fn run(
             style,
         ),
         Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
+        Action::ChangeTasks(request) => change_tasks(&request, json, now, backends, style, host),
         Action::ListEvents {
             query,
             show_calendar,
@@ -121,6 +123,17 @@ pub fn run(
             } => output::undo(&id, &undo_id, counts, json, style),
         },
     }
+}
+
+fn change_tasks(
+    request: &TaskChangeRequest,
+    json: bool,
+    now: &Zoned,
+    backends: &Backends,
+    style: Style,
+    host: &mut dyn Host,
+) -> Result<String> {
+    output::changed_reminders(&quick::run(request, now, backends, host)?, json, style)
 }
 
 fn filtered_tasks(
@@ -2309,5 +2322,126 @@ mod tests {
           ]
         }
         "###);
+    }
+}
+
+#[cfg(test)]
+mod quick_tests {
+    use clap::Parser;
+    use insta::assert_snapshot;
+    use jiff::civil::date;
+    use jiff::tz::{TimeZone, offset};
+
+    use super::*;
+    use crate::infra::host::Scripted;
+    use crate::{Cli, Config};
+
+    fn nib(args: &[&str]) -> String {
+        let now = date(2026, 10, 26)
+            .at(9, 30, 0, 0)
+            .to_zoned(TimeZone::fixed(offset(-4)))
+            .unwrap();
+        let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+        let json = cli.json;
+        let action = cli
+            .command
+            .into_action(&now, &Config::default())
+            .unwrap()
+            .unwrap();
+        run(
+            action,
+            json,
+            &now,
+            &crate::infra::demo::backends(&now),
+            Style::default(),
+            &mut Scripted::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn done_prints_each_completed_reminder() {
+        assert_snapshot!(nib(&["task", "done", "rent", "reminder-4"]), @r#"
+        Completed "Pay rent"
+        Completed "Buy groceries"
+        "#);
+        assert_snapshot!(nib(&["task", "done", "rent", "--json"]), @r#"
+        [
+          {
+            "id": "reminder-2",
+            "title": "Pay rent",
+            "list": "Reminders",
+            "completed": true,
+            "priority": "medium",
+            "change": "completed"
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn reopen_prints_each_reopened_reminder() {
+        assert_snapshot!(nib(&["task", "reopen", "dentist"]), @r#"Reopened "Call the dentist""#);
+        assert_snapshot!(nib(&["task", "reopen", "reminder-6", "--json"]), @r#"
+        [
+          {
+            "id": "reminder-6",
+            "title": "Call the dentist",
+            "list": "Reminders",
+            "completed": false,
+            "priority": null,
+            "change": "reopened"
+          }
+        ]
+        "#);
+    }
+
+    #[test]
+    fn demo_completed_reminders_are_listed_by_is_done() {
+        assert_snapshot!(nib(&["task", "list", "-f", "is:done"]), @r"
+        TITLE                DUE  PRIORITY
+        Call the dentist
+        File expense report
+        ");
+    }
+
+    #[test]
+    fn priority_prints_the_new_priority_or_that_it_was_cleared() {
+        assert_snapshot!(nib(&["task", "priority", "high", "groceries"]), @r#"Set "Buy groceries" to high priority"#);
+        assert_snapshot!(nib(&["task", "priority", "none", "rent"]), @r#"Cleared priority on "Pay rent""#);
+        assert_snapshot!(nib(&["task", "priority", "high", "review"]), @"No changes.");
+        assert_snapshot!(nib(&["task", "priority", "low", "groceries", "--json"]), @r#"
+        [
+          {
+            "id": "reminder-4",
+            "title": "Buy groceries",
+            "list": "Reminders",
+            "completed": false,
+            "priority": "low",
+            "change": "priority"
+          }
+        ]
+        "#);
+        assert_snapshot!(nib(&["task", "priority", "high", "review", "--json"]), @"[]");
+    }
+
+    #[test]
+    fn move_prints_the_destination_list() {
+        assert_snapshot!(nib(&["task", "move", "Work", "rent", "passport"]), @r#"
+        Moved "Pay rent" to Work
+        Moved "Renew passport" to Work
+        "#);
+        assert_snapshot!(nib(&["task", "move", "Work", "rent", "--json"]), @r#"
+        [
+          {
+            "id": "reminder-2",
+            "title": "Pay rent",
+            "list": "Work",
+            "completed": false,
+            "priority": "medium",
+            "change": "moved"
+          }
+        ]
+        "#);
     }
 }

@@ -441,6 +441,10 @@ impl JournalStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalAction {
     TaskEdit,
+    TaskDone,
+    TaskReopen,
+    TaskPriority,
+    TaskMove,
     Undo,
 }
 
@@ -448,7 +452,37 @@ impl JournalAction {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TaskEdit => "task_edit",
+            Self::TaskDone => "task_done",
+            Self::TaskReopen => "task_reopen",
+            Self::TaskPriority => "task_priority",
+            Self::TaskMove => "task_move",
             Self::Undo => "undo",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskChangeRequest {
+    pub change: TaskChange,
+    pub selectors: Vec<String>,
+    pub list: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskChange {
+    Complete,
+    Reopen,
+    Priority(Option<Priority>),
+    Move(String),
+}
+
+impl TaskChange {
+    pub fn journal_action(&self) -> JournalAction {
+        match self {
+            Self::Complete => JournalAction::TaskDone,
+            Self::Reopen => JournalAction::TaskReopen,
+            Self::Priority(_) => JournalAction::TaskPriority,
+            Self::Move(_) => JournalAction::TaskMove,
         }
     }
 }
@@ -665,6 +699,9 @@ pub trait Reminders {
         })
     }
     fn apply(&self, changes: &[ReminderChange]) -> Result<ApplyResult, BackendError>;
+    fn reminder(&self, _id: &str) -> Result<Option<StoredReminder>, BackendError> {
+        Ok(None)
+    }
     fn validate_time_zone(&self, _name: &str) -> Result<(), BackendError> {
         Ok(())
     }

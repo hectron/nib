@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use jiff::Zoned;
@@ -73,9 +74,7 @@ pub fn tasks(
             ));
         }
         let _lock = host.lock_journal().into_diagnostic()?;
-        if let Some(contents) = backup_changes(&plan.changes)? {
-            let name = format!("{}-tasks.json", now.strftime("%Y%m%dT%H%M%S"));
-            let saved = host.save_backup(&name, &contents).into_diagnostic()?;
+        if let Some(saved) = back_up(now, &plan.changes, host)? {
             host.say(&format!(
                 "Backed up the reminders being changed to {}",
                 saved.display()
@@ -159,6 +158,20 @@ fn backup_warning(plan: &Plan) -> String {
             count(partial, "reminder")
         )
     }
+}
+
+pub(crate) fn back_up(
+    now: &Zoned,
+    changes: &[ReminderChange],
+    host: &mut dyn Host,
+) -> Result<Option<PathBuf>> {
+    let Some(contents) = backup_changes(changes)? else {
+        return Ok(None);
+    };
+    let name = format!("{}-tasks.json", now.strftime("%Y%m%dT%H%M%S"));
+    host.save_backup(&name, &contents)
+        .map(Some)
+        .into_diagnostic()
 }
 
 pub(crate) fn backup_changes(changes: &[ReminderChange]) -> Result<Option<String>> {

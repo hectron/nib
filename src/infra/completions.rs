@@ -268,7 +268,7 @@ fn clean(mut names: Vec<String>) -> Vec<String> {
 fn demo_values(kind: CompletionKind) -> Vec<String> {
     match kind {
         CompletionKind::ReminderLists | CompletionKind::WritableReminderLists => {
-            vec!["Reminders".into()]
+            vec!["Reminders".into(), "Work".into()]
         }
         CompletionKind::Calendars | CompletionKind::NoteFolders => {
             vec!["Personal".into(), "Work".into()]
