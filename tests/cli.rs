@@ -593,6 +593,54 @@ fn config_set_and_unset_work_without_home() {
 }
 
 #[test]
+fn config_set_and_unset_treat_empty_home_as_unset() {
+    let root = config_root();
+    let config_path = root.join("xdg/nib/config.toml");
+    let empty_home = || {
+        let mut command = config_command(&root);
+        command.env("HOME", "");
+        command
+    };
+
+    let set = empty_home()
+        .args(["config", "set", "task.list", "Work"])
+        .output()
+        .expect("config set should start");
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config file should exist"),
+        "[task]\nlist = \"Work\"\n"
+    );
+
+    let unset = empty_home()
+        .args(["config", "unset", "task.list"])
+        .output()
+        .expect("config unset should start");
+    assert!(
+        unset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unset.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config file should exist"),
+        ""
+    );
+
+    let files = files_under(&root);
+    assert_eq!(files.len(), 2, "{files:?}");
+    assert!(
+        files[0].starts_with("xdg/nib/config-") && files[0].strip_suffix(".lock").is_some(),
+        "{files:?}"
+    );
+    assert_eq!(files[1], "xdg/nib/config.toml");
+    std::fs::remove_dir_all(&root).expect("config test directory should be removed");
+}
+
+#[test]
 fn config_project_target_and_path_json() {
     let root = config_root();
     let set = config_command(&root)

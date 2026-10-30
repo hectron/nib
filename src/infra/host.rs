@@ -297,10 +297,6 @@ pub(crate) enum ConfigLockError {
     Lock { path: PathBuf, source: io::Error },
 }
 
-pub(crate) fn config_lock_dir() -> Option<PathBuf> {
-    backups_dir().ok()
-}
-
 pub(crate) fn legacy_config_lock_path(path: &Path) -> io::Result<PathBuf> {
     let target = resolved_target(path)?;
     let file_name = target

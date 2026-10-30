@@ -133,7 +133,7 @@ pub enum ConfigCommandError {
         source: std::io::Error,
     },
 
-    #[error("couldn't lock configuration with {}: {source}", path.display())]
+    #[error("couldn't lock configuration with {}", path.display())]
     #[diagnostic(code(nib::config::lock))]
     Lock {
         path: PathBuf,
@@ -994,7 +994,7 @@ mod tests {
         None
     }
 
-    fn render(error: &ConfigError) -> String {
+    fn render(error: &dyn miette::Diagnostic) -> String {
         let mut rendered = String::new();
         GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor())
             .render_report(&mut rendered, error)
@@ -1619,17 +1619,38 @@ mod tests {
             matches!(&error, ConfigCommandError::Lock { path, .. } if *path == temp.locks()),
             "{error:?}"
         );
-        assert!(
-            error.to_string().starts_with(&format!(
-                "couldn't lock configuration with {}: ",
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "couldn't lock configuration with {}",
                 temp.locks().display()
-            )),
-            "{error}"
+            )
         );
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "[task]\nlist = \"Inbox\"\n"
         );
+    }
+
+    #[test]
+    fn config_lock_failures_render_as_a_diagnostic() {
+        let temp = TempDir::new();
+        let path = temp.join("config.toml");
+        write(&temp.locks(), "");
+
+        let error = set(&path, ConfigKey::TaskList, "Work", Some(&temp.locks())).unwrap_err();
+        let mut rendered = String::new();
+        GraphicalReportHandler::new_themed(GraphicalTheme::unicode_nocolor())
+            .with_width(usize::MAX)
+            .render_report(&mut rendered, &error)
+            .unwrap();
+
+        insta::assert_snapshot!(rendered.replace(&temp.0.display().to_string(), "$ROOT"), @r"
+        nib::config::lock
+
+          × couldn't lock configuration with $ROOT/locks
+          ╰─▶ File exists (os error 17)
+        ");
     }
 
     #[test]

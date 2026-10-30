@@ -78,6 +78,7 @@ pub fn run_config(
     inspection: ConfigInspection,
     current_dir: &Path,
     user_config: Option<&Path>,
+    config_lock_directory: Option<&Path>,
     style: Style,
 ) -> miette::Result<ConfigOutput> {
     let Some((json, action)) = cli.into_config() else {
@@ -116,16 +117,14 @@ pub fn run_config(
             warning = inspection
                 .origin(key)
                 .and_then(|origin| override_warning(key, origin, target, &path, current_dir));
-            let lock_dir = infra::host::config_lock_dir();
-            let edit = infra::config::set(&path, key, &value, lock_dir.as_deref())?;
+            let edit = infra::config::set(&path, key, &value, config_lock_directory)?;
             append_warning(&mut warning, edit.warning);
             cli::output::config_set(key.as_str(), &edit.value, &path, json, style)?
         }
         cli::ConfigAction::Unset { key, target } => {
             let key = infra::config::key(&key)?;
             let path = config_target(current_dir, user_config, target)?;
-            let lock_dir = infra::host::config_lock_dir();
-            let edit = infra::config::unset(&path, key, lock_dir.as_deref())?;
+            let edit = infra::config::unset(&path, key, config_lock_directory)?;
             append_warning(&mut warning, edit.warning);
             cli::output::config_unset(key.as_str(), &path, edit.value, json, style)?
         }
