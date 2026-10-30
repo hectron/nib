@@ -2137,8 +2137,7 @@ mod tests {
                 error: None,
             }],
             None,
-            Some(&crate::tui::keymap::Keymap::default()),
-            None,
+            Some(&crate::domain::keymap::Keymap::default()),
             &[],
         );
         assert!(crate::app::doctor::failed(&checks));
@@ -2159,13 +2158,41 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_each_keymap_error_once() {
+        let error = "invalid keymap in /Users/me/project/nib.toml for tui.keys.browse.\"x\": unknown keymap action \"dne\"; did you mean \"done\"? at line 2, column 5";
+        let checks = crate::app::doctor::checks(
+            &FakeDoctor,
+            &[crate::app::doctor::ConfigFileCheck {
+                path: "/Users/me/project/nib.toml".into(),
+                error: Some(error.into()),
+            }],
+            Some(error),
+            None,
+            &[],
+        );
+        let failures = checks
+            .iter()
+            .filter(|check| check.message.contains("dne"))
+            .count();
+        assert_eq!(failures, 1);
+        let preset_error = "invalid value for NIB_TUI_PRESET: \"vim\"; expected default";
+        let checks = crate::app::doctor::checks(&FakeDoctor, &[], Some(preset_error), None, &[]);
+        let failures = checks
+            .iter()
+            .filter(|check| check.message.contains("NIB_TUI_PRESET"))
+            .count();
+        assert_eq!(failures, 1);
+        let keymap = checks.iter().find(|check| check.id == "keymap").unwrap();
+        assert_eq!(keymap.status, crate::app::doctor::CheckStatus::Warning);
+    }
+
+    #[test]
     fn doctor_warns_about_lock_files_from_older_versions() {
         let checks = crate::app::doctor::checks(
             &FakeDoctor,
             &[],
             None,
-            Some(&crate::tui::keymap::Keymap::default()),
-            None,
+            Some(&crate::domain::keymap::Keymap::default()),
             &[crate::app::doctor::ConfigLockFile {
                 path: "/Users/me/project/nib.toml.lock".into(),
             }],
@@ -2190,8 +2217,7 @@ mod tests {
             &FakeDoctor,
             &[],
             None,
-            Some(&crate::tui::keymap::Keymap::default()),
-            None,
+            Some(&crate::domain::keymap::Keymap::default()),
             &[
                 crate::app::doctor::ConfigLockFile {
                     path: "/Users/me/project/nib.toml.lock".into(),
@@ -2299,8 +2325,7 @@ mod tests {
                 error: None,
             }],
             None,
-            Some(&crate::tui::keymap::Keymap::default()),
-            None,
+            Some(&crate::domain::keymap::Keymap::default()),
             &[],
         );
         assert_snapshot!(output::doctor(&checks, true, Style::default()).unwrap(), @r###"

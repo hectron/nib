@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
+use crate::domain::keymap::{Action, Keymap, State};
 use crate::domain::{AutomationStatus, DoctorProbe, EditorSetting, PermissionStatus};
-use crate::tui::keymap::{Action, Keymap, State};
 
 const MINIMUM_MACOS_MAJOR: u64 = 26;
 
@@ -46,7 +46,6 @@ pub fn checks(
     config_files: &[ConfigFileCheck],
     config_error: Option<&str>,
     keymap: Option<&Keymap>,
-    keymap_error: Option<&str>,
     config_locks: &[ConfigLockFile],
 ) -> Vec<Check> {
     let terminal = probe.terminal();
@@ -65,21 +64,13 @@ pub fn checks(
     ));
     checks.push(notes(probe.notes_automation(), &terminal.0));
     checks.extend(configuration(config_files, config_error));
-    checks.push(keymap_check(keymap, keymap_error));
+    checks.push(keymap_check(keymap));
     checks.push(config_lock(config_locks));
     checks.push(editor(probe.editor()));
     checks
 }
 
-fn keymap_check(keymap: Option<&Keymap>, error: Option<&str>) -> Check {
-    if let Some(error) = error {
-        return Check {
-            id: "keymap".into(),
-            status: CheckStatus::Fail,
-            message: error.into(),
-            fix: Some("Fix the keymap setting and run `nib doctor` again.".into()),
-        };
-    }
+fn keymap_check(keymap: Option<&Keymap>) -> Check {
     let Some(keymap) = keymap else {
         return Check {
             id: "keymap".into(),
@@ -106,6 +97,11 @@ fn keymap_check(keymap: Option<&Keymap>, error: Option<&str>) -> Check {
         }
     } else {
         let states = missing.join(", ");
+        let tables = missing
+            .iter()
+            .map(|state| format!("[tui.keys.{state}]"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let (state, verb) = if missing.len() == 1 {
             ("state", "has")
         } else {
@@ -116,7 +112,7 @@ fn keymap_check(keymap: Option<&Keymap>, error: Option<&str>) -> Check {
             status: CheckStatus::Warning,
             message: format!("{states} {state} {verb} no quit or cancel binding"),
             fix: Some(format!(
-                "Bind `quit` or `cancel` in the {states} {state}, or restore the default preset."
+                "Bind `quit` or `cancel` in {tables}, or remove the entries there that unbind the preset's exit keys."
             )),
         }
     }
@@ -389,27 +385,27 @@ mod tests {
             keymap.bind(State::Capture, chord, vec![Action::None]);
         }
 
-        assert_debug_snapshot!(keymap_check(Some(&keymap), None), @r###"
+        assert_debug_snapshot!(keymap_check(Some(&keymap)), @r###"
         Check {
             id: "keymap",
             status: Warning,
             message: "capture state has no quit or cancel binding",
             fix: Some(
-                "Bind `quit` or `cancel` in the capture state, or restore the default preset.",
+                "Bind `quit` or `cancel` in [tui.keys.capture], or remove the entries there that unbind the preset's exit keys.",
             ),
         }
         "###);
     }
 
     #[test]
-    fn keymap_check_reports_configuration_errors() {
-        assert_debug_snapshot!(keymap_check(None, Some("invalid keymap in config.toml for tui.keys.browse.\"x\": unknown action")), @r###"
+    fn keymap_check_is_skipped_when_configuration_is_invalid() {
+        assert_debug_snapshot!(keymap_check(None), @r###"
         Check {
             id: "keymap",
-            status: Fail,
-            message: "invalid keymap in config.toml for tui.keys.browse.\"x\": unknown action",
+            status: Warning,
+            message: "keymap wasn't checked because configuration is invalid",
             fix: Some(
-                "Fix the keymap setting and run `nib doctor` again.",
+                "Fix the configuration and run `nib doctor` again.",
             ),
         }
         "###);

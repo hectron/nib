@@ -98,7 +98,7 @@ Keymap state tables merge chord by chord. Set a chord to `"none"` to remove a bi
 | `cal.calendars` | `NIB_CAL_CALENDARS` | Array in TOML; comma-separated names in the environment | `nib cal` |
 | `cal.show_calendar` | `NIB_CAL_SHOW_CALENDAR` | `true` or `false` | Calendar column in `nib cal` and `nib today` event tables |
 | `note.folder` | `NIB_NOTE_FOLDER` | Folder name | `nib n` and `nib note new` |
-| `tui.preset` | `NIB_TUI_PRESET` | `default` | Interactive key bindings |
+| `tui.preset` | `NIB_TUI_PRESET` | `default` | Not yet used by any command; checked by `nib doctor` |
 
 Calendar names from `NIB_CAL_CALENDARS` are trimmed, and empty names are ignored.
 
@@ -106,7 +106,7 @@ The event tables in `nib cal` and `nib today` show a `CALENDAR` column only when
 
 Inline task parsing is on by default. Set `task.parse_inline = false` or `NIB_TASK_PARSE_INLINE=false` to keep trailing tokens as part of reminder titles. Explicit `--due`, `--priority`, and `--list` flags still work. See [Quick-add reminders](quick-add.md) for the recognized tokens.
 
-Bindings live under `[tui.keys.browse]`, `[tui.keys.filter]`, and `[tui.keys.capture]`. They accept one action string or an array of actions. See [Keymaps](keymap.md) for chord syntax, actions, defaults, and unbinding.
+Bindings live under `[tui.keys.browse]`, `[tui.keys.filter]`, and `[tui.keys.capture]`. They accept one action string or an array of actions. No command reads them yet; `nib doctor` validates them. See [Keymaps](keymap.md) for chord syntax, actions, defaults, and unbinding.
 
 ## Override a default
 

@@ -1,3 +1,5 @@
+pub mod keymap;
+
 use std::cell::LazyCell;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -8,7 +10,7 @@ use jiff::{Timestamp, Zoned};
 use miette::Diagnostic;
 use thiserror::Error;
 
-use crate::tui::keymap::{DEFAULT_PRESET, Keymap};
+use keymap::{DEFAULT_PRESET, Keymap};
 
 fn ambiguity_details(matches: &[String]) -> String {
     if matches.is_empty() {

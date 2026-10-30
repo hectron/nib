@@ -4,6 +4,9 @@ use std::str::FromStr;
 
 pub const DEFAULT_PRESET: &str = "default";
 
+#[cfg(test)]
+pub(crate) const TEST_PRESET: &str = "test-alternate";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum State {
     Browse,
@@ -48,16 +51,13 @@ impl FromStr for State {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateParseError {
     value: String,
-    suggestion: &'static str,
+    suggestion: Option<&'static str>,
 }
 
 impl fmt::Display for StateParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "unknown keymap state {:?}; did you mean {:?}?",
-            self.value, self.suggestion
-        )
+        write!(formatter, "unknown keymap state {:?}; ", self.value)?;
+        write_suggestion(formatter, self.suggestion, &State::ALL.map(State::as_str))
     }
 }
 
@@ -229,16 +229,13 @@ impl FromStr for Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionParseError {
     value: String,
-    suggestion: &'static str,
+    suggestion: Option<&'static str>,
 }
 
 impl fmt::Display for ActionParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "unknown keymap action {:?}; did you mean {:?}?",
-            self.value, self.suggestion
-        )
+        write!(formatter, "unknown keymap action {:?}; ", self.value)?;
+        write_suggestion(formatter, self.suggestion, &Action::ALL.map(Action::as_str))
     }
 }
 
@@ -381,7 +378,11 @@ impl FromStr for KeyChord {
 }
 
 fn parse_function_key(value: &str) -> Option<Key> {
-    let number = value.strip_prefix('f')?.parse::<u8>().ok()?;
+    let digits = value.strip_prefix('f')?;
+    if digits.starts_with('0') || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let number = digits.parse::<u8>().ok()?;
     (1..=24).contains(&number).then_some(Key::Function(number))
 }
 
@@ -444,20 +445,27 @@ pub struct Keymap {
 
 impl Keymap {
     pub fn from_preset(name: &str) -> Result<Self, PresetError> {
-        if name != DEFAULT_PRESET {
-            return Err(PresetError {
-                value: name.to_owned(),
-            });
-        }
         let mut keymap = Self {
             states: State::ALL
                 .into_iter()
                 .map(|state| (state, BTreeMap::new()))
                 .collect(),
         };
-        add_browse_defaults(&mut keymap);
-        add_filter_defaults(&mut keymap);
-        add_capture_defaults(&mut keymap);
+        match name {
+            DEFAULT_PRESET => add_default_preset(&mut keymap),
+            #[cfg(test)]
+            TEST_PRESET => {
+                add_default_preset(&mut keymap);
+                bind_default(&mut keymap, State::Browse, "x", &[Action::None]);
+                bind_default(&mut keymap, State::Browse, "z", &[Action::Done]);
+            }
+            _ => {
+                return Err(PresetError {
+                    value: name.to_owned(),
+                    suggestion: closest(name, [DEFAULT_PRESET]),
+                });
+            }
+        }
         Ok(keymap)
     }
 
@@ -503,50 +511,22 @@ impl Default for Keymap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresetError {
     value: String,
+    suggestion: Option<&'static str>,
 }
 
 impl fmt::Display for PresetError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "unknown keymap preset {:?}; did you mean {:?}?",
-            self.value, DEFAULT_PRESET
-        )
+        write!(formatter, "unknown keymap preset {:?}; ", self.value)?;
+        write_suggestion(formatter, self.suggestion, &[DEFAULT_PRESET])
     }
 }
 
 impl std::error::Error for PresetError {}
 
-pub fn render_help(keymap: &Keymap, state: State) -> String {
-    let mut lines = keymap
-        .bindings(state)
-        .map(|(chord, actions)| {
-            let chord = chord.to_string();
-            let names = actions
-                .iter()
-                .map(|action| action.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let descriptions = actions
-                .iter()
-                .map(|action| action.description())
-                .collect::<Vec<_>>()
-                .join("; ");
-            (chord, names, descriptions)
-        })
-        .collect::<Vec<_>>();
-    lines.sort_by(|left, right| left.0.cmp(&right.0));
-    let width = lines
-        .iter()
-        .map(|(chord, _, _)| chord.chars().count())
-        .max()
-        .unwrap_or(0)
-        + 1;
-    lines
-        .into_iter()
-        .map(|(chord, actions, description)| format!("{chord:width$} -> {actions}: {description}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+fn add_default_preset(keymap: &mut Keymap) {
+    add_browse_defaults(keymap);
+    add_filter_defaults(keymap);
+    add_capture_defaults(keymap);
 }
 
 fn add_browse_defaults(keymap: &mut Keymap) {
@@ -597,7 +577,13 @@ fn add_browse_defaults(keymap: &mut Keymap) {
     for chord in ["right", "]"] {
         bind_default(keymap, State::Browse, chord, &[Action::NextPane]);
     }
-    for chord in ["left", "[", "shift-tab"] {
+    bind_default(
+        keymap,
+        State::Browse,
+        "shift-tab",
+        &[Action::SelectToggle, Action::Up],
+    );
+    for chord in ["left", "["] {
         bind_default(keymap, State::Browse, chord, &[Action::PrevPane]);
     }
     bind_default(keymap, State::Browse, "p", &[Action::PreviewToggle]);
@@ -678,11 +664,31 @@ fn bind_default(keymap: &mut Keymap, state: State, chord: &str, actions: &[Actio
     );
 }
 
-fn closest<const N: usize>(value: &str, candidates: [&'static str; N]) -> &'static str {
+fn closest<const N: usize>(value: &str, candidates: [&'static str; N]) -> Option<&'static str> {
+    let limit = (value.chars().count() / 3).max(2);
     candidates
         .into_iter()
-        .min_by_key(|candidate| edit_distance(value, candidate))
-        .expect("every suggestion list contains at least one value")
+        .map(|candidate| (edit_distance(value, candidate), candidate))
+        .filter(|(distance, _)| *distance <= limit)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, candidate)| candidate)
+}
+
+fn write_suggestion(
+    formatter: &mut fmt::Formatter<'_>,
+    suggestion: Option<&str>,
+    candidates: &[&str],
+) -> fmt::Result {
+    if let Some(suggestion) = suggestion {
+        return write!(formatter, "did you mean {suggestion:?}?");
+    }
+    formatter.write_str("expected ")?;
+    match candidates {
+        [only] => formatter.write_str(only),
+        [first, second] => write!(formatter, "{first} or {second}"),
+        [rest @ .., last] => write!(formatter, "{}, or {last}", rest.join(", ")),
+        [] => Ok(()),
+    }
 }
 
 fn edit_distance(left: &str, right: &str) -> usize {
@@ -704,8 +710,6 @@ fn edit_distance(left: &str, right: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use insta::assert_snapshot;
-
     use super::*;
 
     #[test]
@@ -760,71 +764,53 @@ mod tests {
     }
 
     #[test]
-    fn help_is_generated_from_active_bindings() {
-        let mut keymap = Keymap::default();
-        keymap.bind(
-            State::Browse,
-            "alt-x".parse().unwrap(),
-            vec![Action::Done, Action::Down],
-        );
-        let help = render_help(&keymap, State::Browse);
-        assert!(help.contains("alt-x      -> done, down: complete selected reminders; move down"));
-        assert_snapshot!(help, @r###"
-        /          -> filter: enter filter mode
-        0          -> priority-none: clear priority
-        1          -> priority-high: set high priority
-        2          -> priority-medium: set medium priority
-        3          -> priority-low: set low priority
-        ?          -> help: show key help
-        [          -> prev-pane: focus the previous pane
-        ]          -> next-pane: focus the next pane
-        a          -> capture: enter capture mode
-        alt-a      -> select-all: select all visible items
-        alt-k      -> keep-filter: keep the current filter
-        alt-x      -> done, down: complete selected reminders; move down
-        ctrl-a     -> top: move to the first item
-        ctrl-c     -> quit: quit
-        ctrl-d     -> page-down: move one page down
-        ctrl-e     -> bottom: move to the last item
-        ctrl-l     -> clear-filter: clear the filter
-        ctrl-n     -> down: move down
-        ctrl-o     -> act-menu: open the action menu
-        ctrl-p     -> up: move up
-        ctrl-u     -> page-up: move one page up
-        delete     -> delete: delete selected reminders
-        down       -> down: move down
-        e          -> edit: edit selected reminders
-        end        -> bottom: move to the last item
-        enter      -> accept: accept
-        esc        -> quit: quit
-        f1         -> help: show key help
-        g          -> top: move to the first item
-        home       -> top: move to the first item
-        j          -> down: move down
-        k          -> up: move up
-        left       -> prev-pane: focus the previous pane
-        m          -> move: move selected reminders
-        n          -> add: add a reminder
-        p          -> preview-toggle: toggle the preview
-        page-down  -> page-down: move one page down
-        page-up    -> page-up: move one page up
-        q          -> quit: quit
-        r          -> reopen: reopen selected reminders
-        right      -> next-pane: focus the next pane
-        shift-g    -> bottom: move to the last item
-        shift-tab  -> prev-pane: focus the previous pane
-        space      -> select-toggle: toggle the current selection
-        tab        -> select-toggle: toggle the current selection
-        up         -> up: move up
-        x          -> done: complete selected reminders
-        "###);
-    }
-
-    #[test]
     fn unknown_preset_has_a_suggestion() {
         assert_eq!(
             Keymap::from_preset("defaults").unwrap_err().to_string(),
             "unknown keymap preset \"defaults\"; did you mean \"default\"?"
         );
+    }
+
+    #[test]
+    fn suggestions_are_offered_only_for_close_names() {
+        assert_eq!(
+            "zzzzzz".parse::<State>().unwrap_err().to_string(),
+            "unknown keymap state \"zzzzzz\"; expected browse, filter, or capture"
+        );
+        assert_eq!(
+            Keymap::from_preset("vim").unwrap_err().to_string(),
+            "unknown keymap preset \"vim\"; expected default"
+        );
+        let error = "frobnicate".parse::<Action>().unwrap_err().to_string();
+        assert!(
+            error.starts_with("unknown keymap action \"frobnicate\"; expected up, down, "),
+            "{error}"
+        );
+        assert!(error.ends_with(", preview-toggle, or none"), "{error}");
+    }
+
+    #[test]
+    fn function_keys_accept_only_canonical_numbers() {
+        for valid in ["f1", "F12", "f24"] {
+            assert!(valid.parse::<KeyChord>().is_ok(), "{valid}");
+        }
+        for invalid in ["f0", "f25", "f+1", "f01", "f001"] {
+            assert!(invalid.parse::<KeyChord>().is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn hyphen_and_shifted_letters_parse_as_distinct_chords() {
+        let parse = |chord: &str| chord.parse::<KeyChord>().unwrap();
+        assert_eq!(parse("-").to_string(), "-");
+        assert_eq!(parse("ctrl--").to_string(), "ctrl--");
+        assert_eq!(parse("alt-shift--").to_string(), "alt-shift--");
+        assert_eq!(parse("shift-G"), parse("G"));
+        assert_eq!(parse("ctrl-G"), parse("ctrl-g"));
+        assert_ne!(parse("ctrl-G"), parse("ctrl-shift-g"));
+        assert_eq!(parse("ctrl-shift-g").to_string(), "ctrl-shift-g");
+        assert!("ctrl-ctrl-x".parse::<KeyChord>().is_err());
+        assert!(" x".parse::<KeyChord>().is_err());
+        assert!("".parse::<KeyChord>().is_err());
     }
 }

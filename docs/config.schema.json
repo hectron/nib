@@ -118,7 +118,11 @@
         {
           "type": "array",
           "items": { "$ref": "#/$defs/action" },
-          "minItems": 1
+          "minItems": 1,
+          "anyOf": [
+            { "maxItems": 1 },
+            { "not": { "contains": { "const": "none" } } }
+          ]
         }
       ]
     },

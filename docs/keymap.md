@@ -1,10 +1,12 @@
 # Keymaps
 
-nib has three input states:
+Keymap settings are not yet used by any command. nib loads and validates them today, and `nib doctor` reports problems. Interactive use and generated key help arrive with the interactive board.
 
-- `browse` interprets keys as navigation and reminder actions.
-- `filter` accepts filter text while keeping navigation and selection keys available.
-- `capture` accepts a new reminder while keeping submission and priority keys available.
+Bindings are grouped by input state:
+
+- `browse` is for navigation and reminder actions.
+- `filter` is for typing filter text while navigation and selection keys stay available.
+- `capture` is for typing a new reminder while submission and priority keys stay available.
 
 The `default` preset is the base keymap. Override individual chords in any nib configuration file:
 
@@ -29,11 +31,11 @@ A string runs one action. An array runs actions from left to right. Set a chord 
 
 Key tables merge chord by chord through the normal configuration precedence. A nearer file replaces only the chords it defines. Keymap tables are edited by hand; `nib config set` and `nib config unset` handle scalar settings such as `tui.preset`.
 
-`nib doctor` validates the active keymap. It reports invalid presets, states, chords, actions, canonical duplicate chords, and states without a `quit` or `cancel` binding. The interactive help is generated from the active keymap, so overrides appear there automatically.
+`nib doctor` validates the active keymap. It reports invalid presets, states, chords, actions, canonical duplicate chords, and states without a `quit` or `cancel` binding.
 
 ## Key chords
 
-Printable characters use their literal form, such as `x`, `/`, or `?`. Named keys include `enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `insert`, `f1` through `f24`, and `space`.
+Printable characters use their literal form, such as `x`, `/`, or `?`. Named keys include `enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `home`, `end`, `page-up`, `page-down`, `backspace`, `delete`, `insert`, `f1` through `f24`, and `space`. Write function keys without leading zeros, such as `f1`, not `f01`.
 
 Prefix a key with `ctrl-`, `alt-`, or `shift-`. Modifiers and named keys are case-insensitive and are shown canonically in `ctrl-alt-shift` order. A bare uppercase ASCII letter is its shifted form, so `G` and `shift-g` are the same chord. Letter case after `ctrl-` or `alt-` is ignored, so `Ctrl-O` and `ctrl-o` are also the same chord and cannot both occur in one state table.
 
@@ -85,7 +87,8 @@ The defaults combine fzf and Telescope selection conventions, Emacs/readline con
 | `?`, `f1` | `help` |
 | `enter` | `accept` |
 | `right`, `]` | `next-pane` |
-| `left`, `[`, `shift-tab` | `prev-pane` |
+| `shift-tab` | `select-toggle`, then `up` |
+| `left`, `[` | `prev-pane` |
 | `p` | `preview-toggle` |
 
 ### Filter

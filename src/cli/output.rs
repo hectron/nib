@@ -8,6 +8,7 @@ use serde::{Serialize, Serializer};
 
 use crate::app::doctor::{Check, CheckStatus};
 use crate::app::quick::Changed;
+use crate::domain::keymap::{Keymap, State as KeymapState};
 use crate::domain::{
     CalendarInfo, ChangeCounts, ConfigEntry, ConfigOrigin, ConfigValue, Event, JournalStatus,
     JournalSummary, Note, NoteFolder, Priority, Reminder, ReminderListInfo, TaskChange,
@@ -1370,6 +1371,39 @@ fn rfc3339<S: Serializer>(time: &Zoned, serializer: S) -> Result<S::Ok, S::Error
     serializer.collect_str(&time.timestamp().display_with_offset(time.offset()))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn keymap_help(keymap: &Keymap, state: KeymapState) -> String {
+    let mut lines = keymap
+        .bindings(state)
+        .map(|(chord, actions)| {
+            let chord = chord.to_string();
+            let names = actions
+                .iter()
+                .map(|action| action.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let descriptions = actions
+                .iter()
+                .map(|action| action.description())
+                .collect::<Vec<_>>()
+                .join("; ");
+            (chord, names, descriptions)
+        })
+        .collect::<Vec<_>>();
+    lines.sort_by(|left, right| left.0.cmp(&right.0));
+    let width = lines
+        .iter()
+        .map(|(chord, _, _)| chord.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    lines
+        .into_iter()
+        .map(|(chord, actions, description)| format!("{chord:width$} -> {actions}: {description}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use insta::assert_snapshot;
@@ -1983,5 +2017,122 @@ mod tests {
             let colored = to_json(&value, style(true)).unwrap();
             prop_assert_eq!(strip_ansi(&colored), plain);
         }
+    }
+
+    #[test]
+    fn keymap_help_is_generated_from_active_bindings() {
+        let mut keymap = Keymap::default();
+        keymap.bind(
+            KeymapState::Browse,
+            "alt-x".parse().unwrap(),
+            vec![
+                crate::domain::keymap::Action::Done,
+                crate::domain::keymap::Action::Down,
+            ],
+        );
+        let help = keymap_help(&keymap, KeymapState::Browse);
+        assert!(help.contains("alt-x      -> done, down: complete selected reminders; move down"));
+        assert_snapshot!(help, @r###"
+        /          -> filter: enter filter mode
+        0          -> priority-none: clear priority
+        1          -> priority-high: set high priority
+        2          -> priority-medium: set medium priority
+        3          -> priority-low: set low priority
+        ?          -> help: show key help
+        [          -> prev-pane: focus the previous pane
+        ]          -> next-pane: focus the next pane
+        a          -> capture: enter capture mode
+        alt-a      -> select-all: select all visible items
+        alt-k      -> keep-filter: keep the current filter
+        alt-x      -> done, down: complete selected reminders; move down
+        ctrl-a     -> top: move to the first item
+        ctrl-c     -> quit: quit
+        ctrl-d     -> page-down: move one page down
+        ctrl-e     -> bottom: move to the last item
+        ctrl-l     -> clear-filter: clear the filter
+        ctrl-n     -> down: move down
+        ctrl-o     -> act-menu: open the action menu
+        ctrl-p     -> up: move up
+        ctrl-u     -> page-up: move one page up
+        delete     -> delete: delete selected reminders
+        down       -> down: move down
+        e          -> edit: edit selected reminders
+        end        -> bottom: move to the last item
+        enter      -> accept: accept
+        esc        -> quit: quit
+        f1         -> help: show key help
+        g          -> top: move to the first item
+        home       -> top: move to the first item
+        j          -> down: move down
+        k          -> up: move up
+        left       -> prev-pane: focus the previous pane
+        m          -> move: move selected reminders
+        n          -> add: add a reminder
+        p          -> preview-toggle: toggle the preview
+        page-down  -> page-down: move one page down
+        page-up    -> page-up: move one page up
+        q          -> quit: quit
+        r          -> reopen: reopen selected reminders
+        right      -> next-pane: focus the next pane
+        shift-g    -> bottom: move to the last item
+        shift-tab  -> select-toggle, up: toggle the current selection; move up
+        space      -> select-toggle: toggle the current selection
+        tab        -> select-toggle: toggle the current selection
+        up         -> up: move up
+        x          -> done: complete selected reminders
+        "###);
+    }
+
+    #[test]
+    fn keymap_help_covers_the_default_filter_state() {
+        assert_snapshot!(keymap_help(&Keymap::default(), KeymapState::Filter), @r###"
+        alt-a       -> select-all: select all visible items
+        alt-enter   -> keep-filter: keep the current filter
+        ctrl-a      -> top: move to the first item
+        ctrl-c      -> cancel: cancel
+        ctrl-e      -> bottom: move to the last item
+        ctrl-n      -> down: move down
+        ctrl-o      -> act-menu: open the action menu
+        ctrl-p      -> up: move up
+        ctrl-q      -> quit: quit
+        ctrl-space  -> preview-toggle: toggle the preview
+        ctrl-u      -> clear-filter: clear the filter
+        down        -> down: move down
+        end         -> bottom: move to the last item
+        enter       -> accept: accept
+        esc         -> cancel: cancel
+        f1          -> help: show key help
+        home        -> top: move to the first item
+        insert      -> add: add a reminder
+        left        -> prev-pane: focus the previous pane
+        page-down   -> page-down: move one page down
+        page-up     -> page-up: move one page up
+        right       -> next-pane: focus the next pane
+        shift-tab   -> select-toggle, up: toggle the current selection; move up
+        tab         -> select-toggle: toggle the current selection
+        up          -> up: move up
+        "###);
+    }
+
+    #[test]
+    fn keymap_help_covers_the_default_capture_state() {
+        assert_snapshot!(keymap_help(&Keymap::default(), KeymapState::Capture), @r###"
+        alt-h      -> priority-high: set high priority
+        alt-l      -> priority-low: set low priority
+        alt-m      -> priority-medium: set medium priority
+        alt-n      -> priority-none: clear priority
+        ctrl-c     -> cancel: cancel
+        ctrl-n     -> down: move down
+        ctrl-o     -> act-menu: open the action menu
+        ctrl-p     -> up: move up
+        ctrl-q     -> quit: quit
+        down       -> down: move down
+        enter      -> accept: accept
+        esc        -> cancel: cancel
+        f1         -> help: show key help
+        shift-tab  -> prev-pane: focus the previous pane
+        tab        -> next-pane: focus the next pane
+        up         -> up: move up
+        "###);
     }
 }

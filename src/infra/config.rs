@@ -10,8 +10,8 @@ use serde::Deserialize;
 use thiserror::Error;
 use toml_edit::{Array, Decor, DocumentMut, Item, Table, Value};
 
+use crate::domain::keymap::{Action as KeymapAction, KeyChord, Keymap, State};
 use crate::domain::{Config, ConfigEntry, ConfigKey, ConfigOrigin, ConfigValue, Priority};
-use crate::tui::keymap::{Action as KeymapAction, KeyChord, Keymap, State};
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -227,19 +227,6 @@ impl ConfigInspection {
             .map(|(config, _)| &config.tui.keymap)
     }
 
-    pub(crate) fn keymap_error(&self) -> Option<String> {
-        match self.result.as_ref().err() {
-            Some(
-                error @ (ConfigError::Keymap { .. }
-                | ConfigError::Environment {
-                    name: "NIB_TUI_PRESET",
-                    ..
-                }),
-            ) => Some(error.plain_text()),
-            _ => None,
-        }
-    }
-
     pub(crate) fn files(&self) -> &[ConfigFileInspection] {
         &self.files
     }
@@ -266,6 +253,7 @@ struct Origins {
     cal_show_calendar: ConfigOrigin,
     note_folder: ConfigOrigin,
     tui_preset: ConfigOrigin,
+    keymap_layers: Vec<CompiledBindings>,
 }
 
 impl Default for Origins {
@@ -278,6 +266,7 @@ impl Default for Origins {
             cal_show_calendar: ConfigOrigin::Default,
             note_folder: ConfigOrigin::Default,
             tui_preset: ConfigOrigin::Default,
+            keymap_layers: Vec::new(),
         }
     }
 }
@@ -411,6 +400,7 @@ fn load_inspected(
     }
 
     apply_environment(&mut config, &mut origins, env)?;
+    config.tui.keymap = build_keymap(&config.tui.preset, &origins.keymap_layers);
     Ok((config, origins))
 }
 
@@ -548,13 +538,20 @@ fn apply(
             config.tui.preset = preset;
             origins.tui_preset = origin;
         }
-        for (state, bindings) in tui.bindings {
-            for (chord, actions) in bindings {
-                config.tui.keymap.bind(state, chord, actions);
-            }
-        }
+        origins.keymap_layers.push(tui.bindings);
     }
     Ok(())
+}
+
+fn build_keymap(preset: &str, layers: &[CompiledBindings]) -> Keymap {
+    let mut keymap =
+        Keymap::from_preset(preset).expect("presets are validated before they are stored");
+    for (state, bindings) in layers.iter().flatten() {
+        for (chord, actions) in bindings {
+            keymap.bind(*state, chord.clone(), actions.clone());
+        }
+    }
+    keymap
 }
 
 struct CompiledTui {
@@ -709,7 +706,7 @@ fn parse_actions(
         actions.push(raw_action.parse::<KeymapAction>().map_err(|error| {
             KeymapIssue {
                 key: key.into(),
-                reason: format!("{error} for key chord {raw_chord:?}"),
+                reason: error.to_string(),
                 needle: raw_action,
                 span: KeymapSpan::Value {
                     state: state.into(),
@@ -1280,6 +1277,7 @@ mod tests {
 
     use super::*;
     use crate::cli::{Action, Cli};
+    use crate::domain::keymap::TEST_PRESET;
     use crate::domain::{EventQuery, NewReminder};
 
     struct TempDir(PathBuf);
@@ -1370,6 +1368,43 @@ mod tests {
     }
 
     #[test]
+    fn keymap_is_built_from_the_final_preset_before_layered_overrides() {
+        let temp = TempDir::new();
+        let project = temp.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let user = temp.join("user.toml");
+        write(&user, "[tui.keys.browse]\ny = \"edit\"\n");
+        write(
+            &project.join("nib.toml"),
+            &format!("[tui]\npreset = \"{TEST_PRESET}\"\n"),
+        );
+        let x = "x".parse::<KeyChord>().unwrap();
+        let y = "y".parse::<KeyChord>().unwrap();
+        let z = "z".parse::<KeyChord>().unwrap();
+        let assert_alternate = |config: &Config| {
+            assert_eq!(config.tui.preset, TEST_PRESET);
+            assert_eq!(config.tui.keymap.actions(State::Browse, &x), None);
+            assert_eq!(
+                config.tui.keymap.actions(State::Browse, &z),
+                Some(&[KeymapAction::Done][..])
+            );
+            assert_eq!(
+                config.tui.keymap.actions(State::Browse, &y),
+                Some(&[KeymapAction::Edit][..])
+            );
+        };
+
+        assert_alternate(&load(&project, Some(&user), no_env).unwrap());
+
+        fs::remove_file(project.join("nib.toml")).unwrap();
+        let from_environment = load(&project, Some(&user), |name| {
+            (name == "NIB_TUI_PRESET").then(|| OsString::from(TEST_PRESET))
+        })
+        .unwrap();
+        assert_alternate(&from_environment);
+    }
+
+    #[test]
     fn keymap_errors_name_the_file_and_key_with_suggestions() {
         let cases = [
             (
@@ -1425,6 +1460,12 @@ mod tests {
         write(&temp.join("nib.toml"), "[tui.keys.browse]\nx = \"dne\"\n");
 
         let error = load(&temp.0, None, no_env).unwrap_err();
+        assert!(
+            error.to_string().ends_with(
+                "for tui.keys.browse.\"x\": unknown keymap action \"dne\"; did you mean \"done\"?"
+            ),
+            "{error}"
+        );
         let ConfigError::Keymap { line, column, .. } = &error else {
             panic!("{error:?}");
         };

@@ -40,6 +40,7 @@ nib t "Buy groceries"
 - `src/lib.rs` — curated library facade. It exposes the CLI entry points while keeping layer internals private.
 - `src/main.rs` — thin binary shell: parses arguments; reads the environment, current directory, clock, and local time zone once; calls the library; and prints its result.
 - `src/domain/` — pure app types, configuration values, backend traits, and errors. Due dates are `jiff::civil::Date`; event starts are `Zoned`.
+- `src/domain/keymap.rs` — keymap states, actions, key chord parsing and canonical form, and the built-in presets. Configuration loading layers overrides onto a preset; `src/cli/output.rs` renders key help from it.
 - `src/app/commands.rs` — dispatches on `Action` and returns the text to print, so tests run commands against fake backends.
 - `src/app/markdown.rs` — renders reminder snapshots as Markdown, parses edited files, and plans validated reminder changes without touching Apple data.
 - `src/app/edit.rs` — runs the `task edit` flow: snapshot, secure temporary file, editor, validation, preview, confirmation, backup, and apply.

@@ -40,6 +40,7 @@ fn command() -> assert_cmd::Command {
         .env_remove("NIB_CAL_CALENDARS")
         .env_remove("NIB_CAL_SHOW_CALENDAR")
         .env_remove("NIB_NOTE_FOLDER")
+        .env_remove("NIB_TUI_PRESET")
         .env_remove("NIB_DEMO");
     command
 }
@@ -681,6 +682,7 @@ fn config_new_files_honor_the_umask() {
         .env_remove("NIB_CAL_CALENDARS")
         .env_remove("NIB_CAL_SHOW_CALENDAR")
         .env_remove("NIB_NOTE_FOLDER")
+        .env_remove("NIB_TUI_PRESET")
         .output()
         .expect("config set should start under a restrictive umask");
     assert!(
