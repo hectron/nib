@@ -67,6 +67,7 @@ priority = "medium"
 
 [cal]
 calendars = ["Work", "Personal"]
+show_calendar = true
 
 [note]
 folder = "Notes"

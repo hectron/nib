@@ -1269,15 +1269,26 @@ mod tests {
 
     #[test]
     fn cal_shows_the_calendar_column_on_request() {
-        assert_snapshot!(nib(&["c", "list", "--week", "--show-calendar"]), @r"
-        START               TITLE          CALENDAR
-        2026-10-26 10:00    Team sync      Work
-        2026-10-28 all day  Offsite        Work
-        2026-10-29 14:30    Design review  Work
+        let mut dentist = event("event-dentist", "Dentist", date(2026, 10, 27), 8);
+        dentist.calendar = "Personal".into();
+        let events = vec![
+            event("event-2", "Team sync", date(2026, 10, 26), 10),
+            dentist,
+            event("event-3", "Design review", date(2026, 10, 29), 14),
+        ];
+        assert_snapshot!(agenda(&["c", "list", "--week", "--show-calendar"], Vec::new(), events.clone()), @r"
+        START             TITLE          CALENDAR
+        2026-10-26 10:00  Team sync      Work
+        2026-10-27 08:00  Dentist        Personal
+        2026-10-29 14:00  Design review  Work
         ");
         assert_eq!(
-            nib(&["--json", "cal", "--week", "--show-calendar"]),
-            nib(&["--json", "cal", "--week"])
+            agenda(
+                &["--json", "cal", "--week", "--show-calendar"],
+                Vec::new(),
+                events.clone()
+            ),
+            agenda(&["--json", "cal", "--week"], Vec::new(), events)
         );
     }
 
@@ -1604,6 +1615,11 @@ mod tests {
                 origin: ConfigOrigin::Default,
             },
             ConfigEntry {
+                key: ConfigKey::CalShowCalendar,
+                value: ConfigValue::Bool(true),
+                origin: ConfigOrigin::File("/Users/me/project/nib.toml".into()),
+            },
+            ConfigEntry {
                 key: ConfigKey::NoteFolder,
                 value: ConfigValue::String("Notes".into()),
                 origin: ConfigOrigin::File("/Users/me/.config/nib/config.toml".into()),
@@ -1620,6 +1636,7 @@ mod tests {
         task.priority      <unset>
         task.parse_inline  true
         cal.calendars      ["Work", "Personal"]
+        cal.show_calendar  true
         note.folder        Notes
         "#);
         assert_snapshot!(output::config_list(&entries, true, false, Style::default()).unwrap(), @r#"
@@ -1628,6 +1645,7 @@ mod tests {
         task.priority      <unset>               default
         task.parse_inline  true                  NIB_TASK_PARSE_INLINE
         cal.calendars      ["Work", "Personal"]  default
+        cal.show_calendar  true                  /Users/me/project/nib.toml
         note.folder        Notes                 /Users/me/.config/nib/config.toml
         "#);
     }
@@ -1671,6 +1689,14 @@ mod tests {
             }
           },
           {
+            "id": "cal.show_calendar",
+            "value": true,
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/project/nib.toml"
+            }
+          },
+          {
             "id": "note.folder",
             "value": "Notes",
             "origin": {
@@ -1680,6 +1706,11 @@ mod tests {
           }
         ]
         "#);
+    }
+
+    #[test]
+    fn config_list_json_ignores_the_origin_flag() {
+        let entries = config_entries();
         assert_snapshot!(output::config_list(&entries, false, true, Style::default()).unwrap(), @r#"
         [
           {
@@ -1713,6 +1744,14 @@ mod tests {
             ],
             "origin": {
               "kind": "default"
+            }
+          },
+          {
+            "id": "cal.show_calendar",
+            "value": true,
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/project/nib.toml"
             }
           },
           {

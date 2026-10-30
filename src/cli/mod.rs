@@ -1124,6 +1124,22 @@ mod tests {
     }
 
     #[test]
+    fn configured_show_calendar_does_not_reject_calendar_resources() {
+        let now = at(date(2026, 10, 26), 9, 30);
+        let config = Config {
+            cal: crate::domain::CalendarConfig {
+                calendars: Vec::new(),
+                show_calendar: true,
+            },
+            ..Config::default()
+        };
+        assert!(matches!(
+            action_with_config(&now, &["cal", "calendars"], &config),
+            Ok(Action::ListCalendars)
+        ));
+    }
+
+    #[test]
     fn cal_ranges_follow_local_calendar_days() {
         let new_york = TimeZone::posix("EST5EDT,M3.2.0,M11.1.0").unwrap();
         let cases = [

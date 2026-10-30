@@ -32,6 +32,7 @@ list = "Work"
 
 [cal]
 calendars = ["Work"]
+show_calendar = true
 ```
 
 These defaults apply in that directory and every directory below it.
