@@ -493,11 +493,12 @@ impl Calendar for Demo {
                 query.range.contains(start)
                     && (query.calendars.is_empty() || query.calendars.iter().any(|c| c == calendar))
             })
-            .map(|(id, title, start, all_day, _)| Event {
+            .map(|(id, title, start, all_day, calendar)| Event {
                 id: id.into(),
                 title: title.into(),
                 start,
                 all_day,
+                calendar: calendar.into(),
             })
             .collect())
     }

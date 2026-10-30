@@ -191,10 +191,26 @@ fn single_with_now<T: Summary>(
     }
 }
 
+pub fn events(
+    events: &[Event],
+    show_calendar: bool,
+    json: bool,
+    now: &Zoned,
+    style: Style,
+) -> Result<String> {
+    if show_calendar && !json {
+        let rows = events.iter().map(EventWithCalendar).collect::<Vec<_>>();
+        list(&rows, json, now, style)
+    } else {
+        list(events, json, now, style)
+    }
+}
+
 pub fn today(
     overdue: &[Reminder],
     due_today: &[Reminder],
     events: &[Event],
+    show_calendar: bool,
     now: &Zoned,
     json: bool,
     style: Style,
@@ -216,7 +232,11 @@ pub fn today(
             "Due today",
             list(due_today, false, now, style)?,
         ),
-        (Tone::Accent, "Events", list(events, false, now, style)?),
+        (
+            Tone::Accent,
+            "Events",
+            self::events(events, show_calendar, false, now, style)?,
+        ),
     ];
     let rendered = sections
         .into_iter()
@@ -912,6 +932,29 @@ impl Tabular for Event {
     }
 }
 
+struct EventWithCalendar<'a>(&'a Event);
+
+impl Tabular for EventWithCalendar<'_> {
+    const HEADER: &'static [&'static str] = &["START", "TITLE", "CALENDAR"];
+    const TITLE_COLUMN: usize = Event::TITLE_COLUMN;
+
+    fn row(&self, now: &Zoned) -> Vec<String> {
+        let mut row = self.0.row(now);
+        row.push(self.0.calendar.clone());
+        row
+    }
+
+    fn cell_style(&self, column: usize, now: &Zoned) -> Option<Tone> {
+        self.0.cell_style(column, now)
+    }
+}
+
+impl Serialize for EventWithCalendar<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
 #[derive(Serialize)]
 struct NoteJson<'a> {
     id: &'a str,
@@ -1043,6 +1086,7 @@ struct EventJson<'a> {
     #[serde(serialize_with = "rfc3339")]
     start: &'a Zoned,
     all_day: bool,
+    calendar: &'a str,
 }
 
 #[derive(Serialize)]
@@ -1261,6 +1305,7 @@ impl Serialize for Event {
             title: &self.title,
             start: &self.start,
             all_day: self.all_day,
+            calendar: &self.calendar,
         }
         .serialize(serializer)
     }
@@ -1389,6 +1434,28 @@ mod tests {
         TITLE             DUE         PRIORITY
         Book flights to…  2026-10-27  high
         Buy groceries
+        ");
+    }
+
+    #[test]
+    fn calendar_column_keeps_its_width_while_titles_truncate() {
+        let event = Event {
+            id: "event-1".into(),
+            title: "Quarterly planning with the whole team".into(),
+            start: test_today()
+                .at(14, 0, 0, 0)
+                .to_zoned(TimeZone::fixed(offset(-4)))
+                .unwrap(),
+            all_day: false,
+            calendar: "Personal".into(),
+        };
+        let style = Style {
+            color: false,
+            width: Some(44),
+        };
+        assert_snapshot!(events(&[event], true, false, &test_now(), style).unwrap(), @r"
+        START             TITLE           CALENDAR
+        2026-10-26 14:00  Quarterly…      Personal
         ");
     }
 
@@ -1674,6 +1741,7 @@ mod tests {
                 .to_zoned(TimeZone::fixed(offset(-4)))
                 .unwrap(),
             all_day: false,
+            calendar: "Work".into(),
         };
         let event_table = list(&[event], false, &test_now(), style(true)).unwrap();
         assert!(event_table.contains("\u{1b}[36m2026-10-26 14:00\u{1b}[0m"));

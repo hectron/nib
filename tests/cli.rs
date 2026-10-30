@@ -38,6 +38,7 @@ fn command() -> assert_cmd::Command {
         .env_remove("NIB_TASK_PRIORITY")
         .env_remove("NIB_TASK_PARSE_INLINE")
         .env_remove("NIB_CAL_CALENDARS")
+        .env_remove("NIB_CAL_SHOW_CALENDAR")
         .env_remove("NIB_NOTE_FOLDER")
         .env_remove("NIB_DEMO");
     command
@@ -807,6 +808,7 @@ fn config_new_files_honor_the_umask() {
         .env_remove("NIB_TASK_PRIORITY")
         .env_remove("NIB_TASK_PARSE_INLINE")
         .env_remove("NIB_CAL_CALENDARS")
+        .env_remove("NIB_CAL_SHOW_CALENDAR")
         .env_remove("NIB_NOTE_FOLDER")
         .output()
         .expect("config set should start under a restrictive umask");
@@ -905,4 +907,30 @@ fn demo_backend_shows_today_agenda() {
     assert!(stdout.contains("Events"), "{stdout}");
     assert!(stdout.contains("Review pull request"), "{stdout}");
     assert!(stdout.contains("Design review"), "{stdout}");
+}
+
+#[test]
+fn demo_backend_shows_the_calendar_column_on_request() {
+    let run = |args: &[&str]| {
+        let out = command()
+            .args(args)
+            .env("NIB_DEMO", "1")
+            .env("TZ", "UTC0")
+            .output()
+            .expect("the nib test process should start");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).expect("stdout should be UTF-8")
+    };
+
+    let shown = run(&["cal", "--week", "--show-calendar"]);
+    let header = shown.lines().next().unwrap_or_default();
+    assert!(header.ends_with("CALENDAR"), "{shown}");
+    assert!(shown.contains("Personal"), "{shown}");
+
+    let hidden = run(&["cal", "--week"]);
+    assert!(!hidden.contains("CALENDAR"), "{hidden}");
 }

@@ -35,6 +35,11 @@
           "items": { "type": "string" },
           "default": [],
           "description": "Calendars included by default."
+        },
+        "show_calendar": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show each event's calendar in event tables."
         }
       }
     },

@@ -15,4 +15,5 @@ Options:
       --json             Print JSON instead of text
   -w, --week             Show the next seven days instead of today
       --calendar <NAME>  Only show events from this calendar
+      --show-calendar    Show each event's calendar
   -h, --help             Print help

@@ -31,6 +31,7 @@ struct FileTask {
 #[serde(deny_unknown_fields)]
 struct FileCal {
     calendars: Option<Vec<String>>,
+    show_calendar: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,6 +215,7 @@ struct Origins {
     task_priority: ConfigOrigin,
     task_parse_inline: ConfigOrigin,
     cal_calendars: ConfigOrigin,
+    cal_show_calendar: ConfigOrigin,
     note_folder: ConfigOrigin,
 }
 
@@ -224,6 +226,7 @@ impl Default for Origins {
             task_priority: ConfigOrigin::Default,
             task_parse_inline: ConfigOrigin::Default,
             cal_calendars: ConfigOrigin::Default,
+            cal_show_calendar: ConfigOrigin::Default,
             note_folder: ConfigOrigin::Default,
         }
     }
@@ -236,6 +239,7 @@ impl Origins {
             ConfigKey::TaskPriority => &self.task_priority,
             ConfigKey::TaskParseInline => &self.task_parse_inline,
             ConfigKey::CalCalendars => &self.cal_calendars,
+            ConfigKey::CalShowCalendar => &self.cal_show_calendar,
             ConfigKey::NoteFolder => &self.note_folder,
         }
     }
@@ -268,6 +272,11 @@ impl Origins {
                 key: ConfigKey::CalCalendars,
                 value: ConfigValue::Strings(config.cal.calendars.clone()),
                 origin: self.cal_calendars,
+            },
+            ConfigEntry {
+                key: ConfigKey::CalShowCalendar,
+                value: ConfigValue::Bool(config.cal.show_calendar),
+                origin: self.cal_show_calendar,
             },
             ConfigEntry {
                 key: ConfigKey::NoteFolder,
@@ -455,11 +464,15 @@ fn apply(config: &mut Config, origins: &mut Origins, other: FileConfig, origin: 
             origins.task_parse_inline = origin.clone();
         }
     }
-    if let Some(cal) = other.cal
-        && let Some(calendars) = cal.calendars
-    {
-        config.cal.calendars = calendars;
-        origins.cal_calendars = origin.clone();
+    if let Some(cal) = other.cal {
+        if let Some(calendars) = cal.calendars {
+            config.cal.calendars = calendars;
+            origins.cal_calendars = origin.clone();
+        }
+        if let Some(show_calendar) = cal.show_calendar {
+            config.cal.show_calendar = show_calendar;
+            origins.cal_show_calendar = origin.clone();
+        }
     }
     if let Some(note) = other.note
         && note.folder.is_some()
@@ -489,6 +502,10 @@ fn apply_environment(
     if let Some(value) = environment(&env, "NIB_CAL_CALENDARS")? {
         config.cal.calendars = comma_separated_names(&value);
         origins.cal_calendars = ConfigOrigin::Environment("NIB_CAL_CALENDARS");
+    }
+    if let Some(value) = environment(&env, "NIB_CAL_SHOW_CALENDAR")? {
+        config.cal.show_calendar = parse_bool("NIB_CAL_SHOW_CALENDAR", &value)?;
+        origins.cal_show_calendar = ConfigOrigin::Environment("NIB_CAL_SHOW_CALENDAR");
     }
     if let Some(value) = environment(&env, "NIB_NOTE_FOLDER")? {
         config.note.folder = Some(value);
@@ -888,7 +905,7 @@ fn edit_value(key: ConfigKey, input: &str) -> Result<(ConfigValue, Value), Confi
                 priority(input).ok_or_else(|| invalid_value(key, input, "low, medium, or high"))?;
             Ok((ConfigValue::Priority(priority), Value::from(input)))
         }
-        ConfigKey::TaskParseInline => {
+        ConfigKey::TaskParseInline | ConfigKey::CalShowCalendar => {
             let parsed =
                 boolean(input).ok_or_else(|| invalid_value(key, input, "true or false"))?;
             Ok((ConfigValue::Bool(parsed), Value::from(parsed)))
@@ -1033,7 +1050,7 @@ mod tests {
         fs::create_dir_all(&package).unwrap();
         write(
             &temp.join("nib.toml"),
-            "[task]\nlist = \"Root\"\npriority = \"low\"\nparse_inline = false\n[cal]\ncalendars = [\"Home\"]\n",
+            "[task]\nlist = \"Root\"\npriority = \"low\"\nparse_inline = false\n[cal]\ncalendars = [\"Home\"]\nshow_calendar = true\n",
         );
         write(
             &project.join(".nib.toml"),
@@ -1046,6 +1063,7 @@ mod tests {
         assert_eq!(config.task.priority, Some(Priority::High));
         assert!(!config.task.parse_inline);
         assert_eq!(config.cal.calendars, ["Home"]);
+        assert!(config.cal.show_calendar);
         assert_eq!(config.note.folder.as_deref(), Some("Work"));
     }
 
@@ -1088,13 +1106,14 @@ mod tests {
         let temp = TempDir::new();
         write(
             &temp.join("nib.toml"),
-            "[task]\nlist = \"Project\"\npriority = \"low\"\nparse_inline = false\n[cal]\ncalendars = [\"Home\"]\n[note]\nfolder = \"Archive\"\n",
+            "[task]\nlist = \"Project\"\npriority = \"low\"\nparse_inline = false\n[cal]\ncalendars = [\"Home\"]\nshow_calendar = true\n[note]\nfolder = \"Archive\"\n",
         );
         let env = HashMap::from([
             ("NIB_TASK_LIST", "Environment"),
             ("NIB_TASK_PRIORITY", "medium"),
             ("NIB_TASK_PARSE_INLINE", "true"),
             ("NIB_CAL_CALENDARS", "Work, Birthdays"),
+            ("NIB_CAL_SHOW_CALENDAR", "false"),
             ("NIB_NOTE_FOLDER", "Inbox"),
         ]);
 
@@ -1103,7 +1122,80 @@ mod tests {
         assert_eq!(config.task.priority, Some(Priority::Medium));
         assert!(config.task.parse_inline);
         assert_eq!(config.cal.calendars, ["Work", "Birthdays"]);
+        assert!(!config.cal.show_calendar);
         assert_eq!(config.note.folder.as_deref(), Some("Inbox"));
+    }
+
+    #[test]
+    fn show_calendar_reports_its_origin() {
+        let temp = TempDir::new();
+        let project = temp.join("nib.toml");
+        write(&project, "[cal]\nshow_calendar = true\n");
+
+        let origin = |env: Option<&str>| {
+            inspect(&temp.0, None, |name| {
+                env.filter(|_| name == "NIB_CAL_SHOW_CALENDAR")
+                    .map(OsString::from)
+            })
+            .into_entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.key == ConfigKey::CalShowCalendar)
+            .unwrap()
+        };
+
+        assert_eq!(
+            origin(None),
+            ConfigEntry {
+                key: ConfigKey::CalShowCalendar,
+                value: ConfigValue::Bool(true),
+                origin: ConfigOrigin::File(project),
+            }
+        );
+        assert_eq!(
+            origin(Some("false")),
+            ConfigEntry {
+                key: ConfigKey::CalShowCalendar,
+                value: ConfigValue::Bool(false),
+                origin: ConfigOrigin::Environment("NIB_CAL_SHOW_CALENDAR"),
+            }
+        );
+    }
+
+    #[test]
+    fn show_calendar_can_be_set_and_unset() {
+        let temp = TempDir::new();
+        let path = temp.join("config.toml");
+        assert_eq!(
+            key("cal.show_calendar").unwrap(),
+            ConfigKey::CalShowCalendar
+        );
+
+        assert_eq!(
+            set(&path, ConfigKey::CalShowCalendar, "true")
+                .unwrap()
+                .value,
+            ConfigValue::Bool(true)
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[cal]\nshow_calendar = true\n"
+        );
+        assert!(
+            load(&temp.0, Some(&path), no_env)
+                .unwrap()
+                .cal
+                .show_calendar
+        );
+        assert!(set(&path, ConfigKey::CalShowCalendar, "yes").is_err());
+
+        assert!(unset(&path, ConfigKey::CalShowCalendar).unwrap().value);
+        assert!(
+            !load(&temp.0, Some(&path), no_env)
+                .unwrap()
+                .cal
+                .show_calendar
+        );
     }
 
     #[test]
@@ -1145,6 +1237,11 @@ mod tests {
                     key: ConfigKey::CalCalendars,
                     value: ConfigValue::Strings(vec!["Work".into()]),
                     origin: ConfigOrigin::File(project_file),
+                },
+                ConfigEntry {
+                    key: ConfigKey::CalShowCalendar,
+                    value: ConfigValue::Bool(false),
+                    origin: ConfigOrigin::Default,
                 },
                 ConfigEntry {
                     key: ConfigKey::NoteFolder,
@@ -1207,7 +1304,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             events,
-            Action::ListEvents(EventQuery { calendars, .. })
+            Action::ListEvents { query: EventQuery { calendars, .. }, .. }
                 if calendars == ["Work", "Birthdays"]
         ));
     }
@@ -1923,8 +2020,11 @@ mod tests {
             parse_inline,
         } = task.unwrap();
         assert!(list.is_some() && priority.is_some() && parse_inline.is_some());
-        let FileCal { calendars } = cal.unwrap();
-        assert!(calendars.is_some());
+        let FileCal {
+            calendars,
+            show_calendar,
+        } = cal.unwrap();
+        assert!(calendars.is_some() && show_calendar.is_some());
         let FileNote { folder } = note.unwrap();
         assert!(folder.is_some());
 
@@ -1944,6 +2044,7 @@ mod tests {
         let cases = [
             ("NIB_TASK_PRIORITY", "urgent"),
             ("NIB_TASK_PARSE_INLINE", "sometimes"),
+            ("NIB_CAL_SHOW_CALENDAR", "yes"),
         ];
         for (variable, value) in cases {
             let error = load(Path::new("/"), None, |name| {

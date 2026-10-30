@@ -23,7 +23,11 @@ pub fn run(
         Action::Config(_) => Err(miette::miette!(
             "config must be run through the configuration entry point"
         )),
-        Action::Today { date, query } => today(date, query, json, now, backends, style),
+        Action::Today {
+            date,
+            query,
+            show_calendar,
+        } => today(date, query, show_calendar, json, now, backends, style),
         Action::NewNote(note) => {
             output::single(&backends.notes.create(note)?, "Created note", json, style)
         }
@@ -63,9 +67,16 @@ pub fn run(
             style,
         ),
         Action::EditTasks { list } => edit::tasks(list.as_deref(), now, backends, host),
-        Action::ListEvents(query) => {
-            output::list(&backends.calendar.events(query)?, json, now, style)
-        }
+        Action::ListEvents {
+            query,
+            show_calendar,
+        } => output::events(
+            &backends.calendar.events(query)?,
+            show_calendar,
+            json,
+            now,
+            style,
+        ),
         Action::ListCalendars => output::list(&backends.calendar.calendars()?, json, now, style),
         Action::CreateCalendar(calendar) => output::single(
             &backends.calendar.create_calendar(calendar)?,
@@ -108,6 +119,7 @@ pub fn run(
 fn today(
     date: Date,
     query: EventQuery,
+    show_calendar: bool,
     json: bool,
     now: &Zoned,
     backends: &Backends,
@@ -122,7 +134,15 @@ fn today(
         .filter(|reminder| output::reminder_is_due_today(reminder, date, now))
         .collect::<Vec<_>>();
     let events = backends.calendar.events(query)?;
-    output::today(&overdue, &due_today, &events, now, json, style)
+    output::today(
+        &overdue,
+        &due_today,
+        &events,
+        show_calendar,
+        now,
+        json,
+        style,
+    )
 }
 
 #[cfg(test)]
@@ -436,11 +456,12 @@ mod tests {
                         && (query.calendars.is_empty()
                             || query.calendars.iter().any(|name| name == calendar))
                 })
-                .map(|(id, title, start, all_day, _)| Event {
+                .map(|(id, title, start, all_day, calendar)| Event {
                     id: id.into(),
                     title: title.into(),
                     start,
                     all_day,
+                    calendar: calendar.into(),
                 })
                 .collect())
         }
@@ -632,6 +653,7 @@ mod tests {
             title: title.into(),
             start: at(day, hour, 0),
             all_day: false,
+            calendar: "Work".into(),
         }
     }
 
@@ -913,6 +935,31 @@ mod tests {
     }
 
     #[test]
+    fn today_shows_the_calendar_column_on_request() {
+        let reminders = vec![reminder(
+            "reminder-today",
+            "Review pull request",
+            Some(date(2026, 10, 26)),
+        )];
+        let mut lunch = event("event-lunch", "Lunch with Sam", date(2026, 10, 26), 12);
+        lunch.calendar = "Personal".into();
+        let events = vec![
+            event("event-today", "Design review", date(2026, 10, 26), 14),
+            lunch,
+        ];
+        assert_snapshot!(agenda(&["today", "--show-calendar"], reminders, events), @r"
+        Due today
+        TITLE                DUE         PRIORITY
+        Review pull request  2026-10-26
+
+        Events
+        START             TITLE           CALENDAR
+        2026-10-26 14:00  Design review   Work
+        2026-10-26 12:00  Lunch with Sam  Personal
+        ");
+    }
+
+    #[test]
     fn today_splits_timed_reminders_at_the_current_time() {
         let mut past = reminder("past", "Morning task", Some(now().date()));
         past.due_time = Some(jiff::civil::time(9, 0, 0, 0));
@@ -976,7 +1023,8 @@ mod tests {
               "id": "event-today",
               "title": "Design review",
               "start": "2026-10-26T14:00:00-04:00",
-              "all_day": false
+              "all_day": false,
+              "calendar": "Work"
             }
           ]
         }
@@ -1220,6 +1268,63 @@ mod tests {
     }
 
     #[test]
+    fn cal_shows_the_calendar_column_on_request() {
+        let mut dentist = event("event-dentist", "Dentist", date(2026, 10, 27), 8);
+        dentist.calendar = "Personal".into();
+        let events = vec![
+            event("event-2", "Team sync", date(2026, 10, 26), 10),
+            dentist,
+            event("event-3", "Design review", date(2026, 10, 29), 14),
+        ];
+        assert_snapshot!(agenda(&["c", "list", "--week", "--show-calendar"], Vec::new(), events.clone()), @r"
+        START             TITLE          CALENDAR
+        2026-10-26 10:00  Team sync      Work
+        2026-10-27 08:00  Dentist        Personal
+        2026-10-29 14:00  Design review  Work
+        ");
+        assert_eq!(
+            agenda(
+                &["--json", "cal", "--week", "--show-calendar"],
+                Vec::new(),
+                events.clone()
+            ),
+            agenda(&["--json", "cal", "--week"], Vec::new(), events)
+        );
+    }
+
+    #[test]
+    fn configured_calendar_column_applies_to_cal_and_today() {
+        let config = Config {
+            cal: crate::domain::CalendarConfig {
+                calendars: Vec::new(),
+                show_calendar: true,
+            },
+            ..Config::default()
+        };
+        let run_with = |args: &[&str]| {
+            let built = Built::default();
+            let backends = fake_backends(&built);
+            let cli = Cli::try_parse_from(["nib"].iter().chain(args)).unwrap();
+            let json = cli.json;
+            let action = cli.command.into_action(&now(), &config).unwrap().unwrap();
+            run(
+                action,
+                json,
+                &now(),
+                &backends,
+                Style::default(),
+                &mut Scripted::new(),
+            )
+            .unwrap()
+        };
+        assert_snapshot!(run_with(&["cal"]), @r"
+        START             TITLE      CALENDAR
+        2026-10-26 10:00  Team sync  Work
+        ");
+        assert!(run_with(&["today"]).contains("CALENDAR"));
+    }
+
+    #[test]
     fn event_list_json() {
         assert_snapshot!(nib(&["cal", "--week", "--json"]), @r#"
         [
@@ -1227,19 +1332,22 @@ mod tests {
             "id": "event-2",
             "title": "Team sync",
             "start": "2026-10-26T10:00:00-04:00",
-            "all_day": false
+            "all_day": false,
+            "calendar": "Work"
           },
           {
             "id": "event-5",
             "title": "Offsite",
             "start": "2026-10-28T00:00:00-04:00",
-            "all_day": true
+            "all_day": true,
+            "calendar": "Work"
           },
           {
             "id": "event-3",
             "title": "Design review",
             "start": "2026-10-29T14:30:00-04:00",
-            "all_day": false
+            "all_day": false,
+            "calendar": "Work"
           }
         ]
         "#);
@@ -1464,6 +1572,7 @@ mod tests {
         let config = Config {
             cal: crate::domain::CalendarConfig {
                 calendars: vec!["Work".into(), "Birthdays".into()],
+                show_calendar: false,
             },
             ..Config::default()
         };
@@ -1506,6 +1615,11 @@ mod tests {
                 origin: ConfigOrigin::Default,
             },
             ConfigEntry {
+                key: ConfigKey::CalShowCalendar,
+                value: ConfigValue::Bool(true),
+                origin: ConfigOrigin::File("/Users/me/project/nib.toml".into()),
+            },
+            ConfigEntry {
                 key: ConfigKey::NoteFolder,
                 value: ConfigValue::String("Notes".into()),
                 origin: ConfigOrigin::File("/Users/me/.config/nib/config.toml".into()),
@@ -1522,6 +1636,7 @@ mod tests {
         task.priority      <unset>
         task.parse_inline  true
         cal.calendars      ["Work", "Personal"]
+        cal.show_calendar  true
         note.folder        Notes
         "#);
         assert_snapshot!(output::config_list(&entries, true, false, Style::default()).unwrap(), @r#"
@@ -1530,6 +1645,7 @@ mod tests {
         task.priority      <unset>               default
         task.parse_inline  true                  NIB_TASK_PARSE_INLINE
         cal.calendars      ["Work", "Personal"]  default
+        cal.show_calendar  true                  /Users/me/project/nib.toml
         note.folder        Notes                 /Users/me/.config/nib/config.toml
         "#);
     }
@@ -1573,6 +1689,14 @@ mod tests {
             }
           },
           {
+            "id": "cal.show_calendar",
+            "value": true,
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/project/nib.toml"
+            }
+          },
+          {
             "id": "note.folder",
             "value": "Notes",
             "origin": {
@@ -1582,6 +1706,11 @@ mod tests {
           }
         ]
         "#);
+    }
+
+    #[test]
+    fn config_list_json_ignores_the_origin_flag() {
+        let entries = config_entries();
         assert_snapshot!(output::config_list(&entries, false, true, Style::default()).unwrap(), @r#"
         [
           {
@@ -1615,6 +1744,14 @@ mod tests {
             ],
             "origin": {
               "kind": "default"
+            }
+          },
+          {
+            "id": "cal.show_calendar",
+            "value": true,
+            "origin": {
+              "kind": "file",
+              "path": "/Users/me/project/nib.toml"
             }
           },
           {
