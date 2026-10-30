@@ -57,6 +57,25 @@ Reminder objects contain `id`, `title`, `due`, `due_time`, `due_time_zone`, and 
 
 `nib task done`, `reopen`, `priority`, and `move` return an array with one object per changed reminder, in selector order. Each object contains `id`, `title`, `list`, `completed`, `priority`, and `change`, with the values after the change. `list` is the reminder list's name. `change` is `completed`, `reopened`, `priority`, or `moved`. Reminders that didn't need to change are left out, so the array can be `[]`.
 
+## Picked reminders
+
+```json
+[
+  {
+    "id": "reminder-3",
+    "title": "Renew passport",
+    "list": "Reminders",
+    "due": "2026-11-09",
+    "due_time": "09:00",
+    "due_time_zone": "America/New_York",
+    "priority": "low",
+    "completed": false
+  }
+]
+```
+
+`nib pick --json` returns an array with one object per chosen reminder, in the order they were selected. Each object contains `id`, `title`, `list`, `due`, `due_time`, `due_time_zone`, `priority`, and `completed`. `due`, `due_time`, `due_time_zone`, and `priority` use the same forms as reminder objects. `list` is the reminder list's name, or `null` for a reminder added from the prompt without a `#list` token or a configured default list. Cancelling the prompt prints nothing.
+
 ## Calendar events
 
 ```json

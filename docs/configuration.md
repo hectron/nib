@@ -88,7 +88,7 @@ A nearer file only replaces the fields it defines.
 | --- | --- | --- | --- |
 | `task.list` | `NIB_TASK_LIST` | List name | `nib t`, `nib task add`, and `nib task edit` |
 | `task.priority` | `NIB_TASK_PRIORITY` | `low`, `medium`, or `high` | `nib t` and `nib task add` |
-| `task.parse_inline` | `NIB_TASK_PARSE_INLINE` | `true` or `false` | Trailing due dates, priorities, and lists for `nib t` and `nib task add` |
+| `task.parse_inline` | `NIB_TASK_PARSE_INLINE` | `true` or `false` | Trailing due dates, priorities, and lists for `nib t`, `nib task add`, and the `nib pick` Add row |
 | `cal.calendars` | `NIB_CAL_CALENDARS` | Array in TOML; comma-separated names in the environment | `nib cal` |
 | `cal.show_calendar` | `NIB_CAL_SHOW_CALENDAR` | `true` or `false` | Calendar column in `nib cal` and `nib today` event tables |
 | `note.folder` | `NIB_NOTE_FOLDER` | Folder name | `nib n` and `nib note new` |

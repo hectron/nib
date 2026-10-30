@@ -91,7 +91,7 @@ pub fn tasks(
             }
         };
         if let Err(error) = journal::record_edit(now, &plan.changes, &applied, host) {
-            host.say("The changes were applied, but nib couldn't record the journal entry.");
+            host.say_unrecorded(journal::UNRECORDED);
             file.remove_on_drop();
             return Err(error);
         }

@@ -36,6 +36,12 @@ pub struct Style {
 }
 
 impl Style {
+    pub fn detect_interactive() -> Self {
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+        let dumb_terminal = std::env::var_os("TERM").is_some_and(|v| v == "dumb");
+        Self::from_terminal(true, no_color, dumb_terminal, None)
+    }
+
     pub fn detect() -> Self {
         let probe = Table::new();
         let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
@@ -364,6 +370,31 @@ pub fn changed_reminders(changed: &[Changed], json: bool, style: Style) -> Resul
                 format!("{verb} \"{title}\"{suffix}")
             }
         })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+#[cfg(feature = "tui")]
+pub(crate) struct PickedReminder<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub list: Option<&'a str>,
+    pub due: Option<Date>,
+    pub due_time: Option<jiff::civil::Time>,
+    pub due_time_zone: Option<&'a str>,
+    pub priority: Option<Priority>,
+    pub completed: bool,
+}
+
+#[cfg(feature = "tui")]
+pub(crate) fn picked(items: &[PickedReminder<'_>], json: bool, style: Style) -> Result<String> {
+    if json {
+        let items = items.iter().map(PickedJson::from).collect::<Vec<_>>();
+        return to_json(&items, style);
+    }
+    Ok(items
+        .iter()
+        .map(|item| clean(item.id))
         .collect::<Vec<_>>()
         .join("\n"))
 }
@@ -1206,6 +1237,38 @@ impl<'a> From<&'a Changed> for ChangedJson<'a> {
                 TaskChange::Priority(_) => "priority",
                 TaskChange::Move(_) => "moved",
             },
+        }
+    }
+}
+
+#[cfg(feature = "tui")]
+#[derive(Serialize)]
+struct PickedJson<'a> {
+    id: &'a str,
+    title: &'a str,
+    list: Option<&'a str>,
+    due: Option<Date>,
+    due_time: Option<String>,
+    due_time_zone: Option<&'a str>,
+    priority: Option<&'static str>,
+    completed: bool,
+}
+
+#[cfg(feature = "tui")]
+impl<'a> From<&PickedReminder<'a>> for PickedJson<'a> {
+    fn from(item: &PickedReminder<'a>) -> Self {
+        Self {
+            id: item.id,
+            title: item.title,
+            list: item.list,
+            due: item.due,
+            due_time: item
+                .due
+                .and(item.due_time)
+                .map(|time| time.strftime("%H:%M").to_string()),
+            due_time_zone: item.due.and(item.due_time).and(item.due_time_zone),
+            priority: item.priority.map(Priority::as_str),
+            completed: item.completed,
         }
     }
 }

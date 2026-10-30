@@ -4,6 +4,8 @@ mod domain;
 mod infra;
 #[cfg(test)]
 mod test_support;
+#[cfg(feature = "tui")]
+mod tui;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -233,6 +235,98 @@ pub fn run(
             &mut infra::host::System,
         )
     }
+}
+
+pub struct PickOutput {
+    pub text: String,
+    pub cancelled: bool,
+}
+
+pub fn pick(
+    cli: Cli,
+    config: &Config,
+    now: &Zoned,
+    demo: bool,
+    cache_directory: Option<&Path>,
+    style: Style,
+    interface: Style,
+) -> miette::Result<PickOutput> {
+    let json = cli.json;
+    let Some(cli::Action::Pick { query }) =
+        cli.command.into_action(now, config).into_diagnostic()?
+    else {
+        return Err(miette::miette!(
+            "non-pick command passed to the interactive entry point"
+        ));
+    };
+    run_pick(
+        &query,
+        json,
+        config,
+        now,
+        demo,
+        cache_directory,
+        style,
+        interface,
+    )
+}
+
+#[cfg(feature = "tui")]
+#[allow(clippy::too_many_arguments)]
+fn run_pick(
+    query: &str,
+    json: bool,
+    config: &Config,
+    now: &Zoned,
+    demo: bool,
+    cache_directory: Option<&Path>,
+    style: Style,
+    interface: Style,
+) -> miette::Result<PickOutput> {
+    let request = tui::Request {
+        query,
+        json,
+        style,
+        color: interface.color,
+    };
+    let picked = if demo {
+        tui::pick(
+            &request,
+            now,
+            config,
+            &infra::demo::backends(now),
+            &mut infra::host::Memory::new(),
+        )
+    } else {
+        let backends = infra::system_backends(infra::completions::CacheFile::new(
+            cache_directory,
+            now.timestamp().as_second(),
+        ));
+        tui::pick(&request, now, config, &backends, &mut infra::host::System)
+    }?;
+    Ok(PickOutput {
+        text: picked.text,
+        cancelled: picked.cancelled,
+    })
+}
+
+#[cfg(not(feature = "tui"))]
+#[allow(clippy::too_many_arguments)]
+fn run_pick(
+    _query: &str,
+    _json: bool,
+    _config: &Config,
+    _now: &Zoned,
+    _demo: bool,
+    _cache_directory: Option<&Path>,
+    _style: Style,
+    _interface: Style,
+) -> miette::Result<PickOutput> {
+    Err(miette::miette!(
+        code = "nib::pick::unavailable",
+        help = "rebuild nib with the default `tui` feature",
+        "this nib was built without the terminal interface"
+    ))
 }
 
 pub fn completion_output(
