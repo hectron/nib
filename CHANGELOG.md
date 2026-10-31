@@ -9,19 +9,6 @@
 - *(cal)* Show event location, notes, and meeting link
 - *(board)* Add nib board, a full-screen panes view of reminders and events
 
-### 🐛 Bug Fixes
-
-- Resolve selectors from the snapshot first and cover more undo paths
-- Tighten filter matching and make completed snapshots mandatory
-- *(config)* Address keymap review findings
-- *(pick)* Guard delete, restrict the add row, and report reload failures
-- *(pick)* Allow deleting reminders with alarms after a typed count, and tighten the add row
-- *(pick)* Require the typed count against fresh data, and make the add row deterministic
-- *(cal)* Reject backslash host tricks and keep balanced brackets in meeting links
-- *(board)* Stop sequences at quit, restore the terminal on every path, and keep new reminders in their list
-- *(board)* Track lists by id, prune stale selections, and scope the panic hook to the owner thread
-- *(board)* Keep a renamed list selected, restore on any thread, and refuse a second panic hook
-
 ### 📚 Documentation
 
 - *(filter)* Explain that -f means --filter on tasks and --folder on notes
@@ -53,10 +40,6 @@
 - Snapshot the new setting in `config list` and cover more calendar cases
 - Cover named local zones in the hidden-zone re-pin and snapshot its preview
 - Pass the lock folder in the show_calendar config test
-
-### ⚙️ Miscellaneous Tasks
-
-- *(release)* V0.5.0
 ## [0.4.1] - 2026-10-28
 
 ### 🐛 Bug Fixes
@@ -72,10 +55,6 @@
 - Snapshot mixed doctor locks and pin set-after-unset comment order
 - Tighten the pending undo resolve tests
 - Cover fall-back times and gap display for unnamed zones
-
-### ⚙️ Miscellaneous Tasks
-
-- *(release)* V0.4.1
 ## [0.4.0] - 2026-10-27
 
 ### 🚀 Features
@@ -87,10 +66,6 @@
 ### 🐛 Bug Fixes
 
 - Journal edits under the lock and refuse unrecorded undos clearly
-
-### ⚙️ Miscellaneous Tasks
-
-- *(release)* V0.4.0
 ## [0.3.0] - 2026-10-27
 
 ### 🚀 Features
@@ -116,7 +91,6 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Report the required check from the release workflow
-- *(release)* V0.3.0
 
 ### 💼 Other
 
@@ -146,7 +120,6 @@
 
 - Cut releases with one workflow_dispatch command
 - Release through a pull request with two commands
-- *(release)* V0.2.0
 
 ### 💼 Other
 
@@ -221,7 +194,6 @@
 - Check fmt, clippy, and tests on macOS 26
 - Release with cargo-dist to GitHub and Homebrew
 - Publish GitHub releases only for now
-- *(release)* V0.1.0
 
 ### 💼 Other
 
