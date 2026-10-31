@@ -71,6 +71,11 @@
             "filter": { "$ref": "#/$defs/keyBindings" },
             "capture": { "$ref": "#/$defs/keyBindings" }
           }
+        },
+        "views": {
+          "type": "object",
+          "description": "Saved views for nib board: a view name mapped to a filter expression.",
+          "additionalProperties": { "type": "string" }
         }
       }
     }

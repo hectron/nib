@@ -335,6 +335,68 @@ fn run_pick(
     ))
 }
 
+pub fn board(
+    cli: Cli,
+    config: &Config,
+    now: &Zoned,
+    demo: bool,
+    cache_directory: Option<&Path>,
+    interface: Style,
+) -> miette::Result<()> {
+    let Some(cli::Action::Board) = cli.command.into_action(now, config).into_diagnostic()? else {
+        return Err(miette::miette!(
+            "non-board command passed to the board entry point"
+        ));
+    };
+    run_board(config, now, demo, cache_directory, interface)
+}
+
+#[cfg(feature = "tui")]
+fn run_board(
+    config: &Config,
+    now: &Zoned,
+    demo: bool,
+    cache_directory: Option<&Path>,
+    interface: Style,
+) -> miette::Result<()> {
+    if demo {
+        tui::board(
+            now,
+            config,
+            &infra::demo::backends(now),
+            &mut infra::host::Memory::new(),
+            interface.color,
+        )
+    } else {
+        let backends = infra::system_backends(infra::completions::CacheFile::new(
+            cache_directory,
+            now.timestamp().as_second(),
+        ));
+        tui::board(
+            now,
+            config,
+            &backends,
+            &mut infra::host::System,
+            interface.color,
+        )
+    }
+}
+
+#[cfg(not(feature = "tui"))]
+fn run_board(
+    _config: &Config,
+    _now: &Zoned,
+    _demo: bool,
+    _cache_directory: Option<&Path>,
+    _interface: Style,
+) -> miette::Result<()> {
+    Err(miette::miette!(
+        code = "nib::board::unavailable",
+        help = "rebuild nib with the default `tui` feature",
+        "this nib was built without the terminal interface"
+    ))
+}
+
 pub fn completion_output(
     cli: &Cli,
     cache_directory: Option<&Path>,

@@ -53,7 +53,7 @@ nib resolves every selector before it changes anything, so one bad selector leav
 
 ## Undo
 
-These commands don't ask for confirmation. Before changing anything, each one writes the reminders' original data to `~/Library/Application Support/nib/backups`, the same folder `nib task edit` uses. It also writes a journal entry there, so `nib log` shows it as `task_done`, `task_reopen`, `task_priority`, or `task_move`, and `nib undo` reverses it. Deletes made from [`nib pick`](pick.md) appear as `task_delete`:
+These commands don't ask for confirmation. Before changing anything, each one writes the reminders' original data to `~/Library/Application Support/nib/backups`, the same folder `nib task edit` uses. It also writes a journal entry there, so `nib log` shows it as `task_done`, `task_reopen`, `task_priority`, or `task_move`, and `nib undo` reverses it. Deletes made from [`nib pick`](pick.md) or [`nib board`](board.md) appear as `task_delete`:
 
 ```bash
 nib task done "oat milk"

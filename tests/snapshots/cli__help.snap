@@ -19,6 +19,7 @@ Commands:
   log          List recent task change and undo journal entries
   undo         Undo a journal entry, or the latest entry when omitted
   pick         Pick reminders in an inline prompt and print their ids
+  board        Browse, filter, and change reminders in a full-screen board [alias: b]
   help         Print this message or the help of the given subcommand(s)
 
 Options:

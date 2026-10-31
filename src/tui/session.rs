@@ -5,11 +5,11 @@ use std::time::Duration;
 use jiff::{Timestamp, Zoned};
 use miette::Result;
 
-use super::state::{Data, Effect, Item, ListChoice, Response};
+use super::state::{Data, Effect, Extras, Item, ListChoice, Response};
 use crate::app::commands::reminder_from_snapshot;
 use crate::app::quick::{self, DeleteError};
 use crate::cli::output::{self, Style, clean};
-use crate::domain::{Backends, Config, Reminder, ReminderSnapshot, TaskChangeRequest};
+use crate::domain::{Backends, Config, NewReminder, Reminder, ReminderSnapshot, TaskChangeRequest};
 use crate::infra::host::{EditFile, Host, JournalFile, JournalLock};
 
 pub(crate) struct Session<'a> {
@@ -32,7 +32,11 @@ impl Session<'_> {
     pub(crate) fn perform(&mut self, effect: Effect, includes_completed: bool) -> Response {
         let result = match effect {
             Effect::LoadCompleted => self.load(true).map(Response::Loaded),
-            Effect::Add(text) => self.add(&text),
+            Effect::Reload => self.load(includes_completed).map(Response::Loaded),
+            Effect::Add(text) => crate::cli::quick_add(&text, self.now, self.config)
+                .map_err(|error| miette::miette!("{error}"))
+                .and_then(|new| self.add(new)),
+            Effect::AddParsed(new) => self.add(new),
             Effect::Change { change, ids } => {
                 let (now, backends) = (self.now, self.backends);
                 let request = TaskChangeRequest {
@@ -72,6 +76,13 @@ impl Session<'_> {
                 }
                 _ => Response::Failed(clean(&error.to_string())),
             },
+        }
+    }
+
+    pub(crate) fn edit(&mut self, ids: &[String], includes_completed: bool) -> Response {
+        match crate::app::edit::selected(ids, self.now, self.backends, &mut *self.host) {
+            Ok(summary) => self.reloaded(clean(&summary), false, includes_completed),
+            Err(error) => self.reloaded(clean(&error.to_string()), true, includes_completed),
         }
     }
 
@@ -142,12 +153,26 @@ impl Session<'_> {
         }
     }
 
-    fn add(&mut self, text: &str) -> Result<Response> {
-        let new = crate::cli::quick_add(text, self.now, self.config)
-            .map_err(|error| miette::miette!("{error}"))?;
+    fn add(&mut self, new: NewReminder) -> Result<Response> {
         let list = new.list.clone();
         let added = self.backends.reminders.add(new)?;
-        Ok(Response::Added(added_item(added, list)))
+        let (list, list_id) = match list {
+            Some(list) => (Some(list), None),
+            None => self
+                .default_list()
+                .map_or((None, None), |(id, name)| (Some(name), Some(id))),
+        };
+        Ok(Response::Added(added_item(added, list, list_id)))
+    }
+
+    fn default_list(&self) -> Option<(String, String)> {
+        self.backends
+            .reminders
+            .lists()
+            .ok()?
+            .into_iter()
+            .find(|list| list.default)
+            .map(|list| (list.id, list.name))
     }
 }
 
@@ -163,12 +188,18 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
             let notes = stored.notes.clone();
             let url = stored.url.clone();
             let completed = stored.completed;
+            let extras = Extras {
+                alarms: stored.alarms_present,
+                repeats: stored.recurrence_present,
+            };
             let backup_partial = stored.backup_partial;
+            let list_id = stored.list_id.clone();
             let reminder = reminder_from_snapshot(stored, now.time_zone());
             Item {
                 id: reminder.id,
                 title: reminder.title,
                 list: Some(list),
+                list_id: Some(list_id),
                 notes,
                 url,
                 due: reminder.due,
@@ -177,6 +208,7 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
                 due_at: reminder.due_at,
                 priority: reminder.priority,
                 completed,
+                extras,
                 backup_partial,
             }
         })
@@ -195,11 +227,12 @@ fn data(snapshot: ReminderSnapshot, includes_completed: bool, now: &Zoned) -> Da
     }
 }
 
-fn added_item(reminder: Reminder, list: Option<String>) -> Item {
+fn added_item(reminder: Reminder, list: Option<String>, list_id: Option<String>) -> Item {
     Item {
         id: reminder.id,
         title: reminder.title,
         list,
+        list_id,
         notes: None,
         url: None,
         due: reminder.due,
@@ -208,6 +241,7 @@ fn added_item(reminder: Reminder, list: Option<String>) -> Item {
         due_at: reminder.due_at,
         priority: reminder.priority,
         completed: false,
+        extras: Extras::default(),
         backup_partial: false,
     }
 }
@@ -344,6 +378,18 @@ mod tests {
         assert_eq!(item.due, Some(date(2026, 10, 31)));
         assert_eq!(item.priority, Some(Priority::High));
         assert_eq!(item.list.as_deref(), Some("Work"));
+    }
+
+    #[test]
+    fn add_without_a_list_names_the_default_list() {
+        let response = run(&mut Scripted::new(), |session| {
+            session.perform(Effect::Add("Water plants".into()), false)
+        });
+        let Response::Added(item) = response else {
+            panic!("expected an added reminder, got {response:?}");
+        };
+        assert_eq!(item.list.as_deref(), Some("Reminders"));
+        assert_eq!(item.list_id.as_deref(), Some("demo-list"));
     }
 
     #[test]
@@ -702,6 +748,39 @@ mod tests {
     }
 
     #[test]
+    fn editing_a_selection_runs_the_task_edit_flow_and_reloads() {
+        let mut host = Scripted::new()
+            .edit(|text| text.replace("- [ ] Pay rent", "- [x] Pay rent"))
+            .answer("y");
+        let response = run(&mut host, |session| {
+            session.edit(&["reminder-2".into(), "reminder-4".into()], false)
+        });
+        let Response::Changed {
+            message,
+            error,
+            data: Some(_),
+        } = response
+        else {
+            panic!("expected a change, got {response:?}");
+        };
+        assert_eq!(message, "Applied 1 change: 1 completed.");
+        assert!(!error);
+        assert_eq!(host.journals.len(), 1);
+        assert!(
+            host.said
+                .iter()
+                .any(|line| line == "Apply 1 change? [y/N] ")
+        );
+
+        let mut host = Scripted::new();
+        let response = run(&mut host, |session| session.edit(&["gone".into()], false));
+        assert!(
+            matches!(&response, Response::Changed { error: true, data: Some(_), message } if message.starts_with("None of the selected")),
+            "{response:?}"
+        );
+    }
+
+    #[test]
     fn failures_come_back_as_messages() {
         let mut host = Scripted::new();
         let response = run(&mut host, |session| {
@@ -718,6 +797,11 @@ mod tests {
             Response::Failed("\"Call the dentist\" is already completed".into())
         );
         assert_eq!(host.journals, Vec::<(String, String)>::new());
+        let reloaded = run(&mut host, |session| session.perform(Effect::Reload, false));
+        assert!(
+            matches!(&reloaded, Response::Loaded(data) if !data.includes_completed && !data.items.is_empty()),
+            "{reloaded:?}"
+        );
     }
 
     #[test]

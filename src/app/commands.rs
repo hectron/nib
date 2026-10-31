@@ -24,9 +24,11 @@ pub fn run(
     host: &mut dyn Host,
 ) -> Result<String> {
     match action {
-        Action::Doctor | Action::Config(_) | Action::Pick { .. } => Err(miette::miette!(
-            "doctor, config, and pick must be run through their own entry points"
-        )),
+        Action::Doctor | Action::Config(_) | Action::Pick { .. } | Action::Board => {
+            Err(miette::miette!(
+                "doctor, config, pick, and board must be run through their own entry points"
+            ))
+        }
         Action::Today {
             date,
             query,

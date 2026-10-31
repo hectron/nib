@@ -565,7 +565,9 @@ fn add_browse_defaults(keymap: &mut Keymap) {
     bind_default(keymap, State::Browse, "0", &[Action::PriorityNone]);
     bind_default(keymap, State::Browse, "m", &[Action::Move]);
     bind_default(keymap, State::Browse, "e", &[Action::Edit]);
-    bind_default(keymap, State::Browse, "delete", &[Action::Delete]);
+    for chord in ["delete", "backspace"] {
+        bind_default(keymap, State::Browse, chord, &[Action::Delete]);
+    }
     bind_default(keymap, State::Browse, "n", &[Action::Add]);
     for chord in ["q", "esc", "ctrl-c"] {
         bind_default(keymap, State::Browse, chord, &[Action::Quit]);
@@ -645,9 +647,6 @@ fn add_capture_defaults(keymap: &mut Keymap) {
     }
     bind_default(keymap, State::Capture, "ctrl-q", &[Action::Quit]);
     bind_default(keymap, State::Capture, "f1", &[Action::Help]);
-    bind_default(keymap, State::Capture, "tab", &[Action::NextPane]);
-    bind_default(keymap, State::Capture, "shift-tab", &[Action::PrevPane]);
-    bind_default(keymap, State::Capture, "ctrl-o", &[Action::ActMenu]);
     bind_default(keymap, State::Capture, "alt-h", &[Action::PriorityHigh]);
     bind_default(keymap, State::Capture, "alt-m", &[Action::PriorityMedium]);
     bind_default(keymap, State::Capture, "alt-l", &[Action::PriorityLow]);

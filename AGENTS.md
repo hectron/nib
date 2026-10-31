@@ -51,7 +51,8 @@ nib t "Buy groceries"
 - `src/infra/eventkit.rs` — the only unsafe module. It implements Reminders and Calendar with EventKit on macOS, converts callback data to owned Rust values in the callback, and keeps Objective-C calls behind small safe helpers.
 - `src/cli/mod.rs` — `clap` definitions. Every command line resolves to one `Action`; relative input is resolved against the supplied clock and configuration.
 - `src/cli/output.rs` — table and JSON rendering. Terminal style is detected once; text strips control characters; JSON uses private output types.
-- `src/tui/` — `nib pick`, behind the default `tui` feature. `state.rs` is the pure prompt state and `update`; `keys.rs` is the one key table; `session.rs` performs effects through the one-step commands and quick-add; `render.rs` draws with ratatui; `terminal.rs` owns the `/dev/tty` inline viewport and raw mode.
+- `src/tui/` — `nib pick` and `nib board`, behind the default `tui` feature. `state.rs` is the pure prompt state and `update`, plus the delete confirmation shared with the board; `keys.rs` is pick's fixed key table; `session.rs` performs effects through the one-step commands, quick-add, and the scoped `task edit` flow; `render.rs` draws with ratatui; `terminal.rs` owns the `/dev/tty` inline viewport and raw mode.
+- `src/tui/board/` — `nib board`. `state.rs` is the pure board state: panes, BROWSE, FILTER, and CAPTURE, saved views, menus, and `update`/`resolve`; `keys.rs` turns terminal keys into configured keymap actions, text edits, or fixed menu keys; `render.rs` draws the three panes, footer, and overlays; `terminal.rs` owns the alternate screen and suspends it around the editor; `mod.rs` checks for a terminal and loads reminders and events.
 - `src/test_support.rs` — test-only helpers shared by unit tests.
 
 See [`STYLE.md`](STYLE.md) for the repository's concrete formatting, naming, architecture, error, unsafe, and lint rules.

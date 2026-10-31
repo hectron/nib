@@ -1,6 +1,6 @@
 # Keymaps
 
-Keymap settings are not yet used by any command. nib loads and validates them today, and `nib doctor` reports problems. Interactive use and generated key help arrive with the interactive board.
+[`nib board`](board.md) reads these settings: every key in BROWSE, FILTER, and CAPTURE runs the bound actions, and the board's footer and `?` help are generated from the active keymap. `nib pick` keeps its own fixed keys, listed in [Picking reminders](pick.md#keys). `nib doctor` validates the keymap.
 
 Bindings are grouped by input state:
 
@@ -32,6 +32,23 @@ A string runs one action. An array runs actions from left to right. Set a chord 
 Key tables merge chord by chord through the normal configuration precedence. A nearer file replaces only the chords it defines. Keymap tables are edited by hand; `nib config set` and `nib config unset` handle scalar settings such as `tui.preset`.
 
 `nib doctor` validates the active keymap. It reports invalid presets, states, chords, actions, canonical duplicate chords, and states without a `quit` or `cancel` binding.
+
+## How the board uses keys
+
+In FILTER and CAPTURE, a key that has no binding types or edits the text: printable characters insert, `backspace` and `ctrl-h` delete the previous character, `delete` deletes the next one, `ctrl-w` and `alt-backspace` delete the previous word, and `left`, `right`, `ctrl-b`, and `ctrl-f` move the cursor when they aren't bound. In BROWSE, an unbound key does nothing.
+
+On the board, the actions do this:
+
+- `up`, `down`, `page-up`, `page-down`, `top`, and `bottom` move in the focused pane, which is the lists or the items pane. In CAPTURE, `up`, `down`, `page-up`, and `page-down` move the item highlight.
+- `filter` enters FILTER with the current filter; `capture` and `add` enter CAPTURE from BROWSE. In FILTER, `add` adds the typed text as a reminder when it is plain text.
+- In FILTER, `accept` keeps the filter, or adds the reminder when the Add row is highlighted, and `keep-filter` always keeps it; `cancel` clears the filter; `clear-filter` empties the typed text. In BROWSE, `clear-filter` clears the kept filter.
+- In CAPTURE, `accept` adds the reminder, `cancel` discards the text, and the `priority-*` actions set the new reminder's priority, replacing any inline `!priority` and `task.priority`. Elsewhere they change the priority of the targets. Other actions, such as `next-pane`, `act-menu`, and `done`, do nothing in CAPTURE.
+- `done`, `reopen`, `move`, `edit`, and `delete` act on the selected reminders, or on the highlighted one.
+- `accept` in BROWSE focuses the items pane from the lists pane; `cancel` in BROWSE clears the selection.
+- `next-pane` and `prev-pane` switch between the lists and items panes, and `preview-toggle` hides or shows the details pane.
+- `help` shows the generated key help for the current state, and `quit` closes the board.
+
+Action menus and the delete confirmation use fixed keys; see [Menus and confirmations](board.md#menus-and-confirmations).
 
 ## Key chords
 
@@ -82,7 +99,8 @@ The defaults combine fzf and Telescope selection conventions, Emacs/readline con
 | `x` | `done` |
 | `r` | `reopen` |
 | `1`, `2`, `3`, `0` | `priority-high`, `priority-medium`, `priority-low`, `priority-none` |
-| `m`, `e`, `delete`, `n` | `move`, `edit`, `delete`, `add` |
+| `m`, `e`, `n` | `move`, `edit`, `add` |
+| `delete`, `backspace` | `delete` |
 | `q`, `esc`, `ctrl-c` | `quit` |
 | `?`, `f1` | `help` |
 | `enter` | `accept` |
@@ -124,6 +142,4 @@ The defaults combine fzf and Telescope selection conventions, Emacs/readline con
 | `esc`, `ctrl-c` | `cancel` |
 | `ctrl-q` | `quit` |
 | `f1` | `help` |
-| `tab`, `shift-tab` | `next-pane`, `prev-pane` |
-| `ctrl-o` | `act-menu` |
 | `alt-h`, `alt-m`, `alt-l`, `alt-n` | `priority-high`, `priority-medium`, `priority-low`, `priority-none` |
